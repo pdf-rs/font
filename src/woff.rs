@@ -1,0 +1,433 @@
+use brotli::reader::Decompressor;
+use std::io::Read;
+use std::convert::TryInto;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use inflate::inflate_bytes_zlib;
+
+use crate::{
+    R, IResultExt, Font,
+    truetype::{Shape, contour, compound, TrueTypeFont, parse_shapes},
+    parsers::{iterator, varint_u32, parse, count_map},
+    opentype::{Tables, parse_head, parse_hhea, parse_maxp, parse_hmtx, parse_hmtx_woff2_format1, parse_loca},
+};
+use vector::{Outline, Vector};
+use nom::{
+    bytes::complete::{tag, take},
+    number::complete::{be_u8, be_u16, be_i16, be_u32},
+    multi::count,
+    bits::{bits, complete::take as take_bits},
+    sequence::tuple,
+    combinator::map
+};
+
+pub fn woff<O: Outline + 'static>(data: &[u8]) -> Box<dyn Font<O>> {
+    Box::new(parse_woff::<O>(data).get()) as _
+}
+pub fn woff2<O: Outline + 'static>(data: &[u8]) -> Box<dyn Font<O>> {
+    Box::new(parse_woff2::<O>(data).get()) as _
+}
+
+fn parse_woff<O: Outline>(data: &[u8]) -> R<TrueTypeFont<O>> {
+    let (i, _) = tag(b"wOFF")(data)?;
+    let (i, flavor) = take(4usize)(i)?;
+    let (i, _length) = be_u32(i)?;
+    let (i, num_tables) = be_u16(i)?;
+    let (i, _reserved) = be_u16(i)?;
+    let (i, _total_sfnt_size) = be_u32(i)?;
+    let (i, _major_version) = be_u16(i)?;
+    let (i, _minor_version) = be_u16(i)?;
+    let (i, _meta_offset) = be_u32(i)?;
+    let (i, _meta_length) = be_u32(i)?;
+    let (i, _meta_orig_length) = be_u32(i)?;
+    let (i, _priv_offset) = be_u32(i)?;
+    let (i, _priv_length) = be_u32(i)?;
+    
+    dbg!(i.as_ptr() as usize - data.as_ptr() as usize);
+    let (mut i, tables_dir) = count(woff_dir_entry, num_tables as usize)(i)?;
+    
+    if flavor == b"ttcf" {
+        unimplemented!()
+    }
+    
+    let mut tables = HashMap::with_capacity(num_tables as usize);
+    for entry in tables_dir {
+        dbg!(String::from_utf8_lossy(&entry.tag));
+        dbg!(&entry);
+        let data = if entry.comp_length < entry.orig_length {
+            let compressed_data = parse(&mut i, take((entry.comp_length as usize + 3) & !3))?;
+            println!("decompressing");
+            let orig_data = inflate_bytes_zlib(&compressed_data[.. entry.comp_length as usize]).expect("can't decompress data");
+            dbg!(orig_data.len());
+            assert_eq!(orig_data.len(), entry.orig_length as usize);
+            Cow::Owned(orig_data)
+        } else {
+            let chunk = parse(&mut i, take((entry.orig_length as usize + 3) & !3))?;
+            Cow::Borrowed(&chunk[.. entry.orig_length as usize])
+        };
+        tables.insert(entry.tag, data);
+    }
+    
+    Ok((i, TrueTypeFont::parse_glyf(Tables { entries: tables })))
+}
+
+#[derive(Debug)]
+struct WoffDirEntry {
+    tag: [u8; 4],
+    offset: u32,
+    comp_length: u32,
+    orig_length: u32,
+}
+
+fn woff_dir_entry(i: &[u8]) -> R<WoffDirEntry> {
+    let (i, tag) = take(4usize)(i)?;
+    let (i, offset) = be_u32(i)?;
+    let (i, comp_length) = be_u32(i)?;
+    let (i, orig_length) = be_u32(i)?;
+    let (i, _checksum) = be_u32(i)?;
+    Ok((i, WoffDirEntry {
+        tag: tag.try_into().unwrap(), offset, comp_length, orig_length
+    }))
+}
+    
+pub fn parse_woff2<O: Outline>(i: &[u8]) -> R<TrueTypeFont<O>> {
+    let (i, _) = tag(b"wOF2")(i)?;
+    let (i, flavor) = take(4usize)(i)?;
+    let (i, _length) = be_u32(i)?;
+    let (i, num_tables) = be_u16(i)?;
+    let (i, _reserved) = be_u16(i)?;
+    let (i, _total_sfnt_size) = be_u32(i)?;
+    let (i, _total_compressed_size) = be_u32(i)?;
+    let (i, _major_version) = be_u16(i)?;
+    let (i, _minor_version) = be_u16(i)?;
+    let (i, _meta_offset) = be_u32(i)?;
+    let (i, _meta_length) = be_u32(i)?;
+    let (i, _priv_offset) = be_u32(i)?;
+    let (i, _priv_length) = be_u32(i)?;
+
+    let (i, entry_tables) = count_map(woff2_table_entry, num_tables as usize)(i)?;
+    
+    if flavor == b"ttcf" {
+        unimplemented!()
+    }
+    
+    let mut stream = Decompressor::new(i, 1024);
+    
+    let mut entries = HashMap::new();
+    for (&tag, entry) in &entry_tables {
+        let mut data = Vec::with_capacity(entry.orig_length as usize);
+        (&mut stream).take(entry.length as u64).read_to_end(&mut data).expect("failed to decode");
+        entries.insert(tag, data);
+    }
+    let tables = Tables { entries };
+    
+    let head = parse_head(tables.get(b"head").expect("no head")).get();
+    let hhea = parse_hhea(tables.get(b"hhea").expect("no hhea")).get();
+    let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
+    let hmtx_data = tables.get(b"hmtx").expect("no hmtx");
+    let glyf_data = tables.get(b"glyf").expect("no glyf");
+    
+    let hmtx = match entry_tables[b"hmtx"].flags {
+        0 => parse_hmtx(&hmtx_data, &hhea, &maxp).get(),
+        1 => parse_hmtx_woff2_format1(&hmtx_data, &head, &hhea, &maxp).get(),
+        f => panic!("invalid flag for hmtx: {}", f)
+    };
+    
+    let shapes = match entry_tables[b"glyf"].flags {
+        0 => parse_glyf_t0(&glyf_data).get(),
+        3 => {
+            let loca = parse_loca(tables.get(b"loca").expect("no loca"), &head, &maxp).get();
+            parse_shapes(&loca, glyf_data)
+        }
+        f => panic!("invalid flag for glyf: {}", f)
+    };
+    
+    Ok((i, TrueTypeFont::from_shapes_and_metrics(tables, shapes, hmtx)))
+}
+
+fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
+    let (i, num_glyphs) = be_u16(i)?;
+    let (i, _index_format) = be_u16(i)?;
+    let (i, n_contour_stream_size) = be_u32(i)?;
+    let (i, n_points_stream_size) = be_u32(i)?;
+    let (i, flag_stream_size) = be_u32(i)?;
+    let (i, glyph_stream_size) = be_u32(i)?;
+    let (i, composite_stream_size) = be_u32(i)?;
+    let (i, bbox_stream_size) = be_u32(i)?;
+    let (i, instruction_stream_size) = be_u32(i)?;
+    
+    let (i, n_contour_stream) = take(n_contour_stream_size)(i)?;
+    let (i, n_points_stream) = take(n_points_stream_size)(i)?;
+    let (i, mut flag_stream) = take(flag_stream_size)(i)?;
+    let (i, mut glyph_stream) = take(glyph_stream_size)(i)?;
+    let (i, mut composite_stream) = take(composite_stream_size)(i)?;
+    let (i, _bbox_bitmap) = take((num_glyphs + 7) / 8)(i)?;
+    let (i, _bbox_stream) = take(bbox_stream_size)(i)?;
+    let (i, _instruction_stream) = take(instruction_stream_size)(i)?;
+    
+    let mut contours = iterator(n_contour_stream, be_i16);
+    let mut points = iterator(n_points_stream, be_u32);
+    
+    let mut glyphs = Vec::with_capacity(num_glyphs as usize);
+    
+    for n_contour in contours {
+        match n_contour {
+            0 => glyphs.push(Shape::Empty),
+            -1 => glyphs.push(parse(&mut composite_stream, compound)?),
+            n if n > 0 => {
+                let mut outline = O::empty();
+                let (mut x, mut y) = (0i16, 0i16);
+                for n_points in (&mut points).take(n_contour as usize) {
+                    let flags = parse(&mut flag_stream, take(n_points))?;
+                    let points = iterator(flags, be_u8).map(|flag| {
+                        let on_curve = flag & 0x80 != 0;
+                        let triplet = TRIPLET_LUT[(flag & 0x7F) as usize];
+                        use nom::error::{ErrorKind};
+                        let (vx, vy): (i16, i16) = parse(&mut glyph_stream,
+                            bits::<_, _, (_, ErrorKind), (_, ErrorKind), _>(
+                                tuple((
+                                    take_bits(triplet.x_bits()),
+                                    take_bits(triplet.y_bits())
+                                ))
+                            )
+                        ).unwrap();
+                        
+                        let sign = |is_minus| if is_minus { -1 } else { 1 };
+                        x += sign(triplet.x_minus()) * (vx + triplet.dx() as i16);
+                        y += sign(triplet.y_minus()) * (vy + triplet.dy() as i16);
+                        
+                        (on_curve, Vector::new(x as f32, y as f32))
+                    });
+                    if let Some(contour) = contour(points) {
+                        outline.add_contour(contour);
+                    }
+                }
+                glyphs.push(Shape::Simple(outline));
+            }
+            _ => panic!("invalid number of contours")
+        }
+    }
+    
+    Ok((i, glyphs))
+}
+
+struct Entry {
+    flags: u8,
+    length: u32,
+    orig_length: u32
+}
+
+fn woff2_table_entry(i: &[u8]) -> R<([u8; 4], Entry)> {
+    let (i, b0) = be_u8(i)?;
+    let table_type = b0 & 0b11111;
+    let flags = b0 >> 5;
+    
+    let (i, tag) = match table_type {
+        63 => map(take(4usize), |s: &[u8]| s.try_into().unwrap())(i)?,
+        n => (i, TABLE_TAGS[n as usize])
+    };
+    
+    let (i, orig_length) = varint_u32(i)?;
+    let is_null_transform = match &tag {
+        b"glyf" | b"loca" => flags == 3,
+        _ => flags == 0
+    };
+    let (i, length) = match is_null_transform {
+        true => (i, orig_length),
+        false => varint_u32(i)?
+    };
+    
+    Ok((i, (tag, Entry {
+        flags,
+        length,
+        orig_length
+    })))
+}
+
+static TABLE_TAGS: [[u8; 4]; 63] = [
+    *b"cmap", *b"head", *b"hhea", *b"hmtx", *b"maxp", *b"name", *b"OS/2", *b"post",
+    *b"cvt ", *b"fpgm", *b"glyf", *b"loca", *b"prep", *b"CFF ", *b"VORG", *b"EBDT",
+    *b"EBLC", *b"gasp", *b"hdmx", *b"kern", *b"LTSH", *b"PCLT", *b"VDMX", *b"vhea",
+    *b"vmtx", *b"BASE", *b"GDEF", *b"GPOS", *b"GSUB", *b"EBSC", *b"JSTF", *b"MATH",
+    *b"CBDT", *b"CBLC", *b"COLR", *b"CPAL", *b"SVG ", *b"sbix", *b"acnt", *b"avar",
+    *b"bdat", *b"bloc", *b"bsln", *b"cvar", *b"fdsc", *b"feat", *b"fmtx", *b"fvar",
+    *b"gvar", *b"hsty", *b"just", *b"lcar", *b"mort", *b"morx", *b"opbd", *b"prop",
+    *b"trak", *b"Zapf", *b"Silf", *b"Glat", *b"Gloc", *b"Feat", *b"Sill"
+];
+
+macro_rules! is_minus {
+    (-) => (1);
+    (+) => (0);
+}
+
+macro_rules! lut {
+    ($($bytes:tt $xbits:tt $ybits:tt $dx:tt $dy:tt $xsign:tt $ysign:tt; )*) => (
+        [ $( Triplet (
+            ($bytes - 2)      <<  0 |        // 2 bits
+            ($xbits / 4)      <<  2 |        // 3 bits
+            ($ybits / 4)      <<  5 |        // 3 bits
+            ($dx)             <<  8 |        // 11 bits 
+            ($dy)             << 19 |        // 11 bits
+            is_minus!($xsign) << 30 |        // 1 bit
+            is_minus!($ysign) << 31          // 1 bit
+        ) ),* ]
+    )
+}
+
+#[derive(Copy, Clone)]
+pub struct Triplet(u32);
+impl Triplet {
+    pub fn num_bytes(&self) -> usize {
+        (2 + self.0 & 0b11) as usize
+    }
+    pub fn x_bits(&self) -> u8 {
+        (4 * (self.0 >> 2) & 0b111) as u8
+    }
+    pub fn y_bits(&self) -> u8 {
+        (4 * (self.0 >> 5) & 0b111) as u8
+    }
+    pub fn dx(&self) -> u16 {
+        ((self.0 >> 8) & 0b111_1111_1111) as u16
+    }
+    pub fn dy(&self) -> u16 {
+        ((self.0 >> 19) & 0b111_1111_1111) as u16
+    }
+    pub fn x_minus(&self) -> bool {
+        self.0 & (1 << 30) != 0
+    }
+    pub fn y_minus(&self) -> bool {
+        self.0 & (1 << 31) != 0
+    }
+}
+
+pub static TRIPLET_LUT: [Triplet; 128] = lut!( /*
+bytes   xbits   ybits   dx      dy      xsign   ysign */
+2	0	8	0	0	+	-;
+2	0	8	0	0	+	+;
+2	0	8	0	256	+	-;
+2	0	8	0	256	+	+;
+2	0	8	0	512	+	-;
+2	0	8	0	512	+	+;
+2	0	8	0	768	+	-;
+2	0	8	0	768	+	+;
+2	0	8	0	1024	+	-;
+2	0	8	0	1024	+	+;
+2	8	0	0	0	-	+;
+2	8	0	0	0	+	+;
+2	8	0	256	0	-	+;
+2	8	0	256	0	+	+;
+2	8	0	512	0	-	+;
+2	8	0	512	0	+	+;
+2	8	0	768	0	-	+;
+2	8	0	768	0	+	+;
+2	8	0	1024	0	-	+;
+2	8	0	1024	0	+	+;
+2	4	4	1	1	-	-;
+2	4	4	1	1	+	-;
+2	4	4	1	1	-	+;
+2	4	4	1	1	+	+;
+2	4	4	1	17	-	-;
+2	4	4	1	17	+	-;
+2	4	4	1	17	-	+;
+2	4	4	1	17	+	+;
+2	4	4	1	33	-	-;
+2	4	4	1	33	+	-;
+2	4	4	1	33	-	+;
+2	4	4	1	33	+	+;
+2	4	4	1	49	-	-;
+2	4	4	1	49	+	-;
+2	4	4	1	49	-	+;
+2	4	4	1	49	+	+;
+2	4	4	17	1	-	-;
+2	4	4	17	1	+	-;
+2	4	4	17	1	-	+;
+2	4	4	17	1	+	+;
+2	4	4	17	17	-	-;
+2	4	4	17	17	+	-;
+2	4	4	17	17	-	+;
+2	4	4	17	17	+	+;
+2	4	4	17	33	-	-;
+2	4	4	17	33	+	-;
+2	4	4	17	33	-	+;
+2	4	4	17	33	+	+;
+2	4	4	17	49	-	-;
+2	4	4	17	49	+	-;
+2	4	4	17	49	-	+;
+2	4	4	17	49	+	+;
+2	4	4	33	1	-	-;
+2	4	4	33	1	+	-;
+2	4	4	33	1	-	+;
+2	4	4	33	1	+	+;
+2	4	4	33	17	-	-;
+2	4	4	33	17	+	-;
+2	4	4	33	17	-	+;
+2	4	4	33	17	+	+;
+2	4	4	33	33	-	-;
+2	4	4	33	33	+	-;
+2	4	4	33	33	-	+;
+2	4	4	33	33	+	+;
+2	4	4	33	49	-	-;
+2	4	4	33	49	+	-;
+2	4	4	33	49	-	+;
+2	4	4	33	49	+	+;
+2	4	4	49	1	-	-;
+2	4	4	49	1	+	-;
+2	4	4	49	1	-	+;
+2	4	4	49	1	+	+;
+2	4	4	49	17	-	-;
+2	4	4	49	17	+	-;
+2	4	4	49	17	-	+;
+2	4	4	49	17	+	+;
+2	4	4	49	33	-	-;
+2	4	4	49	33	+	-;
+2	4	4	49	33	-	+;
+2	4	4	49	33	+	+;
+2	4	4	49	49	-	-;
+2	4	4	49	49	+	-;
+2	4	4	49	49	-	+;
+2	4	4	49	49	+	+;
+3	8	8	1	1	-	-;
+3	8	8	1	1	+	-;
+3	8	8	1	1	-	+;
+3	8	8	1	1	+	+;
+3	8	8	1	257	-	-;
+3	8	8	1	257	+	-;
+3	8	8	1	257	-	+;
+3	8	8	1	257	+	+;
+3	8	8	1	513	-	-;
+3	8	8	1	513	+	-;
+3	8	8	1	513	-	+;
+3	8	8	1	513	+	+;
+3	8	8	257	1	-	-;
+3	8	8	257	1	+	-;
+3	8	8	257	1	-	+;
+3	8	8	257	1	+	+;
+3	8	8	257	257	-	-;
+3	8	8	257	257	+	-;
+3	8	8	257	257	-	+;
+3	8	8	257	257	+	+;
+3	8	8	257	513	-	-;
+3	8	8	257	513	+	-;
+3	8	8	257	513	-	+;
+3	8	8	257	513	+	+;
+3	8	8	513	1	-	-;
+3	8	8	513	1	+	-;
+3	8	8	513	1	-	+;
+3	8	8	513	1	+	+;
+3	8	8	513	257	-	-;
+3	8	8	513	257	+	-;
+3	8	8	513	257	-	+;
+3	8	8	513	257	+	+;
+3	8	8	513	513	-	-;
+3	8	8	513	513	+	-;
+3	8	8	513	513	-	+;
+3	8	8	513	513	+	+;
+4	12	12	0	0	-	-;
+4	12	12	0	0	+	-;
+4	12	12	0	0	-	+;
+4	12	12	0	0	+	+;
+5	16	16	0	0	-	-;
+5	16	16	0	0	+	-;
+5	16	16	0	0	-	+;
+5	16	16	0	0	+	+;
+);
