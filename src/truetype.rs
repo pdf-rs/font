@@ -22,7 +22,7 @@ pub enum Shape<O: Outline> {
 }
 pub struct TrueTypeFont<O: Outline> {
     shapes: Vec<Shape<O>>,
-    cmap: Option<HashMap<u32, u16>>,
+    cmap: Option<HashMap<u32, u32>>,
     hmtx: Hmtx,
     units_per_em: u16,
     bbox: Rect
@@ -106,7 +106,7 @@ impl<O: Outline> Font<O> for TrueTypeFont<O> {
     fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<u32> {
         debug!("glyph for unicode codepoint {0} ({0:#x})", codepoint);
         match self.cmap {
-            Some(ref cmap) => cmap.get(&codepoint).map(|&gid| gid as u32),
+            Some(ref cmap) => cmap.get(&codepoint).cloned(),
             None => None
         }
     }

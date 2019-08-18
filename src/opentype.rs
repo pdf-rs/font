@@ -126,33 +126,37 @@ pub fn parse_loca<'a>(i: &'a [u8], head: &Head, maxp: &Maxp) -> R<'a, Vec<u32>> 
         _ => panic!("invalid index_to_loc_format")
     }
 }
-pub fn parse_cmap(input: &[u8]) -> R<HashMap<u32, u16>> {
+pub fn parse_cmap(input: &[u8]) -> R<HashMap<u32, u32>> {
     let (i, _version) = be_u16(input)?;
     let (i, num_tables) = be_u16(i)?;
     
-    let offset = iterator(i, tuple((be_u16, be_u16, be_u32))).take(num_tables as usize)
+    let tables = iterator(i, tuple((be_u16, be_u16, be_u32))).take(num_tables as usize)
         .filter_map(|entry| match entry {
             (0, _, off) | (3, 10, off) | (3, 1, off) => Some(off),
             _ => None
         })
-        .next();
+        .filter_map(|off| input.get(off as usize ..));
     
-    let mut cmap: HashMap<u32, u16> = HashMap::new();
-    if let Some(table) = offset.and_then(|off| input.get(off as usize ..)) {
+    let mut cmap = HashMap::new();
+    for table in tables {
         let (i, format) = be_u16(table)?;
         debug!("cmap format {}", format);
-        let (i, len) = be_u16(i)?;
-        let (_i, data) = take(len - 4)(i)?; // aleady have 4 header bytes
         match format {
             0 => {
+                let (i, len) = be_u16(i)?;
+                let (_i, data) = take(len - 4)(i)?; // aleady have 4 header bytes
+                
                 let (i, _language) = be_u16(data)?;
                 for (code, gid) in iterator(i, be_u8).enumerate() {
                     if code != 0 {
-                        cmap.insert(code as u32, gid as u16);
+                        cmap.insert(code as u32, gid as u32);
                     }
                 }
             }
             4 => {
+                let (i, len) = be_u16(i)?;
+                let (_i, data) = take(len - 4)(i)?; // aleady have 4 header bytes
+                
                 let (i, _language) = be_u16(data)?;
                 let (i, segCountX2) = be_u16(i)?;
                 let (i, _searchRange) = be_u16(i)?;
@@ -169,6 +173,7 @@ pub fn parse_cmap(input: &[u8]) -> R<HashMap<u32, u16>> {
                     iterator(idDelta, be_u16),
                     iterator(idRangeOffset, be_u16)
                 ).into_iter().enumerate() {
+                    debug!("start={}, end={}, delta={}, offset={}", start, end, delta, offset);
                     if start == 0xFFFF && end == 0xFFFF {
                         break;
                     }
@@ -176,7 +181,7 @@ pub fn parse_cmap(input: &[u8]) -> R<HashMap<u32, u16>> {
                         for c in start ..= end {
                             let gid = delta.wrapping_add(c);
                             debug!("codepoint {} -> gid {}", c, gid);
-                            cmap.insert(c as u32, gid);
+                            cmap.insert(c as u32, gid as u32);
                         }
                     } else {
                         for c in start ..= end {
@@ -188,9 +193,24 @@ pub fn parse_cmap(input: &[u8]) -> R<HashMap<u32, u16>> {
                             if gid != 0 {
                                 let gid = gid.wrapping_add(delta);
                                 debug!("codepoint {} -> gid {}", c, gid);
-                                cmap.insert(c as u32, gid);
+                                cmap.insert(c as u32, gid as u32);
                             }
                         }
+                    }
+                }
+            }
+            12 => {
+                let (i, _reserved) = be_u16(i)?;
+                let (i, len) = be_u32(i)?;
+                let (_i, data) = take(len - 8)(i)?; // aleady have 8 header bytes
+                
+                let (i, _language) = be_u32(data)?;
+                let (i, num_groups) = be_u32(i)?;
+                for (start_code, end_code, start_gid) in iterator(i, tuple((be_u32, be_u32, be_u32))).take(num_groups as usize) {
+                    debug!("start_code={}, end_code={}, start_gid={}", start_code, end_code, start_gid);
+                    for (code, gid) in (start_code ..= end_code).zip(start_gid ..) {
+                        debug!("codepoint {} -> gid {}", code, gid);
+                        cmap.insert(code, gid);
                     }
                 }
             }
