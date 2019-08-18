@@ -8,12 +8,13 @@ use indexmap::IndexMap;
 use crate::{Font, Glyph, State, v, R, IResultExt, Context};
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
-use vector::{Outline, Transform};
+use vector::{Outline, Transform, Rect, Vector};
 
 pub struct Type1Font<O: Outline> {
     glyphs: IndexMap<u32, Glyph<O>>, // codepoint -> glyph
     names: HashMap<String, u32>, // name -> glyph id
-    font_matrix: Transform
+    font_matrix: Transform,
+    bbox: Option<Rect>
 }
 impl<O: Outline> Font<O> for Type1Font<O> {
     fn num_glyphs(&self) -> u32 {
@@ -30,6 +31,9 @@ impl<O: Outline> Font<O> for Type1Font<O> {
     }
     fn gid_for_name(&self, name: &str) -> Option<u32> {
         self.names.get(name).cloned()
+    }
+    fn bbox(&self) -> Option<Rect> {
+        self.bbox
     }
 }
 
@@ -102,6 +106,12 @@ impl<O: Outline> Type1Font<O> {
         let font_matrix = font_dict.get("FontMatrix").unwrap().as_array().unwrap();
         assert_eq!(font_matrix.len(), 6);
         
+        let bbox = font_dict.get("FontBBox")
+            .map(|val| {
+                let (a, b, c, d) = TupleElements::from_iter(val.as_array().unwrap().iter().map(|v| v.as_f32().unwrap())).unwrap();
+                Rect::new(Vector::new(a, b), Vector::new(c, d))
+            });
+        
         let (a, b, c, d, e, f) = TupleElements::from_iter(
                 font_matrix.iter().map(|item| item.as_f32().unwrap())
         ).unwrap();
@@ -109,7 +119,8 @@ impl<O: Outline> Type1Font<O> {
         Type1Font {
             font_matrix: Transform::row_major(a, b, c, d, e, f),
             glyphs,
-            names
+            names,
+            bbox
         }
     }
 }

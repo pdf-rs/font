@@ -9,9 +9,9 @@ use nom::{
     bytes::complete::take,
     sequence::tuple
 };
-use vector::{Outline, Contour, Transform, Vector};
+use vector::{Outline, Contour, Transform, Vector, Rect};
 use crate::opentype::{parse_tables, parse_head, parse_maxp, parse_loca, parse_cmap, parse_hhea, parse_hmtx, Hmtx, Tables};
-use pathfinder_geometry::{transform2d::Matrix2x2F, rect::RectF};
+use pathfinder_geometry::{transform2d::Matrix2x2F};
 use itertools::Itertools;
 
 #[derive(Clone)]
@@ -25,7 +25,7 @@ pub struct TrueTypeFont<O: Outline> {
     cmap: Option<HashMap<u32, u16>>,
     hmtx: Hmtx,
     units_per_em: u16,
-    bbox: RectF
+    bbox: Rect
 }
 
 impl<O: Outline> TrueTypeFont<O> {
@@ -54,7 +54,7 @@ impl<O: Outline> TrueTypeFont<O> {
         let cvt = |i: i16| i as f32;
         let bb_min = Vector::new(cvt(head.x_min), cvt(head.y_min));
         let bb_max = Vector::new(cvt(head.x_max), cvt(head.y_max));
-        let bbox = RectF::new(bb_min, bb_max - bb_min);
+        let bbox = Rect::from_points(bb_min, bb_max);
         
         TrueTypeFont {
             shapes,
@@ -113,7 +113,7 @@ impl<O: Outline> Font<O> for TrueTypeFont<O> {
     fn encoding(&self) -> Option<Encoding> {
         Some(Encoding::Unicode)
     }
-    fn bbox(&self) -> Option<RectF> {
+    fn bbox(&self) -> Option<Rect> {
         Some(self.bbox)
     }
 }

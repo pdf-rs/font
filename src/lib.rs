@@ -7,11 +7,7 @@ use std::convert::TryInto;
 use nom::{IResult, Err::*, error::VerboseError};
 use tuple::{TupleElements};
 use encoding::Encoding;
-use vector::{Outline, Vector, PathBuilder, Transform, Surface};
-use pathfinder_geometry::{
-    rect::RectF,
-    transform2d::Transform2F
-};
+use vector::{Outline, Vector, PathBuilder, Transform, Surface, Rect};
 
 #[derive(Clone)]
 pub struct Glyph<O: Outline> {
@@ -22,11 +18,14 @@ pub struct Glyph<O: Outline> {
     pub path: O 
 }
 
+#[derive(Copy, Clone)]
+pub struct VMetrics {
+    pub line_gap: f32
+}
+
 pub trait Font<O: Outline> {
     fn num_glyphs(&self) -> u32;
-    fn font_matrix(&self) -> Transform {
-        Transform::default()
-    }
+    fn font_matrix(&self) -> Transform;
     fn glyph(&self, gid: u32) -> Option<Glyph<O>>;
     fn glyphs(&self) -> Glyphs<O> {
         Glyphs {
@@ -51,7 +50,10 @@ pub trait Font<O: Outline> {
     fn get_notdef_gid(&self) -> u32 {
         0
     }
-    fn bbox(&self) -> Option<RectF> {
+    fn bbox(&self) -> Option<Rect> {
+        None
+    }
+    fn vmetrics(&self) -> Option<VMetrics> {
         None
     }
 }
@@ -70,17 +72,20 @@ pub fn draw_text<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: 
         .filter_map(|gid| font.glyph(gid))
         .collect();
     
-    let width: f32 = glyphs.iter().map(|glyph| glyph.width).sum::<f32>() * font.font_matrix().m11();
-    let mut surface = S::new(Vector::new(width * font_size, font_size));
+    let bbox = font.bbox().expect("no bbox");
+    let width: f32 = glyphs.iter().map(|glyph| dbg!(glyph.width)).sum::<f32>() * font.font_matrix().m11();
+    dbg!(width);
+    let height = bbox.size().y() * font.font_matrix().m22();
+    let mut surface = S::new(Vector::new(width * font_size, font_size * height));
     let black = surface.color_rgb(0, 0, 0);
-    let y0 = -font.bbox().map(|r| r.origin().y()).unwrap_or(0.);
-    let mut offset = Vector::new(0., y0);
+    let y0 = bbox.origin().y();
+    let mut offset = Vector::new(0., -y0);
     for glyph in glyphs {
-        let transform = Transform2F::from_scale(Vector::splat(font_size))
-            * Transform2F::from_translation(Vector::new(0.0, 1.0))
-            * Transform2F::from_scale(Vector::new(1.0, -1.0))
+        let transform = Transform::from_scale(Vector::splat(font_size))
+            * Transform::from_translation(Vector::new(0., height))
+            * Transform::from_scale(Vector::new(1.0, -1.0))
             * font.font_matrix()
-            * Transform2F::from_translation(offset);
+            * Transform::from_translation(offset);
         
         surface.draw_path(glyph.path.transform(transform), Some(&black), None);
         offset = offset + Vector::new(glyph.width as f32, 0.);

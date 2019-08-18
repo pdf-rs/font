@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::iter::once;
 use std::borrow::Cow;
-use crate::{Font, Glyph, Value, Context, State, type1, type2, IResultExt, R};
+use crate::{Font, Glyph, Value, Context, State, type1, type2, IResultExt, R, VMetrics};
 use nom::{
     number::complete::{be_u8, be_u16, be_i16, be_u24, be_u32, be_i32},
     bytes::complete::{take},
@@ -14,7 +14,7 @@ use nom::{
     Err::*,
 };
 use encoding::{Encoding};
-use vector::{Outline, Transform, Vector};
+use vector::{Outline, Transform, Vector, Rect};
 use tuple::TupleElements;
 
 pub struct CffFont<O: Outline> {
@@ -22,7 +22,9 @@ pub struct CffFont<O: Outline> {
     font_matrix: Transform,
     codepoint_map: [u16; 256],  // codepoint -> glyph index
     name_map: HashMap<String, u16>,
-    encoding: Option<Encoding>
+    encoding: Option<Encoding>,
+    bbox: Option<Rect>,
+    vmetrics: Option<VMetrics>
 }
 
 impl<O: Outline> CffFont<O> {
@@ -69,6 +71,12 @@ impl<O: Outline> Font<O> for CffFont<O> {
     fn get_notdef_gid(&self) -> u32 {
         0
     }
+    fn bbox(&self) -> Option<Rect> {
+        self.bbox
+    }
+    fn vmetrics(&self) -> Option<VMetrics> {
+        self.vmetrics
+    }
 }
 
 pub fn read_cff(data: &[u8]) -> R<Cff> {
@@ -114,6 +122,12 @@ impl<'a> Cff<'a> {
         let data = self.dict_index.get(idx).expect("font not found");
         let top_dict = dict(data).unwrap().1;
         info!("top dict: {:?}", top_dict);
+        
+        let bbox = top_dict.get(&Operator::FontBBox)
+            .map(|arr| {
+                let (a, b, c, d) = TupleElements::from_iter(arr.iter().map(|&v| v.to_float())).unwrap();
+                Rect::new(Vector::new(a, b), Vector::new(c, d))
+            });
         
         let font_matrix = top_dict.get(&Operator::FontMatrix)
             .map(|arr| {
@@ -272,13 +286,19 @@ impl<'a> Cff<'a> {
                 path: state.into_path()
             }
         }).collect();
+        /*
+        let vmetrics = VMetrics {
+            line_gap: hhea.line_gap
+        };*/
         
         CffFont {
             glyphs,
             font_matrix,
             codepoint_map: cmap,
             name_map,
-            encoding
+            encoding,
+            bbox,
+            vmetrics: None
         }
     }
 }
@@ -346,7 +366,7 @@ fn offset(size: u8) -> impl Fn(&[u8]) -> R<u32> {
 fn float(data: &[u8]) -> R<f32> {
     let mut pos = 0;
     let mut next_nibble = || -> u8 {
-        let nibble = (data[pos/2] >> (4 * (pos & 1) as u8)) & 0xf;
+        let nibble = (data[pos/2] >> (4 * (1 - (pos & 1)) as u8)) & 0xf;
         pos += 1;
         nibble
     };
