@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use std::collections::HashMap;
 use std::hash::Hash;
 use nom::{
-    bytes::complete::{take_till, take_till1, take_while, tag},
+    bytes::complete::{take_till, take_till1, take_while, take_while_m_n, tag},
     number::complete::{be_u8, be_u16},
     sequence::{delimited, tuple, preceded, terminated},
     combinator::{opt, map, recognize},
@@ -253,7 +253,7 @@ pub fn token(i: &[u8]) -> R<Token> {
             map(string, |v| Token::String(v)),
             map(name, |s| Token::Name(s))
         )),
-        take_while(word_sep)
+        take_while_m_n(0, 1, word_sep)
     )(i)
 }
 

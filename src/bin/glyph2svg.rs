@@ -4,7 +4,7 @@ use std::env;
 use std::error::Error;
 use pathfinder_geometry::transform2d::Transform2F;
 use font::{Font, parse};
-use vector::{Svg, Surface, Outline, Vector};
+use vector::{Svg, Surface, Outline, Vector, PathStyle};
 use raqote::DrawTarget;
 
 fn draw_glyph<S: Surface + 'static>(file: &str, glyph: &str) -> S {
@@ -20,17 +20,18 @@ fn draw_glyph<S: Surface + 'static>(file: &str, glyph: &str) -> S {
     let scale = Vector::new(400., 400.);
     let size = scale * (font.font_matrix() * bbox.size());
     let mut surface = S::new(size);
-    let fill = surface.color_rgba(0, 0, 255, 100);
-    let stroke_color = surface.color_rgba(0, 0, 0, 255);
-    let stroke_style = surface.stroke(0.1);
-    
+    let style = PathStyle {
+        fill: Some((0, 0, 255, 100)),
+        stroke: Some(((0, 0, 0, 255), 0.1))
+    };
+    let style = surface.build_style(style);
     let transform = Transform2F::from_scale(scale)
         * Transform2F::from_scale(Vector::new(1.0, -1.0))
         * font.font_matrix()
         * Transform2F::from_translation(Vector::new(0., -bbox.size().y()) - bbox.origin());
     dbg!(transform);
     let mut outline = font.glyph(gid).unwrap().path.transform(transform);
-    surface.draw_path(outline, Some(&fill), Some((&stroke_color, &stroke_style)));
+    surface.draw_path(outline, &style);
     surface
 }
 

@@ -9,7 +9,7 @@ use pathfinder_geometry::{
 };
 use pathfinder_content::outline::{Outline};
 use font::{Font, parse};
-use vector::{Svg, Surface};
+use vector::{Svg, Surface, PathStyle};
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
@@ -30,7 +30,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("{} glyphs in {} by {}", num_glyphs, glyphs_x, glyphs_y);
     
     let mut surface = Svg::new(size);
-    let black = surface.color_rgb(0, 0, 0);
+    let style = PathStyle {
+        fill: Some((0, 0, 0, 100)),
+        stroke: None
+    };
+    let style = surface.build_style(style);
     
     for gid in 0 .. num_glyphs {
         let y = gid as u32 / glyphs_x;
@@ -44,7 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         
         let mut outline = font.glyph(gid).unwrap().path;
         outline.transform(&transform);
-        surface.draw_path(outline, Some(&black), None);
+        surface.draw_path(outline, &style);
     }
     fs::write("font.svg", surface.finish());
     

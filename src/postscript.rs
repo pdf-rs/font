@@ -849,9 +849,11 @@ impl Vm {
         }
     }
     pub fn step(&mut self, input: &mut Input) {
+        input.parse(space);
         if let Some(_) = input.try_parse(comment) {
             return;
         }
+        
         let tk = input.parse(token);
         
         debug!("token: {:?}", tk);
@@ -860,7 +862,6 @@ impl Vm {
     pub fn parse_and_exec(&mut self, data: &[u8]) {
         let mut input = Input::new(data);
         // skip leading whitespace
-        input.parse(space);
         
         while input.len() > 0 {
             self.step(&mut input);
