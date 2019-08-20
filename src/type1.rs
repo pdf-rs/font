@@ -60,9 +60,9 @@ impl<O: Outline> Type1Font<O> {
         debug!("FontDict keys: {:?}", font_dict.iter().map(|(k, _)| k).format(", "));
         debug!("Private keys: {:?}", private_dict.iter().map(|(k, _)| k).format(", "));
         
-        let char_strings = font_dict.get("CharStrings").unwrap().as_dict().unwrap();
+        let char_strings = font_dict.get("CharStrings").expect("no /CharStrings").as_dict().unwrap();
         
-        let subrs: Vec<Vec<u8>> = private_dict.get("Subrs").unwrap()
+        let subrs: Vec<Vec<u8>> = private_dict.get("Subrs").expect("no /Subrs")
             .as_array().unwrap().iter()
             .map(|item| Decoder::charstring().decode(item.as_bytes().unwrap(), len_iv).into())
             .collect();
@@ -74,7 +74,7 @@ impl<O: Outline> Type1Font<O> {
             global_subrs: ()
         };
 
-        let encoding = font_dict.get("Encoding").unwrap().as_array().unwrap();
+        let encoding = font_dict.get("Encoding").expect("no /Encoding").as_array().expect("/Encoding is not an array");
         
         let mut names = HashMap::new();
         let mut glyphs = IndexMap::new();
@@ -85,6 +85,7 @@ impl<O: Outline> Type1Font<O> {
                 RefItem::Literal(b".notdef") => {},
                 RefItem::Literal(name) => {
                     let name = std::str::from_utf8(name).unwrap();
+                    debug!("glyph: {}", name);
                     let char_string = char_strings.get(name).unwrap().as_bytes().unwrap();
                     
                     let decoded = Decoder::charstring().decode(&char_string, len_iv);
@@ -174,6 +175,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
     where O: Outline, T: TryIndex + 'a, U: TryIndex + 'a
 {
     while input.len() > 0 {
+        debug!("input: {:?}", &input[.. input.len().min(10)]);
         let (i, b0) = be_u8(input)?;
         let i = match b0 {
             1 => { // ⊦ y dy hstem (1) ⊦
@@ -235,8 +237,8 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             10 => { // subr# callsubr (10) –
-                debug!("callsubr");
                 let subr_nr = s.pop().to_int();
+                debug!("callsubr {}", subr_nr);
                 let subr = ctx.subr(subr_nr);
                 charstring(subr, ctx, s)?;
                 i
@@ -382,6 +384,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
             c => panic!("unknown code {}", c)
         };
         
+        debug!("stack: {:?}", s.stack);
         input = i;
     };
     

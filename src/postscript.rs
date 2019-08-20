@@ -15,10 +15,10 @@ new_key_type! {
     pub struct StringKey;
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct LitKey(usize);
 
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum Item {
     Null,
     Bool(bool),
@@ -34,8 +34,29 @@ pub enum Item {
     File
 }
 
+fn recursive_trap(item: Item, f: &mut fmt::Formatter<'_>, mut func: impl FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result) -> fmt::Result {
+    use std::cell::RefCell;
+    
+    #[thread_local]
+    static STACK: RefCell<Vec<Item>> = RefCell::new(Vec::new());
+    {
+        let stack = &mut *STACK.borrow_mut();
+        if stack.contains(&item) {
+            return write!(f, "...");
+        }
+        stack.push(item);
+    }
+    
+    func(f)?;
+    
+    let item2 = STACK.borrow_mut().pop().unwrap();
+    assert_eq!(item, item2);
+    Ok(())
+}
+
 #[derive(Copy, Clone)]
 pub struct RefDict<'a> {
+    item: Item,
     vm: &'a Vm,
     dict: &'a Dictionary
 }
@@ -53,14 +74,23 @@ impl<'a> RefDict<'a> {
         self.dict.len()
     }
 }
+
 impl<'a> fmt::Debug for RefDict<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_map().entries(self.iter()).finish()
+        let vm = self.vm;
+        recursive_trap(self.item, f, move |f| {
+            f.debug_map().entries(
+                self.dict.iter()
+                .map(move |(&k, &v)| (RefItem::new(vm, k), RefItem::new(vm, v)))
+            )
+            .finish()
+        })
     }
 }
 
 #[derive(Copy, Clone)]
 pub struct RefArray<'a> {
+    item: Item,
     vm: &'a Vm,
     array: &'a Array
 }
@@ -80,11 +110,16 @@ impl<'a> RefArray<'a> {
 }
 impl<'a> fmt::Debug for RefArray<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.iter()).finish()
+        let vm = self.vm;
+        recursive_trap(self.item, f, move |f| {
+            f.debug_list().entries(self.array.iter().map(move |&item| RefItem::new(vm, item)))
+            .finish()
+        })
     }
 }
 
 pub enum RefItem<'a> {
+    Recursive,
     Null,
     Bool(bool),
     Int(i32),
@@ -108,8 +143,8 @@ impl<'a> RefItem<'a> {
             Item::Bool(b) => RefItem::Bool(b),
             Item::Int(i) => RefItem::Int(i),
             Item::Real(r) => RefItem::Real(r.into()),
-            Item::Dict(key) => RefItem::Dict(RefDict { vm, dict: vm.get_dict(key) }),
-            Item::Array(key) => RefItem::Array(RefArray { vm, array: vm.get_array(key) }),
+            Item::Dict(key) => RefItem::Dict(RefDict { item, vm, dict: vm.get_dict(key) }),
+            Item::Array(key) => RefItem::Array(RefArray { item, vm, array: vm.get_array(key) }),
             Item::String(key) => RefItem::String(vm.get_string(key)),
             Item::Name(key) => RefItem::Name(vm.get_lit(key)),
             Item::Literal(key) => RefItem::Literal(vm.get_lit(key)),
@@ -160,6 +195,7 @@ impl<'a> RefItem<'a> {
 impl<'a> fmt::Debug for RefItem<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            RefItem::Recursive => write!(f, "..."),
             RefItem::Null => write!(f, "Null"),
             RefItem::Mark => write!(f, "Mark"),
             RefItem::File => write!(f, "File"),
@@ -232,10 +268,13 @@ pub enum Operator {
     NoAccess,
     Pop,
     Put,
+    Known,
     ReadOnly,
     ReadString,
     String,
     True,
+    If,
+    IfElse,
 }
 
 macro_rules! map {
@@ -264,7 +303,10 @@ const OPERATOR_MAP: &[(&'static str, Operator)] = {
         "eexec"         => Eexec,
         "false"         => False,
         "get"           => Get,
+        "if"            => If,
+        "ifelse"        => IfElse,
         "index"         => Index,
+        "known"         => Known,
         "mark"          => Mark,
         "noaccess"      => NoAccess,
         "pop"           => Pop,
@@ -318,7 +360,11 @@ impl<'a> Input<'a> {
                 self.advance(n);
                 Some(t)
             },
-            Err(_) => None
+            Err(_) => {
+                let slice = &self.data[.. self.data.len().min(20)];
+                debug!("input: {:?} {:?}", String::from_utf8_lossy(slice), slice);
+                None
+            }
         }
     }
     fn parse<T>(&mut self, parser: impl Fn(&'a [u8]) -> R<'a, T>) -> T {
@@ -351,14 +397,36 @@ impl Vm {
             dict_stack: Vec::new(),
             stack: Vec::new(),
         };
-        let system_dict = OPERATOR_MAP.iter()
+        let mut system_dict: Dictionary = OPERATOR_MAP.iter()
             .map(|&(name, op)| (Item::Literal(vm.make_lit(name.as_bytes())), Item::Operator(op))) 
             .collect();
         
-        let key = vm.make_dict(system_dict, Mode { write: false, execute: false, read: true });
-        vm.push_dict(key);
+        // systemdict fuckery
+        {
+            let key = vm.make_dict(system_dict, Mode { write: true, execute: false, read: true });
+            vm.push_dict(key);
+            let lit = vm.make_lit(b"systemdict");
+            let (ref mut dict, ref mut mode) = vm.dicts[key];
+            dict.insert(Item::Literal(lit), Item::Dict(key));
+            mode.write = false;
+        }
         
-        let key = vm.make_dict(Dictionary::new(), Mode { write: true, execute: false, read: true });
+        
+        let mut user_dict = Dictionary::new();
+        
+        let font_dict = vm.make_dict(Dictionary::new(), Mode { write: true, execute: false, read: true });
+        user_dict.insert(Item::Literal(vm.make_lit(b"FontDirectory")), Item::Dict(font_dict));
+        
+        // StandardEncoding …
+        {
+            use crate::cff::{STANDARD_STRINGS, STANDARD_ENCODING};
+            let arr = STANDARD_ENCODING.iter().map(|&sid|
+                Item::Literal(vm.make_lit(STANDARD_STRINGS[sid as usize].as_bytes()))
+            ).collect();
+            let standard_encoding = vm.make_array(arr, Mode { write: false, execute: false, read: true });
+            user_dict.insert(Item::Literal(vm.make_lit(b"StandardEncoding")), Item::Array(standard_encoding));
+        }
+        let key = vm.make_dict(user_dict, Mode { write: true, execute: false, read: true });
         vm.push_dict(key);
         
         vm
@@ -366,7 +434,7 @@ impl Vm {
     pub fn fonts<'a>(&'a self) -> impl Iterator<Item=(&'a str, RefDict<'a>)> {
         self.fonts.iter().map(move |(key, &dict)| (
             key.as_str(),
-            RefDict { vm: self, dict: self.get_dict(dict) }
+            RefDict { item: Item::Null, vm: self, dict: self.get_dict(dict) }
         ))
     }
     fn pop_tuple<T>(&mut self) -> T where
@@ -394,8 +462,8 @@ impl Vm {
     fn get_lit(&self, LitKey(index): LitKey) -> &[u8] {
         self.literals.get_index(index).expect("no such key").as_slice()
     }
-    fn make_array(&mut self, array: Array) -> ArrayKey {
-        self.arrays.insert((array, Mode::all()))
+    fn make_array(&mut self, array: Array, mode: Mode) -> ArrayKey {
+        self.arrays.insert((array, mode))
     }
     fn make_string(&mut self, s: Vec<u8>) -> StringKey {
         self.strings.insert((s, Mode::all()))
@@ -418,6 +486,16 @@ impl Vm {
         match self.arrays.get_mut(key).expect("no item for key") {
             (ref mut array, Mode { write: true, .. }) => array,
             _ => panic!("array is locked")
+        }
+    }
+    fn exec_array(&mut self, key: ArrayKey, input: &mut Input) {
+        let array = match self.arrays.get(key).expect("no item for key") {
+            (ref array, Mode { execute: true, .. } ) => array.clone(),
+            _ => panic!("not executable")
+        };
+        
+        for item in &array {
+            self.exec(item.clone(), input);
         }
     }
     fn get_dict(&self, key: DictKey) -> &Dictionary {
@@ -462,7 +540,7 @@ impl Vm {
             Token::String(vec) => Item::String(self.make_string(vec)),
             Token::Procedure(tokens) => {
                 let array = tokens.into_iter().map(|t| self.transform_token(t)).collect();
-                Item::Array(self.make_array(array))
+                Item::Array(self.make_array(array, Mode::all()))
             }
         }
     }
@@ -471,7 +549,10 @@ impl Vm {
         match item {
             Item::Operator(op) => self.exec_operator(op, input),
             Item::Name(key) => {
-                let item = self.resolve(Item::Literal(key)).expect("undefined");
+                let item = match self.resolve(Item::Literal(key)) {
+                    Some(item) => item,
+                    None => panic!("unimplemented token {:?}", String::from_utf8_lossy(self.get_lit(key)))
+                };
                 self.exec(item, input)
             }
             item => self.push(item)
@@ -488,6 +569,10 @@ impl Vm {
             }
             Item::Array(key) => {
                 // check that the array is executable
+                if !self.arrays.get(key).expect("no item for key").1.execute {
+                    return self.push(item);
+                }
+                
                 let mut pos = 0;
                 loop {
                     match self.arrays.get(key).expect("no item for key") {
@@ -512,7 +597,7 @@ impl Vm {
             Operator::Array => {
                 match self.pop() {
                     Item::Int(i) if i >= 0 => {
-                        let key = self.make_array(vec![Item::Null; i as usize]);
+                        let key = self.make_array(vec![Item::Null; i as usize], Mode::all());
                         self.push(Item::Array(key));
                     }
                     i => panic!("array: invalid count: {:?}", self.display(i))
@@ -563,6 +648,30 @@ impl Vm {
                     args => panic!("for: invalid args {:?}", self.display_tuple(args))
                 }
             }
+            Operator::If => {
+                match self.pop_tuple() {
+                    (Item::Bool(cond), Item::Array(proc)) => {
+                        if cond {
+                            self.exec_array(proc, input);
+                        }
+                    }
+                    args => panic!("if: invalid args {:?}", self.display_tuple(args))
+                }
+            }
+            Operator::IfElse => {
+                match self.pop_tuple() {
+                    (Item::Bool(cond), Item::Array(proc_a), Item::Array(proc_b)) => {
+                        let proc = if cond {
+                            proc_a
+                        } else {
+                            proc_b
+                        };
+                        
+                        self.exec_array(proc, input);
+                    }
+                    args => panic!("ifelse: invalid args {:?}", self.display_tuple(args))
+                }
+            }
             Operator::Def => {
                 let (key, val) = self.pop_tuple();
                 self.current_dict_mut().insert(key, val);
@@ -574,6 +683,16 @@ impl Vm {
                         self.push(Item::Dict(dict));
                     }
                     arg => panic!("dict: unsupported {:?}", self.display(arg))
+                }
+            }
+            Operator::Known => {
+                match self.pop_tuple() {
+                    (Item::Dict(dict), key) => {
+                        let dict = self.get_dict(dict);
+                        let known = dict.contains_key(&key);
+                        self.push(Item::Bool(known))
+                    },
+                    args => panic!("known: invalid args {:?}", self.display_tuple(args))
                 }
             }
             Operator::String => {
@@ -685,7 +804,7 @@ impl Vm {
                     .rposition(|item| *item == Item::Mark)
                     .expect("unmatched ]");
                 let array = self.stack.drain(start ..).skip(1).collect(); // skip the Mark
-                let key = self.make_array(array);
+                let key = self.make_array(array, Mode::all());
                 self.push(Item::Array(key));
             },
             Operator::Mark => self.push(Item::Mark),
@@ -740,6 +859,9 @@ impl Vm {
     }
     pub fn parse_and_exec(&mut self, data: &[u8]) {
         let mut input = Input::new(data);
+        // skip leading whitespace
+        input.parse(space);
+        
         while input.len() > 0 {
             self.step(&mut input);
         }
