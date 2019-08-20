@@ -5,7 +5,7 @@ use nom::{IResult,
 use tuple::{TupleElements};
 use itertools::Itertools;
 use indexmap::IndexMap;
-use crate::{Font, Glyph, State, v, R, IResultExt, Context};
+use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex};
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
 use vector::{Outline, Transform, Rect, Vector};
@@ -62,7 +62,7 @@ impl<O: Outline> Type1Font<O> {
         
         let char_strings = font_dict.get("CharStrings").unwrap().as_dict().unwrap();
         
-        let subrs = private_dict.get("Subrs").unwrap()
+        let subrs: Vec<Vec<u8>> = private_dict.get("Subrs").unwrap()
             .as_array().unwrap().iter()
             .map(|item| Decoder::charstring().decode(item.as_bytes().unwrap(), len_iv).into())
             .collect();
@@ -71,7 +71,7 @@ impl<O: Outline> Type1Font<O> {
             subr_bias: 0,
             subrs,
             global_subr_bias: 0,
-            global_subrs: vec![]
+            global_subrs: ()
         };
 
         let encoding = font_dict.get("Encoding").unwrap().as_array().unwrap();
@@ -95,7 +95,10 @@ impl<O: Outline> Type1Font<O> {
                     
                     let (index, _) = glyphs.insert_full(codepoint, Glyph {
                         path: state.path.into_outline(),
-                        width: state.char_width.unwrap()
+                        metrics: HMetrics {
+                            advance: Vector::new(state.char_width.unwrap(), 0.0),
+                            lsb: state.lsb.unwrap_or_default()
+                        }
                     });
                     names.insert(name.to_owned(), index as u32);
                 }
@@ -167,7 +170,9 @@ fn parse_pfb<'a>(mut vm: &mut Vm, i: &'a [u8]) -> R<'a, ()> {
     
     Ok((input, ()))
 }
-pub fn charstring<'a, 'b, O: Outline>(mut input: &'a [u8], ctx: &'a Context<'a>, s: &'b mut State<O>) -> IResult<&'a [u8], ()> {
+pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State<O>) -> IResult<&'a [u8], ()>
+    where O: Outline, T: TryIndex + 'a, U: TryIndex + 'a
+{
     while input.len() > 0 {
         let (i, b0) = be_u8(input)?;
         let i = match b0 {

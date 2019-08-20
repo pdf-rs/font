@@ -1,4 +1,4 @@
-use crate::{State, v, Value, Context};
+use crate::{State, v, Value, Context, TryIndex};
 use vector::{Outline};
 use nom::{IResult,
     bytes::complete::{take},
@@ -72,7 +72,9 @@ fn maybe_width<O: Outline>(state: &mut State<O>, cond: impl Fn(usize) -> bool) {
         }
     }
 }
-pub fn charstring<'a, 'b, O: Outline>(mut input: &'a [u8], ctx: &'a Context<'a>, s: &'b mut State<O>) -> IResult<&'a [u8], ()> {
+pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State<O>) -> IResult<&'a [u8], ()>
+    where O: Outline, T: TryIndex + 'a, U: TryIndex + 'a
+{
     while input.len() > 0 && !s.done {
         let (i, b0) = be_u8(input)?;
         let i = match b0 {

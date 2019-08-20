@@ -25,7 +25,7 @@ pub struct TrueTypeFont<O: Outline> {
     cmap: Option<HashMap<u32, u32>>,
     hmtx: Hmtx,
     units_per_em: u16,
-    bbox: Rect
+    bbox: Rect,
 }
 
 impl<O: Outline> TrueTypeFont<O> {
@@ -52,16 +52,13 @@ impl<O: Outline> TrueTypeFont<O> {
         let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
         
         let cvt = |i: i16| i as f32;
-        let bb_min = Vector::new(cvt(head.x_min), cvt(head.y_min));
-        let bb_max = Vector::new(cvt(head.x_max), cvt(head.y_max));
-        let bbox = Rect::from_points(bb_min, bb_max);
         
         TrueTypeFont {
             shapes,
             cmap,
             hmtx,
             units_per_em: head.units_per_em,
-            bbox
+            bbox: head.bbox()
         }
     }
     fn get_path(&self, idx: u32) -> O {
@@ -93,11 +90,11 @@ impl<O: Outline> Font<O> for TrueTypeFont<O> {
         assert!(id <= u16::max_value() as u32);
         debug!("get gid {}", id);
         let path = self.get_path(id);
-        let width = self.hmtx.metrics_for_gid(id as u16).advance;
+        let metrics = self.hmtx.metrics_for_gid(id as u16);
         
         Some(Glyph {
             path,
-            width: width as f32
+            metrics
         })
     }
     fn gid_for_codepoint(&self, codepoint: u32) -> Option<u32> {
@@ -115,6 +112,9 @@ impl<O: Outline> Font<O> for TrueTypeFont<O> {
     }
     fn bbox(&self) -> Option<Rect> {
         Some(self.bbox)
+    }
+    fn kerning(&self, left: u32, right: u32) -> f32 {
+        0.0
     }
 }
 

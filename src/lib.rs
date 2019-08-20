@@ -2,17 +2,16 @@
 #[macro_use] extern crate slotmap;
 
 use std::fmt;
-use std::borrow::Cow;
 use std::convert::TryInto;
 use nom::{IResult, Err::*, error::VerboseError};
 use tuple::{TupleElements};
 use encoding::Encoding;
-use vector::{Outline, Vector, PathBuilder, Transform, Surface, Rect};
+use vector::{Outline, Vector, PathBuilder, Transform, Surface, Rect, PathStyle};
 
 #[derive(Clone)]
 pub struct Glyph<O: Outline> {
     /// unit 1em
-    pub width: f32,
+    pub metrics: HMetrics,
     
     /// transform by font_matrix to scale it to 1em
     pub path: O 
@@ -22,7 +21,11 @@ pub struct Glyph<O: Outline> {
 pub struct VMetrics {
     pub line_gap: f32
 }
-
+#[derive(Copy, Clone)]
+pub struct HMetrics {
+    pub lsb: Vector,
+    pub advance: Vector
+}
 pub trait Font<O: Outline> {
     fn num_glyphs(&self) -> u32;
     fn font_matrix(&self) -> Transform;
@@ -56,6 +59,9 @@ pub trait Font<O: Outline> {
     fn vmetrics(&self) -> Option<VMetrics> {
         None
     }
+    fn kerning(&self, left: u32, right: u32) -> f32 {
+        0.0
+    }
 }
 pub struct Glyphs<O: Outline> {
     glyphs: Vec<Glyph<O>>
@@ -66,29 +72,45 @@ impl<O: Outline> Glyphs<O> {
     }
 }
 
-pub fn draw_text<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: &str) -> S {
+pub fn draw_text<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: &str, style: PathStyle, baseline: Option<PathStyle>) -> S {
+    let mut last_gid = None;
+    let mut offset = Vector::default();
     let glyphs: Vec<_> = text.chars()
         .map(|c| font.gid_for_unicode_codepoint(c as u32).unwrap_or(font.get_notdef_gid()))
-        .filter_map(|gid| font.glyph(gid))
+        .filter_map(|gid| font.glyph(gid).map(|glyph| (gid, glyph)))
+        .map(|(gid, glyph)| {
+            if let Some(left) = last_gid.replace(gid) {
+                offset = offset + Vector::new(dbg!(font.kerning(left, gid)), 0.0);
+            }
+            let p = offset - glyph.metrics.lsb;
+            offset = offset + glyph.metrics.advance;
+            (glyph, p)
+        })
         .collect();
     
     let bbox = font.bbox().expect("no bbox");
-    let width: f32 = glyphs.iter().map(|glyph| dbg!(glyph.width)).sum::<f32>() * font.font_matrix().m11();
-    dbg!(width);
+    let origin = Vector::new(0., -bbox.origin().y());
+    let width = (offset.x()) * font.font_matrix().m11();
     let height = bbox.size().y() * font.font_matrix().m22();
     let mut surface = S::new(Vector::new(width * font_size, font_size * height));
-    let black = surface.color_rgb(0, 0, 0);
-    let y0 = bbox.origin().y();
-    let mut offset = Vector::new(0., -y0);
-    for glyph in glyphs {
-        let transform = Transform::from_scale(Vector::splat(font_size))
+    
+    let tr = Transform::from_scale(Vector::splat(font_size))
             * Transform::from_translation(Vector::new(0., height))
             * Transform::from_scale(Vector::new(1.0, -1.0))
-            * font.font_matrix()
-            * Transform::from_translation(offset);
-        
-        surface.draw_path(glyph.path.transform(transform), Some(&black), None);
-        offset = offset + Vector::new(glyph.width as f32, 0.);
+            * font.font_matrix();
+    
+    if let Some(style) = baseline {
+        let style = surface.build_style(style);
+        let mut p = PathBuilder::new();
+        p.move_to(origin);
+        p.line_to(origin + offset);
+        let o: S::Outline = p.into_outline();
+        surface.draw_path(o.transform(tr), &style);
+    }
+    let style = surface.build_style(style);
+    for (glyph, p) in glyphs {
+        let transform = tr * Transform::from_translation(p + origin);
+        surface.draw_path(glyph.path.transform(transform), &style);
     }
     
     surface
@@ -172,19 +194,44 @@ fn v(x: impl Into<f32>, y: impl Into<f32>) -> Vector {
     Vector::new(x.into(), y.into())
 }
 
-pub struct Context<'a> {
+pub trait TryIndex {
+    fn try_index(&self, idx: usize) -> Option<&[u8]>;
+}
+impl TryIndex for () {
+    fn try_index(&self, idx: usize) -> Option<&[u8]> {
+        None
+    }
+}
+impl TryIndex for Vec<Vec<u8>> {
+    fn try_index(&self, idx: usize) -> Option<&[u8]> {
+        self.get(idx).map(|v| &**v)
+    }
+}
+impl<'a> TryIndex for Vec<&'a [u8]> {
+    fn try_index(&self, idx: usize) -> Option<&[u8]> {
+        self.get(idx).map(|v| *v)
+    }
+}
+impl<'a> TryIndex for &'a [&'a [u8]] {
+    fn try_index(&self, idx: usize) -> Option<&[u8]> {
+        self.get(idx).map(|v| *v)
+    }
+}
+    
+
+pub struct Context<T=(), U=()> {
     pub subr_bias: i32,
-    pub subrs: Vec<Cow<'a, [u8]>>,
-    pub global_subrs: Vec<Cow<'a, [u8]>>,
+    pub subrs: T,
+    pub global_subrs: U,
     pub global_subr_bias: i32,
 }
 
-impl<'a> Context<'a> {
+impl<T, U> Context<T, U> where T: TryIndex, U: TryIndex {
     pub fn subr(&self, idx: i32) -> &[u8] {
-        self.subrs.get((idx + self.subr_bias) as usize).expect("requested subroutine not found")
+        self.subrs.try_index((idx + self.subr_bias) as usize).expect("requested subroutine not found")
     }
     pub fn global_subr(&self, idx: i32) -> &[u8] {
-        self.global_subrs.get((idx + self.global_subr_bias) as usize).expect("requested global subroutine not found")
+        self.global_subrs.try_index((idx + self.global_subr_bias) as usize).expect("requested global subroutine not found")
     }
 }
 

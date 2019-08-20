@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::iter::once;
 use std::borrow::Cow;
-use crate::{Font, Glyph, Value, Context, State, type1, type2, IResultExt, R, VMetrics};
+use crate::{Font, Glyph, Value, Context, State, type1, type2, IResultExt, R, VMetrics, HMetrics};
 use nom::{
     number::complete::{be_u8, be_u16, be_i16, be_u24, be_u32, be_i32},
     bytes::complete::{take},
@@ -29,18 +29,7 @@ pub struct CffFont<O: Outline> {
 
 impl<O: Outline> CffFont<O> {
     pub fn parse(data: &[u8], idx: u32) -> Self {
-        match read_cff(data) {
-            Ok((_, cff)) => {
-                cff.parse_font(idx)
-            },
-            Err(Incomplete(_)) => panic!("need more data"),
-            Err(Error(v)) | Err(Failure(v)) => {
-                for (i, e) in v.errors {
-                    println!("{:?} {:?}", &i[.. i.len().min(20)], e);
-                }
-                panic!()
-            }
-        }
+        read_cff(data).get().slot(idx).parse_font()
     }
 }
 impl<O: Outline> Font<O> for CffFont<O> {
@@ -110,56 +99,142 @@ fn bias(num: usize) -> i32 {
         32768
     }
 }
+type Dict = HashMap<Operator, Vec<Value>>;
+type Index<'a> = Vec<&'a [u8]>;
+
 pub struct Cff<'a> {
     data: &'a [u8],
     dict_index: Index<'a>,
-    string_index: Index<'a>,
+    string_index:Index<'a>,
     subroutines: Index<'a>,
 }
-
+pub struct CffSlot<'a> {
+    cff: Cff<'a>,
+    top_dict: Dict,
+    private_dict: Dict,
+    char_strings: Index<'a>,
+    subrs: Index<'a>,
+    num_glyphs: usize
+}
+    
 impl<'a> Cff<'a> {
-    fn parse_font<O: Outline>(&self, idx: u32) -> CffFont<O> {
-        let data = self.dict_index.get(idx).expect("font not found");
+    pub fn slot(self, idx: u32) -> CffSlot<'a> {
+        let data = self.dict_index.get(idx as usize).expect("font not found");
         let top_dict = dict(data).unwrap().1;
         info!("top dict: {:?}", top_dict);
         
-        let bbox = top_dict.get(&Operator::FontBBox)
-            .map(|arr| {
-                let (a, b, c, d) = TupleElements::from_iter(arr.iter().map(|&v| v.to_float())).unwrap();
-                Rect::new(Vector::new(a, b), Vector::new(c, d))
-            });
+        let private_dict_entry = top_dict.get(&Operator::Private)
+            .expect("no private dict entry");
         
-        let font_matrix = top_dict.get(&Operator::FontMatrix)
-            .map(|arr| {
-                let (a, b, c, d, e, f) = TupleElements::from_iter(arr.iter().map(|&v| v.to_float())).unwrap();
-                Transform::row_major(a, b, c, d, e, f)
-            })
-            .unwrap_or(Transform::from_scale(Vector::splat(0.001)));
+        let private_dict_size = private_dict_entry[0].to_int() as usize;
+        let private_dict_offset = private_dict_entry[1].to_int() as usize;
+        let private_dict_data = &self.data[private_dict_offset .. private_dict_offset + private_dict_size];
+        let private_dict = dict(private_dict_data).get();
+        info!("private dict: {:?}", private_dict);
         
         let offset = top_dict[&Operator::CharStrings][0].to_int() as usize;
         let char_strings = index(self.data.get(offset ..).unwrap()).get();
         
+        let subrs = private_dict.get(&Operator::Subrs).map(|arr| {
+            let private_subroutines_offset = arr[0].to_int() as usize;
+            index(&self.data[(private_dict_offset + private_subroutines_offset) as usize ..]).get()
+        }).unwrap_or_default();
+        
         // num glyphs includes glyph 0 (.notdef)
         let num_glyphs = char_strings.len() as usize;
         
-        let n = top_dict.get(&Operator::CharstringType).map(|v| v[0].to_int()).unwrap_or(2);
+        CffSlot {
+            cff: self,
+            top_dict,
+            private_dict,
+            char_strings,
+            subrs,
+            num_glyphs
+        }
+    }
+}
+impl<'a> CffSlot<'a> {
+    pub fn font_matrix(&self) -> Transform {
+        self.top_dict.get(&Operator::FontMatrix)
+            .map(|arr| {
+                let (a, b, c, d, e, f) = TupleElements::from_iter(arr.iter().map(|&v| v.to_float())).unwrap();
+                Transform::row_major(a, b, c, d, e, f)
+            })
+            .unwrap_or(Transform::from_scale(Vector::splat(0.001)))
+    }
+    pub fn bbox(&self) -> Option<Rect> {
+        self.top_dict.get(&Operator::FontBBox)
+            .map(|arr| {
+                let (a, b, c, d) = TupleElements::from_iter(arr.iter().map(|&v| v.to_float())).unwrap();
+                Rect::new(Vector::new(a, b), Vector::new(c, d))
+            })
+    }
+    // -> (outline, width, lsb)
+    pub fn outlines<'b, O: Outline>(&'b self) -> impl Iterator<Item=(O, f32, Vector)> + 'b {
+        let n = self.top_dict.get(&Operator::CharstringType).map(|v| v[0].to_int()).unwrap_or(2);
         let char_string_type = match n {
             1 => CharstringType::Type1,
             2 => CharstringType::Type2,
             _ => panic!("invalid charstring type")
         };
         
+        let subr_bias = match char_string_type {
+            CharstringType::Type2 => bias(self.subrs.len()),
+            CharstringType::Type1 => 0
+        };
+        let global_subr_bias = match char_string_type {
+            CharstringType::Type2 => bias(self.cff.subroutines.len() as usize),
+            CharstringType::Type1 => 0
+        };
+
+        let context = Context {
+            subr_bias,
+            subrs: self.subrs.as_slice(),
+            global_subrs: self.cff.subroutines.as_slice(),
+            global_subr_bias
+        };
+        
+        let default_width = self.private_dict.get(&Operator::DefaultWidthX).map(|a| a[0].to_float()).unwrap_or(0.);
+        let nominal_width = self.private_dict.get(&Operator::NominalWidthX).map(|a| a[0].to_float()).unwrap_or(0.);
+        
+        // build glyphs
+        self.char_strings.iter().enumerate().map(move |(id, data)| {
+            let mut state = State::new();
+            debug!("charstring for glyph {}", id);
+            match char_string_type {
+                CharstringType::Type1 => {
+                    type1::charstring(data, &context, &mut state).expect("faild to parse charstring");
+                },
+                CharstringType::Type2 => {
+                    type2::charstring(data, &context, &mut state).expect("faild to parse charstring");
+                }
+            }
+            debug!("glyph {} {:?} {:?}", id, state.char_width, state.delta_width);
+            let width = match (state.char_width, state.delta_width) {
+                (Some(w), None) => w,
+                (None, None) => default_width,
+                (None, Some(delta)) => delta + nominal_width,
+                (Some(_), Some(_)) => panic!("BUG: both char_width and delta_width set")
+            };
+            let lsb = state.lsb.unwrap_or_default();
+            (state.into_path(), width, lsb)
+        })
+    }
+    fn parse_font<O: Outline>(&self) -> CffFont<O> {
+        let offset = self.top_dict[&Operator::CharStrings][0].to_int() as usize;
+        let char_strings = index(self.cff.data.get(offset ..).unwrap()).get();
+        
         let glyph_name = |sid: SID|
             STANDARD_STRINGS.get(sid as usize).cloned().unwrap_or_else(||
-                ::std::str::from_utf8(self.string_index.get(sid as u32 - STANDARD_STRINGS.len() as u32).expect("no such string")).expect("Invalid glyph name")
+                ::std::str::from_utf8(self.cff.string_index.get(sid as usize - STANDARD_STRINGS.len()).expect("no such string")).expect("Invalid glyph name")
             );
-        let charset_offset = top_dict.get(&Operator::Charset).map(|v| v[0].to_int() as usize).unwrap_or(0);
+        let charset_offset = self.top_dict.get(&Operator::Charset).map(|v| v[0].to_int() as usize).unwrap_or(0);
         let sids: Cow<[SID]> = match charset_offset {
             0 => ISO_ADOBE_CHARSET[..].into(),
             1 => EXPERT_CHARSET[..].into(),
             2 => EXPERT_SUBSET_CHARSET[..].into(),
             offset => {
-                let charset = charset(self.data.get(offset ..).unwrap(), num_glyphs).get();
+                let charset = charset(self.cff.data.get(offset ..).unwrap(), self.num_glyphs).get();
                 
                 // index = gid - 1 -> sid
                 match charset {
@@ -190,14 +265,14 @@ impl<'a> Cff<'a> {
             cmap
         };
         
-        let (cmap, encoding) = match top_dict.get(&Operator::Encoding).map(|a| a[0].to_int()) {
+        let (cmap, encoding) = match self.top_dict.get(&Operator::Encoding).map(|a| a[0].to_int()) {
             None | Some(0)
                 => (build_default(&STANDARD_ENCODING), Some(Encoding::AdobeStandard)),
             Some(1)
                 => (build_default(&EXPERT_ENCODING), Some(Encoding::AdobeExpert)),
             Some(offset) => {
                 let mut cmap = [0u16; 256];
-                let (codepoints, supplement) = parse_encoding(self.data.get(offset as _ ..).unwrap()).get();
+                let (codepoints, supplement) = parse_encoding(self.cff.data.get(offset as _ ..).unwrap()).get();
                 // encodings start at gid 1
                 match codepoints {
                     GlyphEncoding::Continous(codepoints) => codepoints.iter()
@@ -219,85 +294,24 @@ impl<'a> Cff<'a> {
                 debug!("{} -> gid={}, sid={}, name={}", i, gid, sid, glyph_name(sid));
             }
         }
-        /*
-        let transform = reverse_map(
-        */
-        let private_dict_entry = top_dict.get(&Operator::Private)
-            .expect("no private dict entry");
         
-        let private_dict_size = private_dict_entry[0].to_int() as usize;
-        let private_dict_offset = private_dict_entry[1].to_int() as usize;
-        let private_dict_data = &self.data[private_dict_offset .. private_dict_offset + private_dict_size];
-        let private_dict = dict(private_dict_data).get();
-        info!("private dict: {:?}", private_dict);
-        
-        let subrs = private_dict.get(&Operator::Subrs).map(|arr| {
-            let private_subroutines_offset = arr[0].to_int() as usize;
-            index(&self.data[(private_dict_offset + private_subroutines_offset) as usize ..])
-                .get().items
-                .into_iter().map(|i| i.into())
-                .collect()
-        }).unwrap_or(vec![]);
-        
-        let subr_bias = match char_string_type {
-            CharstringType::Type2 => bias(subrs.len()),
-            CharstringType::Type1 => 0
-        };
-        let global_subrs = self.subroutines.iter()
-            .map(|data| data.into())
-            .collect();
-        
-        let global_subr_bias = match char_string_type {
-            CharstringType::Type2 => bias(self.subroutines.len() as usize),
-            CharstringType::Type1 => 0
-        };
-
-        let context = Context {
-            subr_bias,
-            subrs,
-            global_subrs,
-            global_subr_bias
-        };
-        
-        let default_width = private_dict.get(&Operator::DefaultWidthX).map(|a| a[0].to_float()).unwrap_or(0.);
-        let nominal_width = private_dict.get(&Operator::NominalWidthX).map(|a| a[0].to_float()).unwrap_or(0.);
-        
-        // build glyphs
-        let glyphs = char_strings.iter().enumerate().map(|(id, data)| {
-            let mut state = State::new();
-            debug!("charstring for glyph {}", id);
-            match char_string_type {
-                CharstringType::Type1 => {
-                    type1::charstring(data, &context, &mut state).expect("faild to parse charstring");
-                },
-                CharstringType::Type2 => {
-                    type2::charstring(data, &context, &mut state).expect("faild to parse charstring");
-                }
-            }
-            debug!("glyph {} {:?} {:?}", id, state.char_width, state.delta_width);
-            let width = match (state.char_width, state.delta_width) {
-                (Some(w), None) => w,
-                (None, None) => default_width,
-                (None, Some(delta)) => delta + nominal_width,
-                (Some(_), Some(_)) => panic!("BUG: both char_width and delta_width set")
-            };
+        let glyphs = self.outlines().map(|(outline, width, lsb)| {
             Glyph {
-                width,
-                path: state.into_path()
+                metrics: HMetrics {
+                    advance: Vector::new(width, 0.0),
+                    lsb
+                },
+                path: outline
             }
         }).collect();
-        /*
-        let vmetrics = VMetrics {
-            line_gap: hhea.line_gap
-        };*/
         
         CffFont {
             glyphs,
-            font_matrix,
+            font_matrix: self.font_matrix(),
             codepoint_map: cmap,
             name_map,
             encoding,
-            bbox,
+            bbox: self.bbox(),
             vmetrics: None
         }
     }
@@ -321,22 +335,8 @@ enum CharstringType {
     Type2
 }
 
-pub struct Index<'a> {
-    items: Vec<&'a [u8]>
-}
-impl<'a> Index<'a> {
-    pub fn get(&self, idx: u32) -> Option<&'a [u8]> {
-        self.items.get(idx as usize).cloned()
-    }
-    pub fn iter<'b>(&'b self) -> impl Iterator<Item=&'a [u8]> + 'b {
-        self.items.iter().cloned()
-    }
-    pub fn len(&self) -> u32 {
-        self.items.len() as u32
-    }
-}
     
-fn index(i: &[u8]) -> R<Index> {
+fn index(i: &[u8]) -> R<Vec<&[u8]>> {
     let (i, n) = map(be_u16, |n| n as usize)(i)?;
     debug!("n={}", n);
     if n != 0 {
@@ -345,11 +345,9 @@ fn index(i: &[u8]) -> R<Index> {
         let (i, data) = take(offsets[n])(i)?;
         
         let items = offsets.windows(2).map(|w| data.get(w[0] as usize .. w[1] as usize).unwrap()).collect();
-        Ok((i, Index {
-            items
-        }))
+        Ok((i, items))
     } else {
-        Ok((i, Index { items: vec![] }))
+        Ok((i, vec![]))
     }
 }
 
