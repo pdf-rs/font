@@ -8,7 +8,9 @@ use indexmap::IndexMap;
 use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex};
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
+use crate::cff::{STANDARD_ENCODING, STANDARD_STRINGS};
 use vector::{Outline, Transform, Rect, Vector};
+use encoding::Encoding;
 
 pub struct Type1Font<O: Outline> {
     glyphs: IndexMap<u32, Glyph<O>>, // codepoint -> glyph
@@ -31,6 +33,17 @@ impl<O: Outline> Font<O> for Type1Font<O> {
     }
     fn gid_for_name(&self, name: &str) -> Option<u32> {
         self.names.get(name).cloned()
+    }
+    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<u32> {
+        // this can be optimized!
+        // needs a map of unicode codepoints to glyph name (or the reverse). Ideally not limited to AdobeStandard.
+        Encoding::Unicode.to(Encoding::AdobeStandard).unwrap()
+            .translate(codepoint)
+            .and_then(|cp| {
+                let sid = STANDARD_ENCODING[cp as usize];
+                let name = STANDARD_STRINGS[sid as usize];
+                self.gid_for_name(name)
+            })
     }
     fn bbox(&self) -> Option<Rect> {
         self.bbox

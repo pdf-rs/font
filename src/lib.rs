@@ -77,7 +77,7 @@ pub fn draw_text<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: 
     let mut last_gid = None;
     let mut offset = Vector::default();
     let glyphs: Vec<_> = text.chars()
-        .map(|c| font.gid_for_unicode_codepoint(c as u32).unwrap_or(font.get_notdef_gid()))
+        .map(|c| dbg!(font.gid_for_unicode_codepoint(dbg!(c) as u32)).unwrap_or(font.get_notdef_gid()))
         .filter_map(|gid| font.glyph(gid).map(|glyph| (gid, glyph)))
         .map(|(gid, glyph)| {
             if let Some(left) = last_gid.replace(gid) {
