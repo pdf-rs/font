@@ -276,7 +276,7 @@ impl<O: Outline> State<O> {
     pub fn args<T>(&mut self) -> T where
         T: TupleElements<Element=Value>
     {
-        debug!("get {} args from {:?}", T::N, self.stack);
+        trace!("get {} args from {:?}", T::N, self.stack);
         T::from_iter(self.stack.iter().cloned()).unwrap()
     }
 }

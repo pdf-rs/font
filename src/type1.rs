@@ -8,13 +8,13 @@ use indexmap::IndexMap;
 use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex};
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
-use crate::cff::{STANDARD_ENCODING, STANDARD_STRINGS};
 use vector::{Outline, Transform, Rect, Vector};
-use encoding::Encoding;
+use encoding::{glyphname_to_unicode};
 
 pub struct Type1Font<O: Outline> {
     glyphs: IndexMap<u32, Glyph<O>>, // codepoint -> glyph
     names: HashMap<String, u32>, // name -> glyph id
+    unicode_map: HashMap<&'static str, u32>,
     font_matrix: Transform,
     bbox: Option<Rect>
 }
@@ -35,15 +35,10 @@ impl<O: Outline> Font<O> for Type1Font<O> {
         self.names.get(name).cloned()
     }
     fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<u32> {
-        // this can be optimized!
-        // needs a map of unicode codepoints to glyph name (or the reverse). Ideally not limited to AdobeStandard.
-        Encoding::Unicode.to(Encoding::AdobeStandard).unwrap()
-            .translate(codepoint)
-            .and_then(|cp| {
-                let sid = STANDARD_ENCODING[cp as usize];
-                let name = STANDARD_STRINGS[sid as usize];
-                self.gid_for_name(name)
-            })
+        let c = std::char::from_u32(codepoint)?;
+        let mut buf = [0; 4];
+        let s = c.encode_utf8(&mut buf);
+        self.unicode_map.get(&*s).cloned()
     }
     fn bbox(&self) -> Option<Rect> {
         self.bbox
@@ -90,6 +85,7 @@ impl<O: Outline> Type1Font<O> {
         let encoding = font_dict.get("Encoding").expect("no /Encoding").as_array().expect("/Encoding is not an array");
         
         let mut names = HashMap::new();
+        let mut unicode_map = HashMap::new();
         let mut glyphs = IndexMap::new();
         let mut codepoint = 0;
         for item in encoding.iter() {
@@ -98,7 +94,8 @@ impl<O: Outline> Type1Font<O> {
                 RefItem::Literal(b".notdef") => {},
                 RefItem::Literal(name) => {
                     let name = std::str::from_utf8(name).unwrap();
-                    debug!("glyph: {}", name);
+                    let unicode = glyphname_to_unicode(name);
+                    debug!("glyph: {} {:?}", name, unicode);
                     let char_string = char_strings.get(name).unwrap().as_bytes().unwrap();
                     
                     let decoded = Decoder::charstring().decode(&char_string, len_iv);
@@ -115,6 +112,10 @@ impl<O: Outline> Type1Font<O> {
                         }
                     });
                     names.insert(name.to_owned(), index as u32);
+                    
+                    if let Some(unicode) = unicode {
+                        unicode_map.insert(unicode, index as u32);
+                    }
                 }
                 _ => {}
             }
@@ -137,6 +138,7 @@ impl<O: Outline> Type1Font<O> {
             font_matrix: Transform::row_major(a, b, c, d, e, f),
             glyphs,
             names,
+            unicode_map,
             bbox
         }
     }
@@ -188,21 +190,21 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
     where O: Outline, T: TryIndex + 'a, U: TryIndex + 'a
 {
     while input.len() > 0 {
-        debug!("input: {:?}", &input[.. input.len().min(10)]);
+        trace!("input: {:?}", &input[.. input.len().min(10)]);
         let (i, b0) = be_u8(input)?;
         let i = match b0 {
             1 => { // ⊦ y dy hstem (1) ⊦
-                debug!("hstem");
+                trace!("hstem");
                 s.stack.clear();
                 i
             }
             3 => { // ⊦ x dx vstem (3) ⊦
-                debug!("vstem");
+                trace!("vstem");
                 s.stack.clear();
                 i
             }
             4 => { // ⊦ dy vmoveto (4) ⊦
-                debug!("vmoveto");
+                trace!("vmoveto");
                 let p = s.current + v(0., s.stack[0]);
                 s.path.move_to(p);
                 s.stack.clear();
@@ -210,7 +212,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             5 => { // ⊦ dx dy rlineto (5) ⊦
-                debug!("rlineto");
+                trace!("rlineto");
                 let p = s.current + v(s.stack[0], s.stack[1]);
                 s.path.line_to(p);
                 s.stack.clear();
@@ -218,7 +220,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             6 => { // ⊦ dx hlineto (6) ⊦
-                debug!("hlineto");
+                trace!("hlineto");
                 let p = s.current + v(s.stack[0], 0.);
                 s.path.line_to(p);
                 s.stack.clear();
@@ -226,7 +228,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             7 => { // dy vlineto (7)
-                debug!("vlineto");
+                trace!("vlineto");
                 let p = s.current + v(0., s.stack[0],);
                 s.path.line_to(p);
                 s.stack.clear();
@@ -234,7 +236,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             8 => { // ⊦ dx1 dy1 dx2 dy2 dx3 dy3 rrcurveto (8) ⊦
-                debug!("rrcurveto");
+                trace!("rrcurveto");
                 let c1 = s.current + v(s.stack[0], s.stack[1]);
                 let c2 = c1 + v(s.stack[2], s.stack[3]);
                 let p = c2 + v(s.stack[4], s.stack[5]);
@@ -244,20 +246,20 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             9 => { // –closepath (9) ⊦
-                debug!("closepath");
+                trace!("closepath");
                 s.path.close();
                 s.stack.clear();
                 i
             }
             10 => { // subr# callsubr (10) –
                 let subr_nr = s.pop().to_int();
-                debug!("callsubr {}", subr_nr);
+                trace!("callsubr {}", subr_nr);
                 let subr = ctx.subr(subr_nr);
                 charstring(subr, ctx, s)?;
                 i
             }
             11 => { // return
-                debug!("return");
+                trace!("return");
                 input = i;
                 break;
             }
@@ -265,52 +267,52 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 let (i, b1) = be_u8(i)?;
                 match b1 {
                     0 => { // – dotsection (12 0) ⊦
-                        debug!("dotsection");
+                        trace!("dotsection");
                         s.stack.clear();
                         i
                     }
                     1 => { // ⊦ x0 dx0 x1 dx1 x2 dx2 vstem3 (12 1) ⊦
-                        debug!("vstem3");
+                        trace!("vstem3");
                         s.stack.clear();
                         i
                     }
                     2 => { // ⊦ y0 dy0 y1 dy1 y2 dy2 hstem3 (12 2) ⊦
-                        debug!("hstem3");
+                        trace!("hstem3");
                         s.stack.clear();
                         i
                     }
                     6 => { // ⊦ asb adx ady bchar achar seac (12 6) ⊦
-                        debug!("seac");
+                        trace!("seac");
                         s.stack.clear();
                         i
                     }
                     7 => { // ⊦ sbx sby wx wy sbw (12 7) ⊦
                         let (sbx, sby, wx, _wy, _sbw) = s.args();
-                        debug!("sbw");
+                        trace!("sbw");
                         s.char_width = Some(wx.to_float());
                         s.current = v(sbx, sby);
                         s.stack.clear();
                         i
                     }
                     12 => { // num1 num2 div (12 12) quotient
-                        debug!("div");
+                        trace!("div");
                         let num2 = s.pop().to_float();
                         let num1 = s.pop().to_float();
                         s.push(num1 / num2);
                         i
                     }
                     16 => { //  arg1 . . . argn n othersubr# callothersubr (12 16) –
-                        debug!("callothersubr");
+                        trace!("callothersubr");
                         let _subr_nr = s.pop().to_int();
                         i
                     }
                     17 => { // – pop (12 17) number
-                        debug!("pop");
+                        trace!("pop");
                         s.pop();
                         i
                     }
                     33 => { // ⊦ x y sets.currentpoint (12 33) ⊦
-                        debug!("sets.currentpoint");
+                        trace!("sets.currentpoint");
                         let (x, y) = s.args();
                         let p = v(x, y);
                         s.current = p;
@@ -321,7 +323,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 }
             }
             13 => { // ⊦ sbx wx hsbw (13) ⊦
-                debug!("hsbw");
+                trace!("hsbw");
                 let (sbx, wx) = s.args();
                 let lsb = v(sbx, 0.);
                 s.lsb = Some(lsb);
@@ -331,12 +333,12 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             14 => { //– endchar (14) ⊦
-                debug!("endchar");
+                trace!("endchar");
                 input = i;
                 break;
             }
             21 => { // ⊦ dx dy rmoveto (21) ⊦
-                debug!("rmoveto");
+                trace!("rmoveto");
                 let (dx, dy) = s.args();
                 let p = s.current + v(dx, dy);
                 s.path.move_to(p);
@@ -345,7 +347,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             22 => { // ⊦ dx hmoveto (22) ⊦
-                debug!("hmoveto");
+                trace!("hmoveto");
                 let (dx, ) = s.args();
                 let p = s.current + v(dx, 0.);
                 s.path.move_to(p);
@@ -354,7 +356,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             30 => { // ⊦ dy1 dx2 dy2 dx3 vhcurveto (30) ⊦
-                debug!("vhcurveto");
+                trace!("vhcurveto");
                 let (dy1, dx2, dy2, dx3) = s.args();
                 let c1 = s.current + v(0., dy1);
                 let c2 = c1 + v(dx2, dy2);
@@ -365,7 +367,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             31 => { // ⊦ dx1 dx2 dy2 dy3 hvcurveto (31) ⊦
-                debug!("hvcurveto");
+                trace!("hvcurveto");
                 let (dx1, dx2, dy2, dy3) = s.args();
                 let c1 = s.current + v(dx1, 0.);
                 let c2 = c1 + v(dx2, dy2);
@@ -397,7 +399,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
             c => panic!("unknown code {}", c)
         };
         
-        debug!("stack: {:?}", s.stack);
+        trace!("stack: {:?}", s.stack);
         input = i;
     };
     
