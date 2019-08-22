@@ -63,6 +63,8 @@ fn alternating_curve<O: Outline>(s: &mut State<O>, mut horizontal: bool) {
         horizontal = !horizontal;
     }
 }
+
+#[inline]
 fn maybe_width<O: Outline>(state: &mut State<O>, cond: impl Fn(usize) -> bool) {
     if state.first_stack_clearing_operator {
         state.first_stack_clearing_operator = false;

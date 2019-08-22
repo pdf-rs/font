@@ -170,7 +170,7 @@ impl<'a> CffSlot<'a> {
             })
     }
     // -> (outline, width, lsb)
-    pub fn outlines<'b, O: Outline>(&'b self) -> impl Iterator<Item=(O, f32, Vector)> + 'b {
+    pub fn outlines<'b, O: Outline + 'b>(&'b self) -> impl Iterator<Item=(O, f32, Vector)> + 'b {
         let n = self.top_dict.get(&Operator::CharstringType).map(|v| v[0].to_int()).unwrap_or(2);
         let char_string_type = match n {
             1 => CharstringType::Type1,
@@ -198,8 +198,8 @@ impl<'a> CffSlot<'a> {
         let nominal_width = self.private_dict.get(&Operator::NominalWidthX).map(|a| a[0].to_float()).unwrap_or(0.);
         
         // build glyphs
+        let mut state = State::new();
         self.char_strings.iter().enumerate().map(move |(id, data)| {
-            let mut state = State::new();
             debug!("charstring for glyph {}", id);
             match char_string_type {
                 CharstringType::Type1 => {
@@ -217,7 +217,9 @@ impl<'a> CffSlot<'a> {
                 (Some(_), Some(_)) => panic!("BUG: both char_width and delta_width set")
             };
             let lsb = state.lsb.unwrap_or_default();
-            (state.into_path(), width, lsb)
+            let path = state.path.take();
+            state.clear();
+            (path, width, lsb)
         })
     }
     fn parse_font<O: Outline>(&self) -> CffFont<O> {

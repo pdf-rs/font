@@ -68,53 +68,10 @@ pub struct Glyphs<O: Outline> {
     glyphs: Vec<Glyph<O>>
 }
 impl<O: Outline> Glyphs<O> {
+    #[inline]
     pub fn get(&self, codepoint: u32) -> Option<&Glyph<O>> {
         self.glyphs.get(codepoint as usize)
     }
-}
-
-pub fn draw_text<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: &str, style: PathStyle, baseline: Option<PathStyle>) -> S {
-    let mut last_gid = None;
-    let mut offset = Vector::default();
-    let glyphs: Vec<_> = text.chars()
-        .map(|c| dbg!(font.gid_for_unicode_codepoint(dbg!(c) as u32)).unwrap_or(font.get_notdef_gid()))
-        .filter_map(|gid| font.glyph(gid).map(|glyph| (gid, glyph)))
-        .map(|(gid, glyph)| {
-            if let Some(left) = last_gid.replace(gid) {
-                offset = offset + Vector::new(dbg!(font.kerning(left, gid)), 0.0);
-            }
-            let p = offset - glyph.metrics.lsb;
-            offset = offset + glyph.metrics.advance;
-            (glyph, p)
-        })
-        .collect();
-    
-    let bbox = font.bbox().expect("no bbox");
-    let origin = Vector::new(0., -bbox.origin().y());
-    let width = (offset.x()) * font.font_matrix().m11();
-    let height = bbox.size().y() * font.font_matrix().m22();
-    let mut surface = S::new(Vector::new(width * font_size, font_size * height));
-    
-    let tr = Transform::from_scale(Vector::splat(font_size))
-            * Transform::from_translation(Vector::new(0., height))
-            * Transform::from_scale(Vector::new(1.0, -1.0))
-            * font.font_matrix();
-    
-    if let Some(style) = baseline {
-        let style = surface.build_style(style);
-        let mut p = PathBuilder::new();
-        p.move_to(origin);
-        p.line_to(origin + offset);
-        let o: S::Outline = p.into_outline();
-        surface.draw_path(o.transform(tr), &style);
-    }
-    let style = surface.build_style(style);
-    for (glyph, p) in glyphs {
-        let transform = tr * Transform::from_translation(p + origin);
-        surface.draw_path(glyph.path.transform(transform), &style);
-    }
-    
-    surface
 }
 
 mod truetype;
@@ -126,6 +83,7 @@ mod opentype;
 mod parsers;
 mod eexec;
 mod woff;
+pub mod layout;
 
 pub use truetype::TrueTypeFont;
 pub use cff::CffFont;
@@ -150,32 +108,38 @@ impl fmt::Debug for Value {
 }
 
 impl Into<f32> for Value {
+    #[inline]
     fn into(self) -> f32 {
         self.to_float()
     }
 }
 impl From<i16> for Value {
+    #[inline]
     fn from(v: i16) -> Value {
         Value::Int(v as i32)
     }
 }
 impl From<i32> for Value {
+    #[inline]
     fn from(v: i32) -> Value {
         Value::Int(v)
     }
 }
 impl From<f32> for Value {
+    #[inline]
     fn from(v: f32) -> Value {
         Value::Float(v)
     }
 }
 impl Value {
+    #[inline]
     fn to_int(self) -> i32 {
         match self {
             Value::Int(i) => i,
             Value::Float(_) => panic!("tried to cast a float to int")
         }
     }
+    #[inline]
     fn to_uint(self) -> u32 {
         match self {
             Value::Int(i) if i >= 0 => i as u32,
@@ -183,6 +147,7 @@ impl Value {
             Value::Float(_) => panic!("tried to cast a float to int")
         }
     }
+    #[inline]
     fn to_float(self) -> f32 {
         match self {
             Value::Int(i) => i as f32,
@@ -191,6 +156,7 @@ impl Value {
     }
 }
 
+#[inline]
 fn v(x: impl Into<f32>, y: impl Into<f32>) -> Vector {
     Vector::new(x.into(), y.into())
 }
@@ -199,21 +165,25 @@ pub trait TryIndex {
     fn try_index(&self, idx: usize) -> Option<&[u8]>;
 }
 impl TryIndex for () {
+    #[inline]
     fn try_index(&self, idx: usize) -> Option<&[u8]> {
         None
     }
 }
 impl TryIndex for Vec<Vec<u8>> {
+    #[inline]
     fn try_index(&self, idx: usize) -> Option<&[u8]> {
         self.get(idx).map(|v| &**v)
     }
 }
 impl<'a> TryIndex for Vec<&'a [u8]> {
+    #[inline]
     fn try_index(&self, idx: usize) -> Option<&[u8]> {
         self.get(idx).map(|v| *v)
     }
 }
 impl<'a> TryIndex for &'a [&'a [u8]] {
+    #[inline]
     fn try_index(&self, idx: usize) -> Option<&[u8]> {
         self.get(idx).map(|v| *v)
     }
@@ -228,9 +198,11 @@ pub struct Context<T=(), U=()> {
 }
 
 impl<T, U> Context<T, U> where T: TryIndex, U: TryIndex {
+    #[inline]
     pub fn subr(&self, idx: i32) -> &[u8] {
         self.subrs.try_index((idx + self.subr_bias) as usize).expect("requested subroutine not found")
     }
+    #[inline]
     pub fn global_subr(&self, idx: i32) -> &[u8] {
         self.global_subrs.try_index((idx + self.global_subr_bias) as usize).expect("requested global subroutine not found")
     }
@@ -249,6 +221,7 @@ pub struct State<O: Outline> {
 }
 
 impl<O: Outline> State<O> {
+    #[inline]
     pub fn new() -> State<O> {
         State {
             stack: Vec::new(),
@@ -262,17 +235,33 @@ impl<O: Outline> State<O> {
             first_stack_clearing_operator: true
         }
     }
+    #[inline]
+    pub fn clear(&mut self) {
+        self.stack.clear();
+        self.path.clear();
+        self.current = Vector::default();
+        self.lsb = None;
+        self.char_width = None;
+        self.done = false;
+        self.stem_hints = 0;
+        self.delta_width = None;
+        self.first_stack_clearing_operator = true;
+    }
+    #[inline]
     pub fn into_path(self) -> O {
         self.path.into_outline()
     }
+    #[inline]
     pub fn push(&mut self, v: impl Into<Value>) {
         self.stack.push(v.into());
     }
+    #[inline]
     pub fn pop(&mut self) -> Value {
         self.stack.pop().expect("no value on the stack")
     }
     /// get stack[0 .. T::N] as a tuple
     /// does not modify the stack
+    #[inline]
     pub fn args<T>(&mut self) -> T where
         T: TupleElements<Element=Value>
     {
@@ -285,19 +274,27 @@ pub trait IResultExt {
     type Item;
     fn get(self) -> Self::Item;
 }
+
+fn print_err(e: nom::Err<VerboseError<&[u8]>>) -> ! {
+    match e {
+        Incomplete(_) => panic!("need more data"),
+        Error(v) | Failure(v) => {
+            for (i, e) in v.errors {
+                println!("{:?} {:?}", &i[.. i.len().min(20)], e);
+                println!("{:?}", String::from_utf8_lossy(&i[.. i.len().min(20)]));
+            }
+            panic!()
+        }
+    }
+}
+
 impl<T> IResultExt for IResult<&[u8], T, VerboseError<&[u8]>> {
     type Item = T;
+    #[inline]
     fn get(self) -> T {
         match self {
             Ok((_, t)) => t,
-            Err(Incomplete(_)) => panic!("need more data"),
-            Err(Error(v)) | Err(Failure(v)) => {
-                for (i, e) in v.errors {
-                    println!("{:?} {:?}", &i[.. i.len().min(20)], e);
-                    println!("{:?}", String::from_utf8_lossy(&i[.. i.len().min(20)]));
-                }
-                panic!()
-            }
+            Err(e) => print_err(e),
         }
     }
 }

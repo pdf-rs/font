@@ -127,7 +127,7 @@ impl<O: Outline> Type1Font<O> {
         let bbox = font_dict.get("FontBBox")
             .map(|val| {
                 let (a, b, c, d) = TupleElements::from_iter(val.as_array().unwrap().iter().map(|v| v.as_f32().unwrap())).unwrap();
-                Rect::new(Vector::new(a, b), Vector::new(c, d))
+                Rect::from_points(Vector::new(a, b), Vector::new(c, d))
             });
         
         let (a, b, c, d, e, f) = TupleElements::from_iter(

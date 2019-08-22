@@ -170,7 +170,6 @@ pub fn compound<O: Outline>(mut input: &[u8]) -> R<Shape<O>> {
     let mut parts = Vec::new();
     loop {
         let (flags, gidx) = parse(&mut input, tuple((be_u16, be_u16)))?;
-        dbg!(flags, gidx);
         let mut transform = Transform::default();
         if flags & 2 != 0 {
             // XY values
@@ -321,7 +320,8 @@ pub fn contour<C: Contour>(points: impl Iterator<Item=(bool, Vector)>) -> Option
         (p, None)
     };
     
-    let mut contour = C::new(s);
+    let mut contour = C::new();
+    contour.move_to(s);
     
     let mut c = None;
     for (on_curve, p) in points {
