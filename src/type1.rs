@@ -8,6 +8,7 @@ use indexmap::IndexMap;
 use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex};
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
+use crate::parsers::parse;
 use vector::{Outline, Transform, Rect, Vector};
 use encoding::{glyphname_to_unicode};
 
@@ -95,7 +96,7 @@ impl<O: Outline> Type1Font<O> {
                 RefItem::Literal(name) => {
                     let name = std::str::from_utf8(name).unwrap();
                     let unicode = glyphname_to_unicode(name);
-                    debug!("glyph: {} {:?}", name, unicode);
+                    debug!("glyph: {} {:?}, gid={}", name, unicode, glyphs.len());
                     let char_string = char_strings.get(name).unwrap().as_bytes().unwrap();
                     
                     let decoded = Decoder::charstring().decode(&char_string, len_iv);
@@ -189,19 +190,19 @@ fn parse_pfb<'a>(mut vm: &mut Vm, i: &'a [u8]) -> R<'a, ()> {
 pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State<O>) -> IResult<&'a [u8], ()>
     where O: Outline, T: TryIndex + 'a, U: TryIndex + 'a
 {
+    let mut ps_stack = vec![];
     while input.len() > 0 {
-        trace!("input: {:?}", &input[.. input.len().min(10)]);
-        let (i, b0) = be_u8(input)?;
+        //trace!("input: {:?}", &input[.. input.len().min(10)]);
+        trace!("current: {:?}", s.current);
+        let b0 = parse(&mut input, be_u8)?;
         let i = match b0 {
             1 => { // ⊦ y dy hstem (1) ⊦
                 trace!("hstem");
                 s.stack.clear();
-                i
             }
             3 => { // ⊦ x dx vstem (3) ⊦
                 trace!("vstem");
                 s.stack.clear();
-                i
             }
             4 => { // ⊦ dy vmoveto (4) ⊦
                 trace!("vmoveto");
@@ -209,7 +210,6 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 s.path.move_to(p);
                 s.stack.clear();
                 s.current = p;
-                i
             }
             5 => { // ⊦ dx dy rlineto (5) ⊦
                 trace!("rlineto");
@@ -217,7 +217,6 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 s.path.line_to(p);
                 s.stack.clear();
                 s.current = p;
-                i
             }
             6 => { // ⊦ dx hlineto (6) ⊦
                 trace!("hlineto");
@@ -225,7 +224,6 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 s.path.line_to(p);
                 s.stack.clear();
                 s.current = p;
-                i
             }
             7 => { // dy vlineto (7)
                 trace!("vlineto");
@@ -233,7 +231,6 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 s.path.line_to(p);
                 s.stack.clear();
                 s.current = p;
-                i
             }
             8 => { // ⊦ dx1 dy1 dx2 dy2 dx3 dy3 rrcurveto (8) ⊦
                 trace!("rrcurveto");
@@ -243,48 +240,40 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 s.path.cubic_curve_to(c1, c2, p);
                 s.stack.clear();
                 s.current = p;
-                i
             }
             9 => { // –closepath (9) ⊦
                 trace!("closepath");
                 s.path.close();
                 s.stack.clear();
-                i
             }
             10 => { // subr# callsubr (10) –
                 let subr_nr = s.pop().to_int();
                 trace!("callsubr {}", subr_nr);
                 let subr = ctx.subr(subr_nr);
                 charstring(subr, ctx, s)?;
-                i
             }
             11 => { // return
                 trace!("return");
-                input = i;
                 break;
             }
             12 => {
-                let (i, b1) = be_u8(i)?;
+                let b1 = parse(&mut input, be_u8)?;
                 match b1 {
                     0 => { // – dotsection (12 0) ⊦
                         trace!("dotsection");
                         s.stack.clear();
-                        i
                     }
                     1 => { // ⊦ x0 dx0 x1 dx1 x2 dx2 vstem3 (12 1) ⊦
                         trace!("vstem3");
                         s.stack.clear();
-                        i
                     }
                     2 => { // ⊦ y0 dy0 y1 dy1 y2 dy2 hstem3 (12 2) ⊦
                         trace!("hstem3");
                         s.stack.clear();
-                        i
                     }
                     6 => { // ⊦ asb adx ady bchar achar seac (12 6) ⊦
                         trace!("seac");
                         s.stack.clear();
-                        i
                     }
                     7 => { // ⊦ sbx sby wx wy sbw (12 7) ⊦
                         let (sbx, sby, wx, _wy, _sbw) = s.args();
@@ -292,32 +281,64 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                         s.char_width = Some(wx.to_float());
                         s.current = v(sbx, sby);
                         s.stack.clear();
-                        i
                     }
                     12 => { // num1 num2 div (12 12) quotient
                         trace!("div");
                         let num2 = s.pop().to_float();
                         let num1 = s.pop().to_float();
                         s.push(num1 / num2);
-                        i
                     }
                     16 => { //  arg1 . . . argn n othersubr# callothersubr (12 16) –
-                        trace!("callothersubr");
-                        let _subr_nr = s.pop().to_int();
-                        i
+                        let subr_nr = s.pop().to_int();
+                        trace!("callothersubr {}", subr_nr);
+                        let n = s.pop().to_int() as usize;
+                        
+                        match subr_nr {
+                            1 => {
+                                assert_eq!(n, 0);
+                                s.flex_sequence = Some(Vec::with_capacity(7));
+                                
+                                // first moveto: referece point
+                                // then first control point of first curve
+                                // second control point of first curve
+                                // joining point
+                                // first control point of second curve
+                                // second control point of second curve
+                                // endpoint of second curve
+                                // (flex height, final x, final y) 0 callsubr
+                            }
+                            2 => {
+                                assert_eq!(n, 0);
+                            }
+                            0 => {
+                                // end of flex sequences
+                                assert_eq!(n, 3);
+                                let (flex_height, x, y) = s.pop_tuple();
+                                let (_ref, c0, c1, p2, c3, c4, p5) = TupleElements::from_iter(s.flex_sequence.take().unwrap().into_iter()).unwrap();
+                                //assert_eq!(p5, v(x, y));
+                                s.path.cubic_curve_to(c0, c1, p2);
+                                s.path.cubic_curve_to(c3, c4, p5);
+                                ps_stack.push(y);
+                                ps_stack.push(x);
+                            }
+                            _ => {
+                                let m = s.stack.len();
+                                ps_stack.clear();
+                                ps_stack.extend(s.stack.drain(m - n ..).rev());
+                            }
+                        }
                     }
                     17 => { // – pop (12 17) number
                         trace!("pop");
-                        s.pop();
-                        i
+                        let n = ps_stack.pop().expect("PS stack is empty");
+                        s.push(n);
                     }
-                    33 => { // ⊦ x y sets.currentpoint (12 33) ⊦
-                        trace!("sets.currentpoint");
+                    33 => { // ⊦ x y setcurrentpoint (12 33) ⊦
+                        trace!("setcurrentpoint");
                         let (x, y) = s.args();
                         let p = v(x, y);
                         s.current = p;
                         s.stack.clear();
-                        i
                     },
                     _ => panic!("invalid operator")
                 }
@@ -330,21 +351,24 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 s.current = lsb;
                 s.char_width = Some(wx.to_float());
                 s.stack.clear();
-                i
             }
             14 => { //– endchar (14) ⊦
                 trace!("endchar");
-                input = i;
                 break;
             }
             21 => { // ⊦ dx dy rmoveto (21) ⊦
                 trace!("rmoveto");
                 let (dx, dy) = s.args();
                 let p = s.current + v(dx, dy);
-                s.path.move_to(p);
+                
+                // hack to counter the flex sequences hack by adobe
+                if let Some(ref mut points) = s.flex_sequence {
+                    points.push(p);
+                } else {
+                    s.path.move_to(p);
+                }
                 s.current = p;
                 s.stack.clear();
-                i
             }
             22 => { // ⊦ dx hmoveto (22) ⊦
                 trace!("hmoveto");
@@ -353,7 +377,6 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 s.path.move_to(p);
                 s.current = p;
                 s.stack.clear();
-                i
             }
             30 => { // ⊦ dy1 dx2 dy2 dx3 vhcurveto (30) ⊦
                 trace!("vhcurveto");
@@ -364,7 +387,6 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 s.path.cubic_curve_to(c1, c2, p);
                 s.stack.clear();
                 s.current = p;
-                i
             }
             31 => { // ⊦ dx1 dx2 dy2 dy3 hvcurveto (31) ⊦
                 trace!("hvcurveto");
@@ -375,32 +397,26 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 s.path.cubic_curve_to(c1, c2, p);
                 s.stack.clear();
                 s.current = p;
-                i
             },
             v @ 32 ..= 246 => {
                 s.push(v as i32 - 139);
-                i
             }
             v @ 247 ..= 250 => {
-                let (i, w) = be_u8(i)?;
+                let w = parse(&mut input, be_u8)?;
                 s.push((v as i32 - 247) * 256 + w as i32 + 108);
-                i
             }
             v @ 251 ..= 254 => {
-                let (i, w) = be_u8(i)?;
+                let w = parse(&mut input, be_u8)?;
                 s.push(-(v as i32 - 251) * 256 - w as i32 - 108);
-                i
             }
             255 => {
-                let (i, v) = be_i32(i)?;
+                let v = parse(&mut input, be_i32)?;
                 s.push(v as f32 / 65536.);
-                i
             }
             c => panic!("unknown code {}", c)
         };
         
         trace!("stack: {:?}", s.stack);
-        input = i;
     };
     
     Ok((input, ()))

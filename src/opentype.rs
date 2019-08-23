@@ -9,7 +9,7 @@ use crate::cff::{read_cff};
 use encoding::Encoding;
 use crate::parsers::{iterator, parse};
 use nom::{
-    number::complete::{be_u8, be_i16, be_u16, be_i64, be_i32, be_u32},
+    number::complete::{be_u8, be_i16, be_u16, be_i64, be_i32, be_u32, be_u24},
     multi::{count, many0},
     combinator::map,
     bytes::complete::take,
@@ -30,7 +30,7 @@ pub fn parse_opentype<O: Outline + 'static>(data: &[u8], idx: u32) -> Box<dyn Fo
 struct OpenTypeFont<O: Outline> {
     outlines: Vec<O>,
     kern: HashMap<(u32, u32), i16>,
-    cmap: HashMap<u32, u32>,
+    cmap: Option<CMap>,
     hmtx: Hmtx,
     bbox: Rect,
     font_matrix: Transform
@@ -70,7 +70,7 @@ impl<O: Outline> OpenTypeFont<O> {
         OpenTypeFont {
             outlines,
             kern: tables.get(b"kern").map(|data| parse_kern(data).get()).unwrap_or_default(),
-            cmap: tables.get(b"cmap").map(|data| parse_cmap(data).get()).unwrap_or_default(),
+            cmap: tables.get(b"cmap").map(|data| parse_cmap(data).get()),
             hmtx: parse_hmtx(tables.get(b"hmtx").expect("no hmtx"), &hhea, &maxp).get(),
             bbox: head.bbox(),
             font_matrix: Transform::from_scale(Vector::splat(1.0 / head.units_per_em as f32))
@@ -93,7 +93,10 @@ impl<O: Outline> Font<O> for OpenTypeFont<O> {
         })
     }
     fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<u32> {
-        self.cmap.get(&codepoint).cloned()
+        match self.cmap {
+            Some(ref cmap) => cmap.get_codepoint(codepoint),
+            None => None
+        }
     }
     fn gid_for_name(&self, name: &str) -> Option<u32> {
         None
@@ -216,7 +219,17 @@ pub fn parse_loca<'a>(i: &'a [u8], head: &Head, maxp: &Maxp) -> R<'a, Vec<u32>> 
         _ => panic!("invalid index_to_loc_format")
     }
 }
-pub fn parse_cmap(input: &[u8]) -> R<HashMap<u32, u32>> {
+pub struct CMap {
+    single_codepoint: HashMap<u32, u32>,
+    double_codepoint: HashMap<(u32, u32), u32>
+}
+impl CMap {
+    pub fn get_codepoint(&self, cp: u32) -> Option<u32> {
+        self.single_codepoint.get(&cp).cloned()
+    }
+}
+
+pub fn parse_cmap(input: &[u8]) -> R<CMap> {
     let (i, _version) = be_u16(input)?;
     let (i, num_tables) = be_u16(i)?;
     
@@ -228,6 +241,7 @@ pub fn parse_cmap(input: &[u8]) -> R<HashMap<u32, u32>> {
         .filter_map(|off| input.get(off as usize ..));
     
     let mut cmap = HashMap::new();
+    let mut cmap2 = HashMap::new();
     for table in tables {
         let (i, format) = be_u16(table)?;
         debug!("cmap format {}", format);
@@ -304,10 +318,39 @@ pub fn parse_cmap(input: &[u8]) -> R<HashMap<u32, u32>> {
                     }
                 }
             }
+            14 => {
+                let (i, length) = be_u32(i)?;
+                let i = &i[.. length as usize - 6];
+                
+                let (i, num_var_selector_records) = be_u32(i)?;
+                for (var_selector, default_uvs_offset, non_default_uvs_offset) in iterator(i, tuple((be_u24, be_u32, be_u32))).take(num_var_selector_records as usize) {
+                    if default_uvs_offset != 0 {
+                        let i = &table[default_uvs_offset as usize ..];
+                        let (i, num_unicode_value_ranges) = be_u32(i)?;
+                        for (start_unicode_value, additional_count) in iterator(i, tuple((be_u24, be_u8))).take(num_unicode_value_ranges as usize) {
+                            for cp in start_unicode_value ..= start_unicode_value + additional_count as u32 {
+                                // lets hope cmap is filled already…
+                                cmap2.insert((cp, var_selector), cmap[&cp]);
+                            }
+                        }
+                    }
+                    if non_default_uvs_offset != 0 {
+                        let i = &table[non_default_uvs_offset as usize ..];
+                        let (i, num_uvs_mappings) = be_u32(i)?;
+                        for (unicode_value, glyph_id) in iterator(i, tuple((be_u24, be_u16))).take(num_uvs_mappings as usize) {
+                            // lets hope cmap is filled already…
+                            cmap2.insert((unicode_value, var_selector), glyph_id as u32);
+                        }
+                    }
+                }
+            }
             n => unimplemented!("cmap format {}", n),
         }
     }
-    Ok((&[], cmap))
+    Ok((&[], CMap {
+        single_codepoint: cmap,
+        double_codepoint: cmap2
+    }))
 }
 
 pub struct Hhea {
@@ -434,20 +477,35 @@ fn parse_kern_format2<'a>(data: &'a [u8], table: &mut HashMap<(u32, u32), i16>) 
     Ok((i, ()))
 }
 
-pub fn parse_kern(i: &[u8]) -> R<HashMap<(u32, u32), i16>> {
-    debug!("kern table");
+pub fn parse_kern(input: &[u8]) -> R<HashMap<(u32, u32), i16>> {
+    let (i, version) = be_u16(input)?;
+    debug!("kern table version {}", version);
+    match version {
+        0 => parse_kern_ms(input),
+        1 => parse_kern_apple(input),
+        _ => panic!("stahp!")
+    }
+}
+
+pub fn parse_kern_apple(i: &[u8]) -> R<HashMap<(u32, u32), i16>> {
+    let (i, version) = be_u32(i)?;
+    assert_eq!(version, 0x00010000);
+    
+    unimplemented!()
+}
+pub fn parse_kern_ms(i: &[u8]) -> R<HashMap<(u32, u32), i16>> {
     let (i, version) = be_u16(i)?;
     assert_eq!(version, 0);
     
     let mut table = HashMap::new();
     let (mut i, n_tables) = be_u16(i)?;
     for _ in 0 .. n_tables {
-        let (version, length, coverage, format) = parse(&mut i, tuple((be_u16, be_u16, be_u8, be_u8)))?;
+        let (version, length, format, coverage) = parse(&mut i, tuple((be_u16, be_u16, be_u8, be_u8)))?;
         debug!("format={}, coverage={:02x}", format, coverage);
         let data = parse(&mut i, take(length as usize - 6))?;
         match (format, coverage) {
-            (0, 0x80) => parse_kern_format0(data, &mut table)?.1,
-            (2, 0x80) => parse_kern_format2(data, &mut table)?.1,
+            (0, 0x01) => parse_kern_format0(data, &mut table)?.1,
+            (2, 0x01) => parse_kern_format2(data, &mut table)?.1,
             (f, _) => panic!("invalid kern subtable format {}", f)
         }
     }

@@ -1,4 +1,4 @@
-use font::{Font, parse, draw_text};
+use font::{Font, parse, layout::line};
 use vector::{Svg, Surface, PathStyle};
 use std::env;
 use std::fs;
@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         fill: None,
         stroke: Some(((0, 0, 0, 255), 0.05))
     };
-    fs::write("text.svg", draw_text::<Svg>(&*font, 20., &text, glyph_style, Some(baseline_style)).finish());
+    fs::write("text.svg", line::<Svg>(&*font, 20., &text, glyph_style, Some(baseline_style)).finish());
     
     Ok(())
 }

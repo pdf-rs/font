@@ -217,7 +217,8 @@ pub struct State<O: Outline> {
     pub done: bool,
     pub stem_hints: u32,
     pub delta_width: Option<f32>,
-    pub first_stack_clearing_operator: bool
+    pub first_stack_clearing_operator: bool,
+    pub flex_sequence: Option<Vec<Vector>>
 }
 
 impl<O: Outline> State<O> {
@@ -232,7 +233,8 @@ impl<O: Outline> State<O> {
             done: false,
             stem_hints: 0,
             delta_width: None,
-            first_stack_clearing_operator: true
+            first_stack_clearing_operator: true,
+            flex_sequence: None
         }
     }
     #[inline]
@@ -246,6 +248,7 @@ impl<O: Outline> State<O> {
         self.stem_hints = 0;
         self.delta_width = None;
         self.first_stack_clearing_operator = true;
+        self.flex_sequence = None;
     }
     #[inline]
     pub fn into_path(self) -> O {
@@ -258,6 +261,13 @@ impl<O: Outline> State<O> {
     #[inline]
     pub fn pop(&mut self) -> Value {
         self.stack.pop().expect("no value on the stack")
+    }
+    #[inline]
+    fn pop_tuple<T>(&mut self) -> T where
+        T: TupleElements<Element=Value>
+    {
+        let range = self.stack.len() - T::N ..;
+        T::from_iter(self.stack.drain(range)).unwrap()
     }
     /// get stack[0 .. T::N] as a tuple
     /// does not modify the stack

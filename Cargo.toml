@@ -26,3 +26,6 @@ raqote = { version = "*", default-features = false }
 
 walkdir = "2.2.9"
 #jemallocator = "0.3.0"
+
+[patch."https://github.com/s3bk/vector/"]
+vector = { path = "../vector" }

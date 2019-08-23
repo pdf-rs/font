@@ -243,82 +243,63 @@ impl Mode {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub enum Operator {
-    Array,
-    Begin,
-    ClearToMark,
-    CloseFile,
-    CurrentDict,
-    CurrentFile,
-    DefineFont,
-    For,
-    Def,
-    Dict,
-    Dup,
-    End,
-    EndArray,
-    Exch,
-    ExecuteOnly,
-    Eexec,
-    False,
-    Get,
-    Index,
-    Mark,
-    NoAccess,
-    Pop,
-    Put,
-    Known,
-    ReadOnly,
-    ReadString,
-    String,
-    True,
-    If,
-    IfElse,
-}
-
-macro_rules! map {
-    ($($key:expr => $val:expr),*) => (
-        [$(($key, $val)),*]
+macro_rules! operators {
+    ($($key:expr => $name:ident),*; $($key2:expr => $name2:ident),*) => (
+        #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+        pub enum Operator {
+            $($name),*
+        }
+        
+        const OPERATOR_MAP: &[(&'static str, Operator)] = &[
+            $( ($key, Operator::$name), )*
+            $( ($key2, Operator::$name2), )*
+        ];
     )
 }
 
-const OPERATOR_MAP: &[(&'static str, Operator)] = {
-    use Operator::*;
-    &map!{
-        "array"         => Array,
-        "begin"         => Begin,
-        "currentdict"   => CurrentDict,
-        "currentfile"   => CurrentFile,
-        "cleartomark"   => ClearToMark,
-        "closefile"     => CloseFile,
-        "definefont"    => DefineFont,
-        "for"           => For,
-        "def"           => Def,
-        "dict"          => Dict,
-        "dup"           => Dup,
-        "end"           => End,
-        "exch"          => Exch,
-        "executeonly"   => ExecuteOnly,
-        "eexec"         => Eexec,
-        "false"         => False,
-        "get"           => Get,
-        "if"            => If,
-        "ifelse"        => IfElse,
-        "index"         => Index,
-        "known"         => Known,
-        "mark"          => Mark,
-        "noaccess"      => NoAccess,
-        "pop"           => Pop,
-        "put"           => Put,
-        "readonly"      => ReadOnly,
-        "readstring"    => ReadString,
-        "string"        => String,
-        "true"          => True,
-        "]"             => EndArray,
-        "["             => Mark
-    }
-};
+operators!{
+    "array"         => Array,
+    "begin"         => Begin,
+    "currentdict"   => CurrentDict,
+    "currentfile"   => CurrentFile,
+    "cleartomark"   => ClearToMark,
+    "closefile"     => CloseFile,
+    "count"         => Count,
+    "copy"          => Copy,
+    "cvx"           => Cvx,
+    "definefont"    => DefineFont,
+    "for"           => For,
+    "def"           => Def,
+    "dict"          => Dict,
+    "dup"           => Dup,
+    "end"           => End,
+    "exch"          => Exch,
+    "executeonly"   => ExecuteOnly,
+    "eexec"         => Eexec,
+    "exec"          => Exec,
+    "eq"            => Eq,
+    "false"         => False,
+    "get"           => Get,
+    "if"            => If,
+    "ifelse"        => IfElse,
+    "index"         => Index,
+    "internaldict"  => InternalDict,
+    "known"         => Known,
+    "length"        => Length,
+    "maxlength"     => MaxLength,
+    "mark"          => Mark,
+    "noaccess"      => NoAccess,
+    "not"           => Not,
+    "pop"           => Pop,
+    "put"           => Put,
+    "readonly"      => ReadOnly,
+    "readstring"    => ReadString,
+    "string"        => String,
+    "true"          => True,
+    "]"             => EndArray;
+    
+    "["             => Mark
+}
 
 pub struct Input<'a> {
     data:   &'a [u8]
@@ -384,41 +365,37 @@ pub struct Vm {
     literals:   IndexSet<Vec<u8>>,
     fonts:      HashMap<String, DictKey>,
     dict_stack: Vec<DictKey>,
-    stack:      Vec<Item>
+    stack:      Vec<Item>,
+    error_dict: DictKey,
+    internal_dict: DictKey
 }
 impl Vm {
     pub fn new() -> Vm {
+        let mut dicts = SlotMap::with_key();
+        let error_dict_key = dicts.insert((Dictionary::new(), Mode { read: true, write: true, execute: false }));
+        let internal_dict_key = dicts.insert((Dictionary::new(), Mode { read: true, write: true, execute: false }));
+        
         let mut vm = Vm { 
-            dicts: SlotMap::with_key(),
+            dicts,
             arrays: SlotMap::with_key(),
             strings: SlotMap::with_key(),
             literals: IndexSet::new(),
             fonts: HashMap::new(),
             dict_stack: Vec::new(),
             stack: Vec::new(),
+            error_dict: error_dict_key,
+            internal_dict: internal_dict_key
         };
         let mut system_dict: Dictionary = OPERATOR_MAP.iter()
             .map(|&(name, op)| (Item::Literal(vm.make_lit(name.as_bytes())), Item::Operator(op))) 
             .collect();
         
-        // systemdict fuckery
-        {
-            let key = vm.make_dict(system_dict, Mode { write: true, execute: false, read: true });
-            vm.push_dict(key);
-            let lit = vm.make_lit(b"systemdict");
-            let (ref mut dict, ref mut mode) = vm.dicts[key];
-            dict.insert(Item::Literal(lit), Item::Dict(key));
-            mode.write = false;
-        }
-        
-        
         let mut user_dict = Dictionary::new();
-        
-        let font_dict = vm.make_dict(Dictionary::new(), Mode { write: true, execute: false, read: true });
-        user_dict.insert(Item::Literal(vm.make_lit(b"FontDirectory")), Item::Dict(font_dict));
-        
-        // StandardEncoding …
         {
+            let font_dict = vm.make_dict(Dictionary::new(), Mode { write: true, execute: false, read: true });
+            user_dict.insert(Item::Literal(vm.make_lit(b"FontDirectory")), Item::Dict(font_dict));
+            
+            // StandardEncoding …
             use crate::cff::{STANDARD_STRINGS, STANDARD_ENCODING};
             let arr = STANDARD_ENCODING.iter().map(|&sid|
                 Item::Literal(vm.make_lit(STANDARD_STRINGS[sid as usize].as_bytes()))
@@ -426,8 +403,25 @@ impl Vm {
             let standard_encoding = vm.make_array(arr, Mode { write: false, execute: false, read: true });
             user_dict.insert(Item::Literal(vm.make_lit(b"StandardEncoding")), Item::Array(standard_encoding));
         }
-        let key = vm.make_dict(user_dict, Mode { write: true, execute: false, read: true });
-        vm.push_dict(key);
+        let user_dict_key = vm.make_dict(user_dict, Mode { write: true, execute: false, read: true });
+        
+        {
+            let key = vm.make_lit(b"userdict");
+            system_dict.insert(Item::Literal(key), Item::Dict(user_dict_key));
+            
+            let key = vm.make_lit(b"errordict");
+            system_dict.insert(Item::Literal(key), Item::Dict(error_dict_key));
+        }
+        
+        // systemdict fuckery
+        {
+            let system_dict_key = vm.make_dict(system_dict, Mode { write: false, execute: false, read: true });
+            vm.push_dict(system_dict_key);
+            let lit = vm.make_lit(b"systemdict");
+            vm.dicts[system_dict_key].0.insert(Item::Literal(lit), Item::Dict(system_dict_key));
+        }
+        
+        vm.push_dict(user_dict_key);
         
         vm
     }
@@ -520,6 +514,11 @@ impl Vm {
         &self.stack
     }
     
+    fn print_current_dict(&self) {
+        let r = self.display(self.dict_stack.last().map(|&d| Item::Dict(d)).unwrap_or(Item::Null));
+        println!("current dict: {:?}", r);
+    }
+    
     // resolve name items. or keep them unchanged if unresolved
     fn resolve(&self, item: Item) -> Option<Item> {
         for &dict_key in self.dict_stack.iter().rev() {
@@ -546,6 +545,7 @@ impl Vm {
     }
     pub fn exec_token(&mut self, token: Token, input: &mut Input) {
         let item = self.transform_token(token);
+        debug!("exec_token {:?}", self.display(item));
         match item {
             Item::Operator(op) => self.exec_operator(op, input),
             Item::Name(key) => {
@@ -553,14 +553,14 @@ impl Vm {
                     Some(item) => item,
                     None => panic!("unimplemented token {:?}", String::from_utf8_lossy(self.get_lit(key)))
                 };
-                self.exec(item, input)
+                self.exec_expand(item, input)
             }
             item => self.push(item)
         }
     }
     
-    fn exec(&mut self, item: Item, input: &mut Input) {
-        debug!("exec {:?}", self.display(item));
+    fn exec_expand(&mut self, item: Item, input: &mut Input) {
+        debug!("exec_expand {:?}", self.display(item));
         match item {
             Item::Operator(op) => self.exec_operator(op, input),
             Item::Name(key) => {
@@ -586,6 +586,30 @@ impl Vm {
                     }
                     pos += 1;
                 }
+            }
+            item => self.push(item)
+        }
+    }
+    fn exec(&mut self, item: Item, input: &mut Input) {
+        debug!("exec {:?}", self.display(item));
+        /*
+        loop {
+            let mut s = String::new();
+            std::io::stdin().read_line(&mut s);
+            let s = s.trim();
+            match s {
+                "s" => self.print_stack(),
+                "d" => self.print_current_dict(),
+                "" => break,
+                _ => println!("unknown command. known are: 's' for print stack, 'd' for print current dict, empty to continue")
+            }
+        }
+        */
+        match item {
+            Item::Operator(op) => self.exec_operator(op, input),
+            Item::Name(key) => {
+                let item = self.resolve(Item::Literal(key)).expect("undefined");
+                self.exec_expand(item, input)
             }
             item => self.push(item)
         }
@@ -624,6 +648,15 @@ impl Vm {
                         self.push(Item::Dict(dict_key));
                     }
                     args => panic!("definefont: invalid args {:?}", self.display_tuple(args))
+                }
+            }
+            Operator::InternalDict => {
+                match self.pop() {
+                    Item::Int(1183615869) => {
+                        let dict = Item::Dict(self.internal_dict);
+                        self.push(dict);
+                    }
+                    i => panic!("internaldict: invalid argument: {:?}", self.display(i))
                 }
             }
             Operator::For => {
@@ -671,6 +704,19 @@ impl Vm {
                     }
                     args => panic!("ifelse: invalid args {:?}", self.display_tuple(args))
                 }
+            }
+            Operator::Exec => {
+                let item = self.pop();
+                self.exec(item, input);
+            }
+            Operator::Eq => {
+                let (a, b) = self.pop_tuple();
+                self.push(Item::Bool(a == b));
+            }
+            Operator::Cvx => {
+                let item = self.pop();
+                let item = self.resolve(item).unwrap_or(item);
+                self.push(item);
             }
             Operator::Def => {
                 let (key, val) = self.pop_tuple();
@@ -722,6 +768,42 @@ impl Vm {
                 self.push(v.clone());
                 self.push(v);
             },
+            Operator::Copy => {
+                let last = self.pop();
+                match last {
+                    Item::Int(i) if i >= 0 => {
+                        let n = i as usize;
+                        let len = self.stack.len();
+                        let start = self.stack.len() - n;
+                        for i in start .. len {
+                            let item = self.stack[i];
+                            self.push(item);
+                        }
+                    },
+                    _ => {
+                        let first = self.pop();
+                        match (first, last) {
+                            (Item::Array(a), Item::Array(b)) => {
+                                // ugly, but avoids RefCells
+                                let a = self.get_array(a).clone();
+                                self.get_array_mut(b)[.. a.len()].copy_from_slice(&a);
+                                self.push(last);
+                            }
+                            (Item::Dict(a), Item::Dict(b)) => {
+                                let a = self.get_dict(a).clone();
+                                self.get_dict_mut(b).extend(a);
+                                self.push(last);
+                            }
+                            (Item::String(a), Item::String(b)) => {
+                                let a = self.get_string(a).to_owned();
+                                self.get_string_mut(b)[.. a.len()].copy_from_slice(&a);
+                                self.push(last);
+                            }
+                            args => panic!("copy: invalid arguments {:?}", self.display_tuple(args))
+                        }
+                    }
+                }
+            }
             Operator::Pop => {
                 self.pop();
             }
@@ -733,6 +815,13 @@ impl Vm {
             }
             Operator::False => self.push(Item::Bool(false)),
             Operator::True => self.push(Item::Bool(true)),
+            Operator::Not => {
+                match self.pop() {
+                    Item::Bool(b) => self.push(Item::Bool(!b)),
+                    Item::Int(i) => self.push(Item::Int(!i)),
+                    arg => panic!("not: invalid argument {:?}", self.display(arg))
+                }
+            }
             Operator::Index => match self.pop() {
                 Item::Int(idx) if idx >= 0 => {
                     let n = self.stack.len();
@@ -767,6 +856,29 @@ impl Vm {
                         self.get_dict_mut(dict).insert(key, any);
                     }
                     args => panic!("put: unsupported args {:?})", self.display_tuple(args))
+                }
+            }
+            Operator::Count => {
+                let n = self.stack.len();
+                self.push(Item::Int(n as i32));
+            }
+            Operator::Length => {
+                let len = match self.pop() {
+                    Item::Array(key) => self.get_array(key).len(),
+                    Item::Dict(key) => self.get_dict(key).len(),
+                    Item::String(key) => self.get_string(key).len(),
+                    Item::Name(lit) => self.get_lit(lit).len(),
+                    arg => panic!("length: invalid argument {:?}", self.display(arg))
+                };
+                self.push(Item::Int(len as i32));
+            }
+            Operator::MaxLength => {
+                match self.pop() {
+                    Item::Dict(key) => {
+                        let cap = self.get_dict(key).capacity();
+                        self.push(Item::Int(cap as i32));
+                    }
+                    arg => panic!("maxlength: invalid argument {:?}", self.display(arg))
                 }
             }
             Operator::ReadOnly => {
@@ -844,7 +956,7 @@ impl Vm {
         tuple.map(|item| RefItem::new(self, item))
     }
     pub fn print_stack(&self) {
-        for (i, &item) in self.stack.iter().rev().enumerate() {
+        for (i, &item) in self.stack.iter().rev().enumerate().rev() {
             println!("stack[{}]: {:?}", i, self.display(item));
         }
     }

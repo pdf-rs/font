@@ -10,7 +10,7 @@ use nom::{
     sequence::tuple
 };
 use vector::{Outline, Contour, Transform, Vector, Rect};
-use crate::opentype::{parse_tables, parse_head, parse_maxp, parse_loca, parse_cmap, parse_hhea, parse_hmtx, Hmtx, Tables};
+use crate::opentype::{parse_tables, parse_head, parse_maxp, parse_loca, parse_cmap, parse_hhea, parse_hmtx, Hmtx, Tables, CMap};
 use pathfinder_geometry::{transform2d::Matrix2x2F};
 use itertools::Itertools;
 
@@ -22,7 +22,7 @@ pub enum Shape<O: Outline> {
 }
 pub struct TrueTypeFont<O: Outline> {
     shapes: Vec<Shape<O>>,
-    cmap: Option<HashMap<u32, u32>>,
+    cmap: Option<CMap>,
     hmtx: Hmtx,
     units_per_em: u16,
     bbox: Rect,
@@ -103,7 +103,7 @@ impl<O: Outline> Font<O> for TrueTypeFont<O> {
     fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<u32> {
         debug!("glyph for unicode codepoint {0} ({0:#x})", codepoint);
         match self.cmap {
-            Some(ref cmap) => cmap.get(&codepoint).cloned(),
+            Some(ref cmap) => cmap.get_codepoint(codepoint),
             None => None
         }
     }
