@@ -18,16 +18,7 @@ use nom::{
 use tuple::T4;
 use vector::{Outline, Transform, Rect, Vector};
 
-pub fn parse_opentype<O: Outline + 'static>(data: &[u8], idx: u32) -> Box<dyn Font<O>> {
-    let mut tables = parse_tables(data).get();
-    for (tag, _) in tables.entries() {
-        debug!("tag: {:?} ({:?})", tag, std::str::from_utf8(&tag));
-    }
-    
-    Box::new(OpenTypeFont::new(tables)) as _
-}
-
-struct OpenTypeFont<O: Outline> {
+pub struct OpenTypeFont<O: Outline> {
     outlines: Vec<O>,
     kern: HashMap<(u32, u32), i16>,
     cmap: Option<CMap>,
@@ -36,7 +27,15 @@ struct OpenTypeFont<O: Outline> {
     font_matrix: Transform
 }
 impl<O: Outline> OpenTypeFont<O> {
-    fn new<T>(tables: Tables<T>) -> Self where T: Deref<Target=[u8]> {
+    pub fn parse(data: &[u8]) -> Self {
+        let mut tables = parse_tables(data).get();
+        for (tag, _) in tables.entries() {
+            debug!("tag: {:?} ({:?})", tag, std::str::from_utf8(&tag));
+        }
+        
+        OpenTypeFont::from_tables(tables)
+    }
+    pub fn from_tables<T>(tables: Tables<T>) -> Self where T: Deref<Target=[u8]> {
         let head = parse_head(tables.get(b"head").expect("no head")).get();
         let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
         let hhea = parse_hhea(tables.get(b"hhea").expect("no hhea")).get();

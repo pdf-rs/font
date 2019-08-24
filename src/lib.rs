@@ -136,7 +136,7 @@ pub mod layout;
 pub use truetype::TrueTypeFont;
 pub use cff::CffFont;
 pub use type1::Type1Font;
-pub use opentype::parse_opentype;
+pub use opentype::{OpenTypeFont};
 use woff::{woff, woff2};
 
 pub type R<'a, T> = IResult<&'a [u8], T, VerboseError<&'a [u8]>>;
@@ -362,7 +362,7 @@ pub fn parse<O: Outline + 'static>(data: &[u8]) -> Box<dyn Font<O>> {
     info!("font magic: {:?}", magic);
     match magic {
         &[0x80, 1, _, _] => Box::new(Type1Font::parse_pfb(data)) as _,
-        b"OTTO" | [0,1,0,0] => parse_opentype(data, 0),
+        b"OTTO" | [0,1,0,0] => Box::new(OpenTypeFont::parse(data)) as _,
         b"ttcf" | b"typ1" => unimplemented!(), // Box::new(TrueTypeFont::parse(data, 0)) as _,
         b"true" => Box::new(TrueTypeFont::parse(data)) as _,
         b"%!PS" => Box::new(Type1Font::parse_postscript(data)) as _,
