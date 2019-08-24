@@ -5,7 +5,7 @@ use nom::{IResult,
 use tuple::{TupleElements};
 use itertools::Itertools;
 use indexmap::IndexMap;
-use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex};
+use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId};
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
 use crate::parsers::parse;
@@ -17,7 +17,9 @@ pub struct Type1Font<O: Outline> {
     names: HashMap<String, u32>, // name -> glyph id
     unicode_map: HashMap<&'static str, u32>,
     font_matrix: Transform,
-    bbox: Option<Rect>
+    bbox: Option<Rect>,
+    postscript_name: Option<String>,
+    full_name: Option<String>
 }
 impl<O: Outline> Font<O> for Type1Font<O> {
     fn num_glyphs(&self) -> u32 {
@@ -26,23 +28,29 @@ impl<O: Outline> Font<O> for Type1Font<O> {
     fn font_matrix(&self) -> Transform {
         self.font_matrix
     }
-    fn glyph(&self, id: u32) -> Option<Glyph<O>> {
-        self.glyphs.get_index(id as usize).map(|(_, glyph)| glyph.clone())
+    fn glyph(&self, gid: GlyphId) -> Option<Glyph<O>> {
+        self.glyphs.get_index(gid.0 as usize).map(|(_, glyph)| glyph.clone())
     }
-    fn gid_for_codepoint(&self, codepoint: u32) -> Option<u32> {
-        self.glyphs.get_full(&codepoint).map(|(index, _, _)| index as u32)
+    fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
+        self.glyphs.get_full(&codepoint).map(|(index, _, _)| GlyphId(index as u32))
     }
-    fn gid_for_name(&self, name: &str) -> Option<u32> {
-        self.names.get(name).cloned()
+    fn gid_for_name(&self, name: &str) -> Option<GlyphId> {
+        self.names.get(name).map(|&id| GlyphId(id))
     }
-    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<u32> {
+    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
         let c = std::char::from_u32(codepoint)?;
         let mut buf = [0; 4];
         let s = c.encode_utf8(&mut buf);
-        self.unicode_map.get(&*s).cloned()
+        self.unicode_map.get(&*s).map(|&id| GlyphId(id))
     }
     fn bbox(&self) -> Option<Rect> {
         self.bbox
+    }
+    fn full_name(&self) -> Option<&str> {
+        self.full_name.as_ref().map(|s| s.as_str())
+    }
+    fn postscript_name(&self) -> Option<&str> {
+        self.postscript_name.as_ref().map(|s| s.as_str())
     }
 }
 
@@ -68,6 +76,13 @@ impl<O: Outline> Type1Font<O> {
         
         debug!("FontDict keys: {:?}", font_dict.iter().map(|(k, _)| k).format(", "));
         debug!("Private keys: {:?}", private_dict.iter().map(|(k, _)| k).format(", "));
+        debug!("FontName: {:?}", font_dict.get("FontName"));
+        debug!("FontInfo: {:?}", font_dict.get("FontInfo"));
+        
+        let postscript_name = font_dict.get("FontName").map(|i| i.as_str().unwrap().into());
+        let full_name = font_dict.get("FontInfo").and_then(|i|
+            i.as_dict().unwrap().get("FullName").map(|i| i.as_str().unwrap().into())
+        );
         
         let char_strings = font_dict.get("CharStrings").expect("no /CharStrings").as_dict().unwrap();
         
@@ -140,7 +155,9 @@ impl<O: Outline> Type1Font<O> {
             glyphs,
             names,
             unicode_map,
-            bbox
+            bbox,
+            postscript_name,
+            full_name
         }
     }
 }

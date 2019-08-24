@@ -1,7 +1,6 @@
 use std::iter;
-use std::collections::HashMap;
 use std::ops::Deref;
-use crate::{Font, Glyph, R, IResultExt};
+use crate::{Font, Glyph, R, IResultExt, GlyphId};
 use crate::parsers::{iterator, parse};
 use encoding::Encoding;
 use nom::{
@@ -86,24 +85,24 @@ impl<O: Outline> Font<O> for TrueTypeFont<O> {
         let scale = 1.0 / self.units_per_em as f32;
         Transform::from_scale(Vector::splat(scale.into()))
     }
-    fn glyph(&self, id: u32) -> Option<Glyph<O>> {
-        assert!(id <= u16::max_value() as u32);
-        debug!("get gid {}", id);
-        let path = self.get_path(id);
-        let metrics = self.hmtx.metrics_for_gid(id as u16);
+    fn glyph(&self, id: GlyphId) -> Option<Glyph<O>> {
+        assert!(id.0 <= u16::max_value() as u32);
+        debug!("get gid {:?}", id);
+        let path = self.get_path(id.0);
+        let metrics = self.hmtx.metrics_for_gid(id.0 as u16);
         
         Some(Glyph {
             path,
             metrics
         })
     }
-    fn gid_for_codepoint(&self, codepoint: u32) -> Option<u32> {
+    fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
         self.gid_for_unicode_codepoint(codepoint)
     }
-    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<u32> {
+    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
         debug!("glyph for unicode codepoint {0} ({0:#x})", codepoint);
         match self.cmap {
-            Some(ref cmap) => cmap.get_codepoint(codepoint),
+            Some(ref cmap) => cmap.get_codepoint(codepoint).map(GlyphId),
             None => None
         }
     }
@@ -113,7 +112,7 @@ impl<O: Outline> Font<O> for TrueTypeFont<O> {
     fn bbox(&self) -> Option<Rect> {
         Some(self.bbox)
     }
-    fn kerning(&self, left: u32, right: u32) -> f32 {
+    fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
         0.0
     }
 }

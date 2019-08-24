@@ -7,7 +7,7 @@ use std::convert::TryInto;
 use nom::{IResult, Err::*, error::VerboseError};
 use tuple::{TupleElements};
 use encoding::Encoding;
-use vector::{Outline, Vector, PathBuilder, Transform, Surface, Rect, PathStyle};
+use vector::{Outline, Vector, PathBuilder, Transform, Rect};
 
 #[derive(Clone)]
 pub struct Glyph<O: Outline> {
@@ -17,6 +17,9 @@ pub struct Glyph<O: Outline> {
     /// transform by font_matrix to scale it to 1em
     pub path: O 
 }
+
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct GlyphId(pub u32);
 
 #[derive(Copy, Clone)]
 pub struct VMetrics {
@@ -28,40 +31,85 @@ pub struct HMetrics {
     pub advance: Vector
 }
 pub trait Font<O: Outline> {
+    /// Return the "number of glyphs" in the font.
+    ///
+    /// This may or may not correlate to the actual number of "real glyphs".
+    /// It does however define the highest valid glyph id (*gid*) as `num_glyphs() - 1`
     fn num_glyphs(&self) -> u32;
+    
+    /// The transformation to get from glyph space (which all methods use) into text space with a unit of 1em.
     fn font_matrix(&self) -> Transform;
-    fn glyph(&self, gid: u32) -> Option<Glyph<O>>;
+    
+    /// Get the glyph identified by `gid`.
+    ///
+    /// Note, that a *gid* is only meaningful within one font and cannot be transfered to another font.
+    fn glyph(&self, gid: GlyphId) -> Option<Glyph<O>>;
+    
+    /// Get all glyphs in this font
     fn glyphs(&self) -> Glyphs<O> {
         Glyphs {
-            glyphs: (0 .. self.num_glyphs()).map(|i| self.glyph(i).unwrap()).collect()
+            glyphs: (0 .. self.num_glyphs()).map(|i| self.glyph(GlyphId(i)).unwrap()).collect()
         }
     }
-    fn gid_for_codepoint(&self, _codepoint: u32) -> Option<u32> {
+    
+    /// Get the *gid* for the given codepoint in the "native encoding" of this font.
+    ///
+    /// (see `encoding()` to find out which that is).
+    /// Returns None if there is no "native encoding", or the font does not contain a glyph for this codepoint.
+    fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
         None
     }
-    fn gid_for_name(&self, _name: &str) -> Option<u32> {
+    
+    /// Get the *gid* for the glyph with the given *name*.
+    ///
+    /// Returns None if the underlying font does not define any names, or does not contain a glyph with this name.
+    fn gid_for_name(&self, name: &str) -> Option<GlyphId> {
         None
     }
-    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<u32> {
+    
+    /// Get the *gid* for the glyph that corresponds to the single unicode scalar `codepoint`.
+    ///
+    /// Returns None if the font if the codepoint cannot be mapped to a glyph for whatever reason.
+    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
         self.encoding()
             .and_then(|encoding| encoding.reverse_map())
             .and_then(|reverse| reverse.get(codepoint))
             .and_then(|cp| self.gid_for_codepoint(cp as u32))
     }
+    
+    /// The "native encoding" of this font.
+    ///
+    /// Returns None if this term does not apply or it isn't defined.
     fn encoding(&self) -> Option<Encoding> {
         None
     }
-    fn get_notdef_gid(&self) -> u32 {
-        0
+    
+    /// The *gid* of the `.notdef' glyph.
+    fn get_notdef_gid(&self) -> GlyphId {
+        GlyphId(0)
     }
+    
+    /// The *bounding box* of all glyphs.
+    ///
+    /// No glyph **should** contain contours outside this rectangle.
     fn bbox(&self) -> Option<Rect> {
         None
     }
+    
+    /// Vertical metrics of the font (common across all glyphs)
     fn vmetrics(&self) -> Option<VMetrics> {
         None
     }
-    fn kerning(&self, left: u32, right: u32) -> f32 {
+    
+    /// Kerning distance for the given glyph pair
+    fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
         0.0
+    }
+    fn full_name(&self) -> Option<&str> {
+        None
+    }
+    fn postscript_name(&self) -> Option<&str> {
+        None
     }
 }
 pub struct Glyphs<O: Outline> {
@@ -69,8 +117,8 @@ pub struct Glyphs<O: Outline> {
 }
 impl<O: Outline> Glyphs<O> {
     #[inline]
-    pub fn get(&self, codepoint: u32) -> Option<&Glyph<O>> {
-        self.glyphs.get(codepoint as usize)
+    pub fn get(&self, gid: GlyphId) -> Option<&Glyph<O>> {
+        self.glyphs.get(gid.0 as usize)
     }
 }
 

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::iter::once;
 use std::borrow::Cow;
-use crate::{Font, Glyph, Value, Context, State, type1, type2, IResultExt, R, VMetrics, HMetrics};
+use crate::{Font, Glyph, Value, Context, State, type1, type2, IResultExt, R, VMetrics, HMetrics, GlyphId};
 use nom::{
     number::complete::{be_u8, be_u16, be_i16, be_u24, be_u32, be_i32},
     bytes::complete::{take},
@@ -39,26 +39,26 @@ impl<O: Outline> Font<O> for CffFont<O> {
     fn font_matrix(&self) -> Transform {
         self.font_matrix
     }
-    fn glyph(&self, id: u32) -> Option<Glyph<O>> {
-        self.glyphs.get(id as usize).cloned()
+    fn glyph(&self, id: GlyphId) -> Option<Glyph<O>> {
+        self.glyphs.get(id.0 as usize).cloned()
     }
-    fn gid_for_codepoint(&self, codepoint: u32) -> Option<u32> {
+    fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
         match self.codepoint_map.get(codepoint as usize) {
             None | Some(&0) => None,
-            Some(&n) => Some(n as u32)
+            Some(&n) => Some(GlyphId(n as u32))
         }
     }
-    fn gid_for_name(&self, name: &str) -> Option<u32> {
+    fn gid_for_name(&self, name: &str) -> Option<GlyphId> {
         match self.name_map.get(name) {
             None => None,
-            Some(&gid) => Some(gid as u32)
+            Some(&gid) => Some(GlyphId(gid as u32))
         }
     }
     fn encoding(&self) -> Option<Encoding> {
         self.encoding
     }
-    fn get_notdef_gid(&self) -> u32 {
-        0
+    fn get_notdef_gid(&self) -> GlyphId {
+        GlyphId(0)
     }
     fn bbox(&self) -> Option<Rect> {
         self.bbox

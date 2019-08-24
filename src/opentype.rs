@@ -3,7 +3,7 @@
 use std::convert::TryInto;
 use std::collections::HashMap;
 use std::ops::Deref;
-use crate::{Font, R, IResultExt, VMetrics, Glyph, HMetrics};
+use crate::{Font, R, IResultExt, VMetrics, Glyph, HMetrics, GlyphId};
 use crate::truetype::{Shape, parse_shapes};
 use crate::cff::{read_cff};
 use encoding::Encoding;
@@ -84,21 +84,21 @@ impl<O: Outline> Font<O> for OpenTypeFont<O> {
     fn font_matrix(&self) -> Transform {
         self.font_matrix
     }
-    fn glyph(&self, gid: u32) -> Option<Glyph<O>> {
-        self.outlines.get(gid as usize).map(|outline| {
+    fn glyph(&self, gid: GlyphId) -> Option<Glyph<O>> {
+        self.outlines.get(gid.0 as usize).map(|outline| {
             Glyph {
                 path: outline.clone(),
-                metrics: self.hmtx.metrics_for_gid(gid as u16)
+                metrics: self.hmtx.metrics_for_gid(gid.0 as u16)
             }
         })
     }
-    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<u32> {
+    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
         match self.cmap {
-            Some(ref cmap) => cmap.get_codepoint(codepoint),
+            Some(ref cmap) => cmap.get_codepoint(codepoint).map(GlyphId),
             None => None
         }
     }
-    fn gid_for_name(&self, name: &str) -> Option<u32> {
+    fn gid_for_name(&self, name: &str) -> Option<GlyphId> {
         None
     }
     fn encoding(&self) -> Option<Encoding> {
@@ -110,8 +110,8 @@ impl<O: Outline> Font<O> for OpenTypeFont<O> {
     fn vmetrics(&self) -> Option<VMetrics> {
         None
     }
-    fn kerning(&self, left: u32, right: u32) -> f32 {
-        self.kern.get(&(left, right)).cloned().unwrap_or(0) as f32
+    fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
+        self.kern.get(&(left.0, right.0)).cloned().unwrap_or(0) as f32
     }
 }
 
