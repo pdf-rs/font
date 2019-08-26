@@ -1,5 +1,6 @@
 use std::iter;
 use std::ops::Deref;
+use std::collections::HashMap;
 use crate::{Font, Glyph, R, IResultExt, GlyphId};
 use crate::parsers::{iterator, parse};
 use encoding::Encoding;
@@ -9,7 +10,7 @@ use nom::{
     sequence::tuple
 };
 use vector::{Outline, Contour, Transform, Vector, Rect};
-use crate::opentype::{parse_tables, parse_head, parse_maxp, parse_loca, parse_cmap, parse_hhea, parse_hmtx, Hmtx, Tables, CMap};
+use crate::opentype::{parse_tables, parse_head, parse_maxp, parse_loca, parse_cmap, parse_hhea, parse_hmtx, parse_kern, Hmtx, Tables, CMap};
 use pathfinder_geometry::{transform2d::Matrix2x2F};
 use itertools::Itertools;
 
@@ -25,6 +26,7 @@ pub struct TrueTypeFont<O: Outline> {
     hmtx: Hmtx,
     units_per_em: u16,
     bbox: Rect,
+    kern: HashMap<(u32, u32), i16>,
 }
 
 impl<O: Outline> TrueTypeFont<O> {
@@ -57,7 +59,8 @@ impl<O: Outline> TrueTypeFont<O> {
             cmap,
             hmtx,
             units_per_em: head.units_per_em,
-            bbox: head.bbox()
+            bbox: head.bbox(),
+            kern: tables.get(b"kern").map(|data| parse_kern(data).get()).unwrap_or_default()
         }
     }
     fn get_path(&self, idx: u32) -> O {
@@ -113,7 +116,7 @@ impl<O: Outline> Font<O> for TrueTypeFont<O> {
         Some(self.bbox)
     }
     fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
-        0.0
+        self.kern.get(&(left.0, right.0)).cloned().unwrap_or(0) as f32
     }
 }
 
