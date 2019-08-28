@@ -68,15 +68,16 @@ impl<O: Outline> OpenTypeFont<O> {
         };
         
         let kern = if let Some(data) = tables.get(b"GPOS") {
-            let gpos = parse_gpos(data).get();
+            let gpos = parse_gpos(data, &maxp).get();
             gpos.kern
         } else if let Some(data) = tables.get(b"kern") {
             parse_kern(data).get()
         } else {
             HashMap::new()
         };
-    
-        dbg!(&kern);
+        
+        info!("{} glyphs", maxp.num_glyphs);
+        info!("{} kern table entries", kern.len());
     
         OpenTypeFont {
             outlines,

@@ -6,7 +6,8 @@ use nom::{
 };
 use crate::{R};
 use crate::parsers::{iterator_n, parse};
-use itertools::Either;
+use crate::opentype::Maxp;
+use itertools::{Itertools, Either};
 
 fn parse_skript_list(data: &[u8]) -> R<()> {
     let (i, script_count) = be_u16(data)?;
@@ -48,6 +49,39 @@ fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(&[u8], LookupType, u16) 
     Ok((i, ()))
 }
 
+// maps gid -> class id
+fn parse_class_def(data: &[u8]) -> R<HashMap<u16, u16>> {
+    let (i, format) = be_u16(data)?;
+    let mut map = HashMap::new();
+    match format {
+        1 => {
+            let (i, start_glyph_id) = be_u16(i)?;
+            let (i, glyph_count) = be_u16(i)?;
+            for (gid, class) in (start_glyph_id ..).zip(iterator_n(i, be_u16, glyph_count)) {
+                map.insert(gid, class);
+            }
+        }
+        2 => {
+            let (i, class_rage_count) = be_u16(i)?;
+            for (start_gid, end_gid, class) in iterator_n(i, tuple((be_u16, be_u16, be_u16)), class_rage_count) {
+                for gid in start_gid ..= end_gid {
+                    map.insert(gid, class);
+                }
+            }
+        }
+        f => panic!("invalid class list format {}", f)
+    }
+    Ok((i, map))
+}
+fn invert_class_def(map: &HashMap<u16, u16>, num_glyphs: u16) -> HashMap<u16, Vec<u16>> {
+    let mut map2 = HashMap::new();
+    for gid in 0 .. num_glyphs {
+        let class = map.get(&gid).cloned().unwrap_or(0);
+        map2.entry(class).or_insert(vec![]).push(gid);
+    }
+    map2
+}
+
 #[derive(Debug)]
 enum LookupType {
     SingleAdjustment,
@@ -84,7 +118,8 @@ pub struct Gpos {
     pub kern: HashMap<(u16, u16), i16>
 }
 
-pub fn parse_gpos(data: &[u8]) -> R<Gpos> {
+// figure out how to replace with a dedicated sparse 2d map
+pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> R<'a, Gpos> {
     debug!("parse gpos");
     let (i, major_version) = be_u16(data)?;
     assert_eq!(major_version, 1);
@@ -103,9 +138,8 @@ pub fn parse_gpos(data: &[u8]) -> R<Gpos> {
     let mut gpos = Gpos::default();
     
     parse_lookup_list(&data[lookup_list_off as usize ..], |data, lookup_type, lookup_flag| {
-        dbg!(&lookup_type);
         match lookup_type { 
-            LookupType::PairAdjustment => parse_pair_adjustment(data, &mut gpos.kern)?.1,
+            LookupType::PairAdjustment => parse_pair_adjustment(data, &mut gpos.kern, maxp.num_glyphs)?.1,
             _ => {}
         }
         Ok((data, ()))
@@ -161,7 +195,7 @@ fn value_record(flags: u16) -> impl Fn(&[u8]) -> R<ValueRecord> {
     }
 }
 
-fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut HashMap<(u16, u16), i16>) -> R<'a, ()> {
+fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut HashMap<(u16, u16), i16>, num_glyphs: u16) -> R<'a, ()> {
     let (i, format) = be_u16(data)?;
     match format {
         1 => {
@@ -179,12 +213,36 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut HashMap<(u16, u16), i16>
                 
                 let iter = iterator_n(i, tuple((be_u16, value_record(value_format_1), value_record(value_format_2))), pair_value_count);
                 for (second_glyph, value_record_1, value_record_2) in iter {
-                    debug!("{:?}/{}: {:?} {:?}", first_glyph, second_glyph, value_record_1, value_record_2);
+                    //debug!("{:?}/{}: {:?} {:?}", first_glyph, second_glyph, value_record_1, value_record_2);
                     kern.insert((first_glyph, second_glyph), value_record_1.x_advance);
                 }
             }
         },
-        2 => {}
+        2 => {
+            let (i, coverage_off) = be_u16(i)?;
+            let (i, value_format_1) = be_u16(i)?;
+            let (i, value_format_2) = be_u16(i)?;
+            let (i, class_def_1_offset) = be_u16(i)?;
+            let (i, class_def_2_offset) = be_u16(i)?;
+            let (i, class_1_count) = be_u16(i)?;
+            let (i, class_2_count) = be_u16(i)?;
+            
+            let class_def_1 = parse_class_def(&data[class_def_1_offset as usize ..])?.1;
+            let inverse_1 = invert_class_def(&class_def_1, num_glyphs);
+            
+            let class_def_2 = parse_class_def(&data[class_def_2_offset as usize ..])?.1;
+            let inverse_2 = invert_class_def(&class_def_2, num_glyphs);
+            
+            let iter = (0 .. class_1_count).cartesian_product(0 .. class_2_count)
+                .zip(iterator_n(i, tuple((value_record(value_format_1), value_record(value_format_2))), class_1_count * class_2_count));
+            for ((class_1, class_2), (value_record_1, value_record_2)) in iter {
+                if value_record_1.x_advance != 0 {
+                    for (&gid1, &gid2) in inverse_1[&class_1].iter().cartesian_product(inverse_2[&class_2].iter()) {
+                        kern.insert((gid1, gid2), value_record_1.x_advance);
+                    }
+                }
+            }
+        }
         n => panic!("unsupported pair adjustment format {}", n)
     }
     Ok((i, ()))
