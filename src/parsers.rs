@@ -288,6 +288,11 @@ impl<'a, T, F> Iterator for ParserIterator<'a, T, F> where
         }
     }
 }
+pub fn iterator_n<'a, T, F>(input: &'a [u8], parser: F, n: impl Into<usize>) -> impl Iterator<Item=T> + 'a where
+    F: 'a + Fn(&'a [u8]) -> R<'a, T>, T: 'a
+{
+    ParserIterator { parser, input, _m: PhantomData }.take(n.into())
+}
 
 #[inline(always)]
 pub fn varint_u32(i: &[u8]) -> R<u32> {

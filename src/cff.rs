@@ -200,7 +200,7 @@ impl<'a> CffSlot<'a> {
         // build glyphs
         let mut state = State::new();
         self.char_strings.iter().enumerate().map(move |(id, data)| {
-            debug!("charstring for glyph {}", id);
+            trace!("charstring for glyph {}", id);
             match char_string_type {
                 CharstringType::Type1 => {
                     type1::charstring(data, &context, &mut state).expect("faild to parse charstring");
@@ -209,7 +209,7 @@ impl<'a> CffSlot<'a> {
                     type2::charstring(data, &context, &mut state).expect("faild to parse charstring");
                 }
             }
-            debug!("glyph {} {:?} {:?}", id, state.char_width, state.delta_width);
+            trace!("glyph {} {:?} {:?}", id, state.char_width, state.delta_width);
             let width = match (state.char_width, state.delta_width) {
                 (Some(w), None) => w,
                 (None, None) => default_width,

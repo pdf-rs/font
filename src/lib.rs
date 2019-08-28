@@ -131,6 +131,7 @@ mod opentype;
 mod parsers;
 mod eexec;
 mod woff;
+mod gpos;
 pub mod layout;
 
 pub use truetype::TrueTypeFont;

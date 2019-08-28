@@ -6,6 +6,7 @@ use std::ops::Deref;
 use crate::{Font, R, IResultExt, VMetrics, Glyph, HMetrics, GlyphId};
 use crate::truetype::{Shape, parse_shapes};
 use crate::cff::{read_cff};
+use crate::gpos::parse_gpos;
 use encoding::Encoding;
 use crate::parsers::{iterator, parse};
 use nom::{
@@ -20,7 +21,7 @@ use vector::{Outline, Transform, Rect, Vector};
 
 pub struct OpenTypeFont<O: Outline> {
     outlines: Vec<O>,
-    kern: HashMap<(u32, u32), i16>,
+    kern: HashMap<(u16, u16), i16>,
     cmap: Option<CMap>,
     hmtx: Hmtx,
     bbox: Rect,
@@ -65,10 +66,21 @@ impl<O: Outline> OpenTypeFont<O> {
         } else {
             panic!()
         };
+        
+        let kern = if let Some(data) = tables.get(b"GPOS") {
+            let gpos = parse_gpos(data).get();
+            gpos.kern
+        } else if let Some(data) = tables.get(b"kern") {
+            parse_kern(data).get()
+        } else {
+            HashMap::new()
+        };
+    
+        dbg!(&kern);
     
         OpenTypeFont {
             outlines,
-            kern: tables.get(b"kern").map(|data| parse_kern(data).get()).unwrap_or_default(),
+            kern,
             cmap: tables.get(b"cmap").map(|data| parse_cmap(data).get()),
             hmtx: parse_hmtx(tables.get(b"hmtx").expect("no hmtx"), &hhea, &maxp).get(),
             bbox: head.bbox(),
@@ -110,7 +122,7 @@ impl<O: Outline> Font<O> for OpenTypeFont<O> {
         None
     }
     fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
-        self.kern.get(&(left.0, right.0)).cloned().unwrap_or(0) as f32
+        self.kern.get(&(left.0 as u16, right.0 as u16)).cloned().unwrap_or(0) as f32
     }
 }
 
@@ -147,6 +159,7 @@ pub fn parse_tables(data: &[u8]) -> R<Tables<&[u8]>> {
             tag.try_into().expect("slice too short"),
             data.get(off as usize .. off as usize + len as usize).expect("out of bounds")
         );
+        debug!("tag: {:?} ({:?})", tag, std::str::from_utf8(&tag));
     }
     
     Ok((i, Tables { entries }))
@@ -276,14 +289,14 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                     iterator(idDelta, be_u16),
                     iterator(idRangeOffset, be_u16)
                 ).into_iter().enumerate() {
-                    debug!("start={}, end={}, delta={}, offset={}", start, end, delta, offset);
+                    trace!("start={}, end={}, delta={}, offset={}", start, end, delta, offset);
                     if start == 0xFFFF && end == 0xFFFF {
                         break;
                     }
                     if offset == 0 {
                         for c in start ..= end {
                             let gid = delta.wrapping_add(c);
-                            debug!("codepoint {} -> gid {}", c, gid);
+                            trace!("codepoint {} -> gid {}", c, gid);
                             cmap.insert(c as u32, gid as u32);
                         }
                     } else {
@@ -295,7 +308,7 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                             let (_, gid) = be_u16(&glyph_data[index as usize ..])?;
                             if gid != 0 {
                                 let gid = gid.wrapping_add(delta);
-                                debug!("codepoint {} -> gid {}", c, gid);
+                                trace!("codepoint {} -> gid {}", c, gid);
                                 cmap.insert(c as u32, gid as u32);
                             }
                         }
@@ -310,9 +323,9 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                 let (i, _language) = be_u32(data)?;
                 let (i, num_groups) = be_u32(i)?;
                 for (start_code, end_code, start_gid) in iterator(i, tuple((be_u32, be_u32, be_u32))).take(num_groups as usize) {
-                    debug!("start_code={}, end_code={}, start_gid={}", start_code, end_code, start_gid);
+                    trace!("start_code={}, end_code={}, start_gid={}", start_code, end_code, start_gid);
                     for (code, gid) in (start_code ..= end_code).zip(start_gid ..) {
-                        debug!("codepoint {} -> gid {}", code, gid);
+                        trace!("codepoint {} -> gid {}", code, gid);
                         cmap.insert(code, gid);
                     }
                 }
@@ -442,19 +455,19 @@ pub fn parse_hmtx_woff2_format1<'a>(i: &'a [u8], head: &Head, hhea: &Hhea, maxp:
     }))
 }
 
-fn parse_kern_format0<'a>(i: &'a [u8], table: &mut HashMap<(u32, u32), i16>) -> R<'a, ()> {
+fn parse_kern_format0<'a>(i: &'a [u8], table: &mut HashMap<(u16, u16), i16>) -> R<'a, ()> {
     let (i, n_pairs) = be_u16(i)?;
     let (i, _search_range) = be_u16(i)?;
     let (i, _entry_selector) = be_u16(i)?;
     let (i, _range_shift) = be_u16(i)?;
     
     for (left, right, kern) in iterator(i, tuple((be_u16, be_u16, be_i16))).take(n_pairs as usize) {
-        table.insert((left as u32, right as u32), kern);
+        table.insert((left, right), kern);
     }
     Ok((i, ()))
 }
     
-fn parse_kern_format2<'a>(data: &'a [u8], table: &mut HashMap<(u32, u32), i16>) -> R<'a, ()> {
+fn parse_kern_format2<'a>(data: &'a [u8], table: &mut HashMap<(u16, u16), i16>) -> R<'a, ()> {
     let (i, row_width) = be_u16(data)?;
     let (i, left_class_table_off) = be_u16(i)?;
     let (i, right_class_table_off) = be_u16(i)?;
@@ -470,13 +483,13 @@ fn parse_kern_format2<'a>(data: &'a [u8], table: &mut HashMap<(u32, u32), i16>) 
         for (right_gid, right_off) in class_table(right_class_table_off)? {
             let off = left_off + right_off;
             let (_, kern) = be_i16(&data[off .. off + 2])?;
-            table.insert((left_gid as u32, right_gid as u32), kern);
+            table.insert((left_gid, right_gid), kern);
         }
     }
     Ok((i, ()))
 }
 
-pub fn parse_kern(input: &[u8]) -> R<HashMap<(u32, u32), i16>> {
+pub fn parse_kern(input: &[u8]) -> R<HashMap<(u16, u16), i16>> {
     let (i, version) = be_u16(input)?;
     debug!("kern table version {}", version);
     match version {
@@ -486,13 +499,13 @@ pub fn parse_kern(input: &[u8]) -> R<HashMap<(u32, u32), i16>> {
     }
 }
 
-pub fn parse_kern_apple(i: &[u8]) -> R<HashMap<(u32, u32), i16>> {
+pub fn parse_kern_apple(i: &[u8]) -> R<HashMap<(u16, u16), i16>> {
     let (i, version) = be_u32(i)?;
     assert_eq!(version, 0x00010000);
     
     unimplemented!()
 }
-pub fn parse_kern_ms(i: &[u8]) -> R<HashMap<(u32, u32), i16>> {
+pub fn parse_kern_ms(i: &[u8]) -> R<HashMap<(u16, u16), i16>> {
     let (i, version) = be_u16(i)?;
     assert_eq!(version, 0);
     

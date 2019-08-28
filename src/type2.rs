@@ -82,7 +82,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
         let i = match b0 {
             0 => panic!("reserved"),
             1 => { // ⊦ y dy hstem (1) ⊦
-                debug!("hstem");
+                trace!("hstem");
                 maybe_width(s, |n| n == 2);
                 s.stem_hints += (s.stack.len() / 2) as u32;
                 s.stack.clear();
@@ -90,14 +90,14 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
             }
             2 => panic!("reserved"),
             3 => { // ⊦ x dx vstem (3) ⊦
-                debug!("vstem");
+                trace!("vstem");
                 maybe_width(s, |n| n == 2);
                 s.stem_hints += (s.stack.len() / 2) as u32;
                 s.stack.clear();
                 i
             }
             4 => { // ⊦ dy vmoveto (4) ⊦
-                debug!("vmoveto");
+                trace!("vmoveto");
                 maybe_width(s, |n| n == 1);
                 let p = s.current + v(0., s.stack[0]);
                 s.path.move_to(p);
@@ -106,7 +106,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             5 => { // |- {dxa dya}+ rlineto (5) |-
-                debug!("rlineto");
+                trace!("rlineto");
                 let mut slice = s.stack.as_slice();
                 while slice.len() >= 2 {
                     slice = lines!(s, slice, xy);
@@ -116,7 +116,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
             }
             6 => { // |- dx1 {dya dxb}* hlineto (6) |-
                    // |- {dxa dyb}+ hlineto (6) |-
-                debug!("hlineto");
+                trace!("hlineto");
                 for (i, &d) in s.stack.iter().enumerate() {
                     let dv = if i % 2 == 0 {
                         v(d, 0.)
@@ -132,7 +132,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
             }
             7 => { // |- dy1 {dxa dyb}* vlineto (7) |-
                    // |- {dya dxb}+ vlineto (7) |-
-                debug!("vlineto");
+                trace!("vlineto");
                 for (i, &d) in s.stack.iter().enumerate() {
                     let dv = if i % 2 == 0 {
                         v(0., d)
@@ -147,7 +147,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             8 => { // ⊦ {dxa dya dxb dyb dxc dyc}+ rrcurveto (8) ⊦
-                debug!("rrcurveto");
+                trace!("rrcurveto");
                 let mut slice = s.stack.as_slice();
                 while slice.len() >= 6 {
                     slice = bezier!(s, slice, xy xy xy);
@@ -157,7 +157,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
             }
             9 => panic!("reserved"),
             10 => { // subr# callsubr (10) –
-                debug!("callsubr");
+                trace!("callsubr");
                 let subr_nr = s.pop().to_int();
                 
                 let subr = ctx.subr(subr_nr);
@@ -165,7 +165,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             11 => { // – return (11) –
-                debug!("return");
+                trace!("return");
                 return Ok((i, ()));
             }
             12 => {
@@ -177,7 +177,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                     5 => unimplemented!("not"),
                     6 | 7 | 8 => panic!("reserved"),
                     9 => { // num abs (12 9) num2
-                        debug!("abs");
+                        trace!("abs");
                         match s.pop() {
                             Value::Int(i) => s.push(i.abs()),
                             Value::Float(f) => s.push(f.abs())
@@ -185,7 +185,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                         i
                     }
                     10 => { // num1 num2 add (12 10) sum
-                        debug!("add");
+                        trace!("add");
                         match (s.pop(), s.pop()) {
                             (Value::Int(num2), Value::Int(num1)) => s.push(num1 + num2),
                             (num2, num1) => s.push(num2.to_float() + num1.to_float())
@@ -193,7 +193,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                         i
                     }
                     11 => { // num1 num2 sub (12 11) difference
-                        debug!("sub");
+                        trace!("sub");
                         match (s.pop(), s.pop()) {
                             (Value::Int(num2), Value::Int(num1)) => s.push(num1 - num2),
                             (num2, num1) => s.push(num2.to_float() - num1.to_float())
@@ -201,7 +201,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                         i
                     }
                     12 => { // num1 num2 div (12 12) quotient
-                        debug!("div");
+                        trace!("div");
                         let num2 = s.pop().to_float();
                         let num1 = s.pop().to_float();
                         s.push(num1 / num2);
@@ -209,7 +209,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                     }
                     13 => panic!("reserved"),
                     14 => { // num neg (12 14) num2
-                        debug!("neg");
+                        trace!("neg");
                         match s.pop() {
                             Value::Int(i) => s.push(-i),
                             Value::Float(f) => s.push(-f)
@@ -219,7 +219,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                     15 => unimplemented!("eq"),
                     16 | 17 => panic!("reserved"),
                     18 => { // num drop (12 18)
-                        debug!("drop");
+                        trace!("drop");
                         s.pop();
                         i
                     }
@@ -228,7 +228,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                     21 => unimplemented!("get"),
                     22 => unimplemented!("ifelse"),
                     23 => { // random (12 23) num2
-                        debug!("random");
+                        trace!("random");
                         use rand::{thread_rng, Rng};
                         use rand::distributions::OpenClosed01;
                         
@@ -237,7 +237,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                         i
                     }
                     24 => { // num1 num2 mul (12 24) product
-                        debug!("mul");
+                        trace!("mul");
                         let num2 = s.pop().to_float();
                         let num1 = s.pop().to_float();
                         s.push(num1 * num2);
@@ -245,20 +245,20 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                     }
                     25 => panic!("reserved"),
                     26 => { // num sqrt (12 26) num2
-                        debug!("sqrt");
+                        trace!("sqrt");
                         let num1 = s.pop().to_float();
                         s.push(num1.sqrt());
                         i
                     }
                     27 => { // any dup (12 27) any any
-                        debug!("dup");
+                        trace!("dup");
                         let any = s.pop();
                         s.push(any);
                         s.push(any);
                         i
                     }
                     28 => { // num1 num2 exch (12 28) num2 num1
-                        debug!("exch");
+                        trace!("exch");
                         let num2 = s.pop();
                         let num1 = s.pop();
                         s.push(num2);
@@ -266,7 +266,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                         i
                     }
                     29 => { // numX ... num0 i index (12 29) numX ... num0 numi
-                        debug!("index");
+                        trace!("index");
                         let j = s.pop().to_int().max(0) as usize;
                         let idx = s.stack.len() - j - 1;
                         let val = s.stack[idx];
@@ -274,7 +274,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                         i
                     }
                     30 => { // num(N–1) ... num0 N J roll (12 30) num((J–1) mod N) ... num0 num(N–1) ... num(J mod N)
-                        debug!("roll");
+                        trace!("roll");
                         let j = s.pop().to_int();
                         let n = s.pop().to_uint() as usize;
                         let len = s.stack.len();
@@ -288,7 +288,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                     }
                     31 | 32 | 33 => panic!("reserved"),
                     34 => { // |- dx1 dx2 dy2 dx3 dx4 dx5 dx6 hflex (12 34) |-
-                        debug!("hflex");
+                        trace!("hflex");
                         let slice = s.stack.as_slice();
                         bezier!(s, slice, x xy x  x x x);
                         s.stack.clear();
@@ -302,14 +302,14 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                         i
                     }
                     36 => { // |- dx1 dy1 dx2 dy2 dx3 dx4 dx5 dy5 dx6 hflex1 (12 36) |-
-                        debug!("hflex1");
+                        trace!("hflex1");
                         let slice = s.stack.as_slice();
                         bezier!(s, slice, xy xy x  x xy x);
                         s.stack.clear();
                         i
                     }
                     37 => { // |- dx1 dy1 dx2 dy2 dx3 dy3 dx4 dy4 dx5 dy5 d6 flex1 (12 37) |-
-                        debug!("flex1");
+                        trace!("flex1");
                         let slice = s.stack.as_slice();
                         
                         // process first bezier
@@ -340,7 +340,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
             }
             13 => panic!("reserved"),
             14 => { //– endchar (14) ⊦
-                debug!("endchar");
+                trace!("endchar");
                 maybe_width(s, |n| n == 0);
                 s.path.close();
                 s.done = true;
@@ -348,14 +348,14 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
             }
             15 | 16 | 17 => panic!("reserved"),
             18 => { // |- y dy {dya dyb}* hstemhm (18) |-
-                debug!("hstemhm");
+                trace!("hstemhm");
                 maybe_width(s, |n| n % 2 == 0);
                 s.stem_hints += (s.stack.len() / 2) as u32;
                 s.stack.clear();
                 i
             }
             19 => { // |- hintmask (19 + mask) |-
-                debug!("hintmask");
+                trace!("hintmask");
                 maybe_width(s, |n| n == 0);
                 s.stem_hints += (s.stack.len() / 2) as u32;
                 let (i, _) = take((s.stem_hints + 7) / 8)(i)?;
@@ -363,7 +363,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             20 => { // cntrmask |- cntrmask (20 + mask) |-
-                debug!("cntrmask");
+                trace!("cntrmask");
                 maybe_width(s, |n| n == 0);
                 s.stem_hints += (s.stack.len() / 2) as u32;
                 let (i, _) = take((s.stem_hints + 7) / 8)(i)?;
@@ -371,7 +371,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             21 => { // ⊦ dx dy rmoveto (21) ⊦
-                debug!("rmoveto");
+                trace!("rmoveto");
                 maybe_width(s, |n| n == 2);
                 let p = s.current + v(s.stack[0], s.stack[1]);
                 s.path.move_to(p);
@@ -380,7 +380,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             22 => { // ⊦ dx hmoveto (22) ⊦
-                debug!("hmoveto");
+                trace!("hmoveto");
                 maybe_width(s, |n| n == 1);
                 let p = s.current + v(s.stack[0], 0.);
                 s.path.move_to(p);
@@ -389,14 +389,14 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             23 => { // |- x dx {dxa dyx}* vstemhm (23) |-
-                debug!("vstemhm");
+                trace!("vstemhm");
                 maybe_width(s, |n| n % 2 == 0);
                 s.stem_hints += (s.stack.len() / 2) as u32;
                 s.stack.clear();
                 i
             }
             24 => { // |- {dxa dya dxb dyb dxc dyc}+ dxd dyd rcurveline (24) |-
-                debug!("rcurveline");
+                trace!("rcurveline");
                 let mut slice = s.stack.as_slice();
                 while slice.len() >= 8 {
                     slice = bezier!(s, slice, xy xy xy);
@@ -407,7 +407,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             25 => { // |- {dxa dya}+ dxb dyb dxc dyc dxd dyd rlinecurve (25) |-
-                debug!("rlinecurve");
+                trace!("rlinecurve");
                 let mut slice = s.stack.as_slice();
                 while slice.len() >= 8 {
                     slice = lines!(s, slice, xy);
@@ -418,7 +418,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             26 => { // |- dx1? {dya dxb dyb dyc}+ vvcurveto (26) |-
-                debug!("vvcurveto");
+                trace!("vvcurveto");
                 let mut slice = s.stack.as_slice();
                 if slice.len() % 2 == 1 { // odd 
                     slice = bezier!(s, slice, xy xy y);
@@ -430,7 +430,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 i
             }
             27 => { // ⊦ dy1? {dxa dxb dyb dxc}+ hhcurveto (27) ⊦
-                debug!("hhcurveto");
+                trace!("hhcurveto");
                 let mut slice = s.stack.as_slice();
                 if slice.len() % 2 == 1 { // odd 
                     slice = bezier!(s, slice, yx xy x);
@@ -443,7 +443,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
             }
             29 => { // globalsubr# callgsubr (29) –
                 let subr_nr = s.pop().to_int();
-                debug!("globalsubr#{}", subr_nr as i32 + ctx.global_subr_bias);
+                trace!("globalsubr#{}", subr_nr as i32 + ctx.global_subr_bias);
                 
                 let subr = ctx.global_subr(subr_nr);
                 let (_, _) = charstring(subr, ctx, s)?;
@@ -451,7 +451,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
             }
             30 => { // |- dy1 dx2 dy2 dx3 {dxa dxb dyb dyc dyd dxe dye dxf}* dyf? vhcurveto (30) |-
                     // |- {dya dxb dyb dxc dxd dxe dye dyf}+ dxf? vhcurveto (30) |-
-                debug!("vhcurveto");
+                trace!("vhcurveto");
                 alternating_curve(s, false);
                 
                 s.stack.clear();
@@ -459,7 +459,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
             }
             31 => { // |- dx1 dx2 dy2 dy3 {dya dxb dyb dxc dxd dxe dye dyf}* dxf? hvcurveto (31) |-
                     // |- {dxa dxb dyb dyc dyd dxe dye dxf}+ dyf? hvcurveto (31) |-
-                debug!("hvcurveto");
+                trace!("hvcurveto");
                 alternating_curve(s, true);
                 
                 s.stack.clear();

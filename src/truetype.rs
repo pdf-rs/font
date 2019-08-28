@@ -26,15 +26,12 @@ pub struct TrueTypeFont<O: Outline> {
     hmtx: Hmtx,
     units_per_em: u16,
     bbox: Rect,
-    kern: HashMap<(u32, u32), i16>,
+    kern: HashMap<(u16, u16), i16>,
 }
 
 impl<O: Outline> TrueTypeFont<O> {
     pub fn parse(data: &[u8]) -> Self {
         let tables = parse_tables(data).get();
-        for (tag, _) in tables.entries() {
-            debug!("tag: {:?} ({:?})", tag, std::str::from_utf8(&tag));
-        }
         TrueTypeFont::parse_glyf(tables)
     }
     pub fn parse_glyf(tables: Tables<impl Deref<Target=[u8]>>) -> Self {
@@ -116,7 +113,7 @@ impl<O: Outline> Font<O> for TrueTypeFont<O> {
         Some(self.bbox)
     }
     fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
-        self.kern.get(&(left.0, right.0)).cloned().unwrap_or(0) as f32
+        self.kern.get(&(left.0 as u16, right.0 as u16)).cloned().unwrap_or(0) as f32
     }
 }
 
