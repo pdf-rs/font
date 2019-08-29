@@ -1,4 +1,4 @@
-# Font --- Pure Rust font parsers
+# Font -- Pure Rust font parsers
 
 ## Supported Formats
 
@@ -26,10 +26,10 @@
 - The `glyf` (TrueType) and `CFF ` (Type1) outlines are supported.
 - `SVG ` outlines are not implemented yet, so emoticon fonts do not work.
 - Most of the `CMAP` formats are implemented.
-- Kerning using the `kern` table is implemented (working on `GPOS`).
+- Kerning using the `kern` and `GPOS` table is implemented.
 
 ### WOFF / WOFF2
- - Implemented but not tested.
+- essentially OpenType fonts. implemented and working.
 
 ## API
 NOTE: The code may change a bit. Especially multi-codepoint glyphs cannot be looked up yet.
