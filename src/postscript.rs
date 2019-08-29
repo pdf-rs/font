@@ -965,7 +965,9 @@ impl Vm {
         if let Some(_) = input.try_parse(comment) {
             return;
         }
-        
+        if input.len() == 0 {
+            return;
+        }
         let tk = input.parse(token);
         
         debug!("token: {:?}", tk);
