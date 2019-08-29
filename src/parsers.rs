@@ -297,18 +297,15 @@ pub fn iterator_n<'a, T, F>(input: &'a [u8], parser: F, n: impl Into<usize>) -> 
 #[inline(always)]
 pub fn varint_u32(i: &[u8]) -> R<u32> {
     let (mut i, b0) = be_u8(i)?;
-    debug!("byte 0 > {:08b}", b0);
     let mut acc = match b0 {
         0x80 => return Err(Failure(make_error(i, ErrorKind::Verify))),
         b if b < 0x80 => {
-            debug!("-> {}", b);
             return Ok((i, b as u32))
         }
         b => (b & 0x7F) as u32
     };
     for j in 1 .. 5 {
         let b = parse(&mut i, be_u8)?;
-        debug!("byte {} > {:08b}", j, b);
         
         if acc & 0xFE_00_00_00 != 0 {
             return Err(Failure(make_error(i, ErrorKind::Verify)));
@@ -319,7 +316,6 @@ pub fn varint_u32(i: &[u8]) -> R<u32> {
             break;
         }
     }
-    debug!("-> {}", acc);
     Ok((i, acc))
 }
 
@@ -328,8 +324,8 @@ pub fn varint_u16(i: &[u8]) -> R<u16> {
     let (i, b0) = be_u8(i)?;
     match b0 {
         253 => be_u16(i),
-        254 => map(be_u8, |n| n as u16 + 253)(i),
-        255 => map(be_u8, |n| n as u16 + 2*253)(i),
+        254 => map(be_u8, |n| n as u16 + 2*253)(i),
+        255 => map(be_u8, |n| n as u16 + 253)(i),
         n => Ok((i, n as u16))
     }
 }

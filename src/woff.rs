@@ -8,7 +8,7 @@ use brotli_decompressor::{Decompressor};
 use crate::{
     R, IResultExt, Font,
     truetype::{Shape, contour, compound, parse_shapes},
-    parsers::{iterator, varint_u32, parse, count_map},
+    parsers::{iterator, varint_u32, varint_u16, parse, count_map},
     opentype::{Tables, parse_head, parse_hhea, parse_maxp, parse_hmtx, parse_hmtx_woff2_format1, parse_loca, OpenTypeFont},
 };
 use vector::{Outline, Vector};
@@ -43,7 +43,6 @@ fn parse_woff<O: Outline>(data: &[u8]) -> R<OpenTypeFont<O>> {
     let (i, _priv_offset) = be_u32(i)?;
     let (i, _priv_length) = be_u32(i)?;
     
-    dbg!(i.as_ptr() as usize - data.as_ptr() as usize);
     let (mut i, tables_dir) = count(woff_dir_entry, num_tables as usize)(i)?;
     
     if flavor == b"ttcf" {
@@ -52,13 +51,10 @@ fn parse_woff<O: Outline>(data: &[u8]) -> R<OpenTypeFont<O>> {
     
     let mut tables = HashMap::with_capacity(num_tables as usize);
     for entry in tables_dir {
-        dbg!(String::from_utf8_lossy(&entry.tag));
-        dbg!(&entry);
+        debug!("{}", String::from_utf8_lossy(&entry.tag));
         let data = if entry.comp_length < entry.orig_length {
             let compressed_data = parse(&mut i, take((entry.comp_length as usize + 3) & !3))?;
-            println!("decompressing");
             let orig_data = inflate_bytes_zlib(&compressed_data[.. entry.comp_length as usize]).expect("can't decompress data");
-            dbg!(orig_data.len());
             assert_eq!(orig_data.len(), entry.orig_length as usize);
             Cow::Owned(orig_data)
         } else {
@@ -67,6 +63,7 @@ fn parse_woff<O: Outline>(data: &[u8]) -> R<OpenTypeFont<O>> {
         };
         tables.insert(entry.tag, data);
     }
+    
     let tables = Tables { entries: tables };
     let font = OpenTypeFont::from_tables(tables);
     
@@ -122,6 +119,8 @@ pub fn parse_woff2<O: Outline>(i: &[u8]) -> R<OpenTypeFont<O>> {
         decompressor.read_exact(&mut buf).expect("decode failed");
         entries.insert(tag, buf);
     }
+    assert_eq!(decompressor.bytes().count(), 0);
+    
     let tables = Tables { entries };
     
     let hmtx = tables.get(b"hmtx").map(|hmtx_data| {
@@ -153,6 +152,7 @@ pub fn parse_woff2<O: Outline>(i: &[u8]) -> R<OpenTypeFont<O>> {
 }
 
 fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
+    let (i, _) = tag([0u8; 4])(i)?;;
     let (i, num_glyphs) = be_u16(i)?;
     let (i, _index_format) = be_u16(i)?;
     let (i, n_contour_stream_size) = be_u32(i)?;
@@ -162,24 +162,25 @@ fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
     let (i, composite_stream_size) = be_u32(i)?;
     let (i, bbox_stream_size) = be_u32(i)?;
     let (i, instruction_stream_size) = be_u32(i)?;
-    dbg!(num_glyphs, n_contour_stream_size, n_points_stream_size, flag_stream_size, glyph_stream_size, composite_stream_size, bbox_stream_size, instruction_stream_size);
     
     let (i, n_contour_stream) = take(n_contour_stream_size)(i)?;
     let (i, n_points_stream) = take(n_points_stream_size)(i)?;
     let (i, mut flag_stream) = take(flag_stream_size)(i)?;
     let (i, mut glyph_stream) = take(glyph_stream_size)(i)?;
     let (i, mut composite_stream) = take(composite_stream_size)(i)?;
-    let (i, _bbox_bitmap) = take((num_glyphs + 7) / 8)(i)?;
-    let (i, _bbox_stream) = take(bbox_stream_size)(i)?;
+    
+    let bbox_bitmap_len = (num_glyphs as u32 + 7) / 8;
+    let (i, _bbox_bitmap) = take(bbox_bitmap_len)(i)?;
+    let (i, _bbox_stream) = take(bbox_stream_size - bbox_bitmap_len)(i)?;
     let (i, _instruction_stream) = take(instruction_stream_size)(i)?;
     
-    dbg!(n_contour_stream, n_points_stream);
     let mut contours = iterator(n_contour_stream, be_i16);
-    let mut points = iterator(n_points_stream, be_u32);
+    let mut points = iterator(n_points_stream, varint_u16);
+    let mut flags = iterator(flag_stream, be_u8);
     
     let mut glyphs = Vec::with_capacity(num_glyphs as usize);
     
-    for n_contour in contours {
+    for (gid, n_contour) in contours.enumerate() {
         match n_contour {
             0 => glyphs.push(Shape::Empty),
             -1 => glyphs.push(parse(&mut composite_stream, compound)?),
@@ -187,11 +188,12 @@ fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
                 let mut outline = O::empty();
                 let (mut x, mut y) = (0i16, 0i16);
                 for n_points in (&mut points).take(n_contour as usize) {
-                    let flags = parse(&mut flag_stream, take(n_points))?;
-                    let points = iterator(flags, be_u8).map(|flag| {
-                        let on_curve = flag & 0x80 != 0;
+                    let mut counter = 0;
+                    let points = (&mut flags).take(n_points as usize).map(|flag| {
+                        let on_curve = flag & 0x80 == 0;
                         let triplet = TRIPLET_LUT[(flag & 0x7F) as usize];
                         use nom::error::{ErrorKind};
+                        //debug!("{:02x} {:02x} {:02x} {:02x}", glyph_stream[0], glyph_stream[1], glyph_stream[2], glyph_stream[3]);
                         let (vx, vy): (i16, i16) = parse(&mut glyph_stream,
                             bits::<_, _, (_, ErrorKind), (_, ErrorKind), _>(
                                 tuple((
@@ -200,18 +202,21 @@ fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
                                 ))
                             )
                         ).unwrap();
-                        
                         let sign = |is_minus| if is_minus { -1 } else { 1 };
                         x += sign(triplet.x_minus()) * (vx + triplet.dx() as i16);
                         y += sign(triplet.y_minus()) * (vy + triplet.dy() as i16);
+                        counter += 1;
                         
                         (on_curve, Vector::new(x as f32, y as f32))
                     });
                     if let Some(contour) = contour(points) {
                         outline.add_contour(contour);
                     }
+                    // don't care about it… but it needs to be removed from the stream
+                    assert_eq!(counter, n_points);
                 }
                 glyphs.push(Shape::Simple(outline));
+                let _num_instructions = parse(&mut glyph_stream, varint_u16)?;
             }
             _ => panic!("invalid number of contours")
         }
@@ -229,7 +234,6 @@ struct Entry {
 
 fn woff2_table_entry(i: &[u8]) -> R<([u8; 4], Entry)> {
     let (i, b0) = be_u8(i)?;
-    debug!("{:08b}", b0);
     let table_type = b0 & 63;
     let flags = b0 >> 6;
     
@@ -237,7 +241,6 @@ fn woff2_table_entry(i: &[u8]) -> R<([u8; 4], Entry)> {
         63 => map(take(4usize), |s: &[u8]| s.try_into().unwrap())(i)?,
         n => (i, TABLE_TAGS[n as usize])
     };
-    debug!("{} -> {}", table_type, String::from_utf8_lossy(&tag));
     
     let (i, orig_length) = varint_u32(i)?;
     let is_null_transform = match &tag {
@@ -246,7 +249,7 @@ fn woff2_table_entry(i: &[u8]) -> R<([u8; 4], Entry)> {
         b"hmtx" => flags == 0,
         _ => flags == 0
     };
-    debug!("is_null_transform: {:?}", is_null_transform);
+    
     let (i, length) = match is_null_transform {
         true => (i, orig_length),
         false => varint_u32(i)?
@@ -293,13 +296,13 @@ macro_rules! lut {
 pub struct Triplet(u32);
 impl Triplet {
     pub fn num_bytes(&self) -> usize {
-        (2 + self.0 & 0b11) as usize
+        2 + (self.0 & 0b11) as usize
     }
     pub fn x_bits(&self) -> u8 {
-        (4 * (self.0 >> 2) & 0b111) as u8
+        4 * ((self.0 >> 2) & 0b111) as u8
     }
     pub fn y_bits(&self) -> u8 {
-        (4 * (self.0 >> 5) & 0b111) as u8
+        4 * ((self.0 >> 5) & 0b111) as u8
     }
     pub fn dx(&self) -> u16 {
         ((self.0 >> 8) & 0b111_1111_1111) as u16

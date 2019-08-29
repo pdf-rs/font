@@ -80,11 +80,12 @@ impl<O: Outline> OpenTypeFont<O> {
         };
         
         info!("{} kern table entries", kern.len());
-    
+        let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
+        
         OpenTypeFont {
             outlines,
             kern,
-            cmap: tables.get(b"cmap").map(|data| parse_cmap(data).get()),
+            cmap,
             hmtx,
             bbox,
             font_matrix
@@ -119,6 +120,9 @@ impl<O: Outline> Font<O> for OpenTypeFont<O> {
                 metrics: self.hmtx.as_ref().map(|m| m.metrics_for_gid(gid.0 as u16)).unwrap_or_default()
             }
         })
+    }
+    fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
+        self.gid_for_unicode_codepoint(codepoint)
     }
     fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
         match self.cmap {
@@ -248,6 +252,7 @@ pub fn parse_loca<'a>(i: &'a [u8], head: &Head, maxp: &Maxp) -> R<'a, Vec<u32>> 
         _ => panic!("invalid index_to_loc_format")
     }
 }
+#[derive(Debug)]
 pub struct CMap {
     single_codepoint: HashMap<u32, u32>,
     double_codepoint: HashMap<(u32, u32), u32>

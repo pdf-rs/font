@@ -13,9 +13,10 @@ fn draw_glyph<S: Surface + 'static>(file: &str, glyph: &str) -> S {
     let bbox = font.bbox().unwrap();
     dbg!(bbox);
     
-    let gid = glyph.parse().ok().and_then(|cp| font.gid_for_codepoint(cp)).or_else(||
-        font.gid_for_name(glyph)
-    ).expect("not a number or valid glyph name");
+    let gid = match glyph.parse() {
+        Ok(cp) => font.gid_for_codepoint(cp).expect("no such codepoint"),
+        _ => font.gid_for_name(glyph).expect("no such glyph name")
+    };
     
     let size = bbox.size();
     let mut surface = S::new(size);
