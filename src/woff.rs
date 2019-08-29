@@ -1,15 +1,15 @@
-use brotli::reader::Decompressor;
-use std::io::Read;
 use std::convert::TryInto;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::io::{Read, Cursor};
 use inflate::inflate_bytes_zlib;
+use brotli_decompressor::{Decompressor};
 
 use crate::{
     R, IResultExt, Font,
-    truetype::{Shape, contour, compound, TrueTypeFont, parse_shapes},
+    truetype::{Shape, contour, compound, parse_shapes},
     parsers::{iterator, varint_u32, parse, count_map},
-    opentype::{Tables, parse_head, parse_hhea, parse_maxp, parse_hmtx, parse_hmtx_woff2_format1, parse_loca},
+    opentype::{Tables, parse_head, parse_hhea, parse_maxp, parse_hmtx, parse_hmtx_woff2_format1, parse_loca, OpenTypeFont},
 };
 use vector::{Outline, Vector};
 use nom::{
@@ -28,7 +28,7 @@ pub fn woff2<O: Outline + 'static>(data: &[u8]) -> Box<dyn Font<O>> {
     Box::new(parse_woff2::<O>(data).get()) as _
 }
 
-fn parse_woff<O: Outline>(data: &[u8]) -> R<TrueTypeFont<O>> {
+fn parse_woff<O: Outline>(data: &[u8]) -> R<OpenTypeFont<O>> {
     let (i, _) = tag(b"wOFF")(data)?;
     let (i, flavor) = take(4usize)(i)?;
     let (i, _length) = be_u32(i)?;
@@ -67,8 +67,10 @@ fn parse_woff<O: Outline>(data: &[u8]) -> R<TrueTypeFont<O>> {
         };
         tables.insert(entry.tag, data);
     }
+    let tables = Tables { entries: tables };
+    let font = OpenTypeFont::from_tables(tables);
     
-    Ok((i, TrueTypeFont::parse_glyf(Tables { entries: tables })))
+    Ok((i, font))
 }
 
 #[derive(Debug)]
@@ -90,18 +92,19 @@ fn woff_dir_entry(i: &[u8]) -> R<WoffDirEntry> {
     }))
 }
     
-pub fn parse_woff2<O: Outline>(i: &[u8]) -> R<TrueTypeFont<O>> {
+pub fn parse_woff2<O: Outline>(i: &[u8]) -> R<OpenTypeFont<O>> {
     let (i, _) = tag(b"wOF2")(i)?;
     let (i, flavor) = take(4usize)(i)?;
     let (i, _length) = be_u32(i)?;
     let (i, num_tables) = be_u16(i)?;
     let (i, _reserved) = be_u16(i)?;
     let (i, _total_sfnt_size) = be_u32(i)?;
-    let (i, _total_compressed_size) = be_u32(i)?;
+    let (i, total_compressed_size) = be_u32(i)?;
     let (i, _major_version) = be_u16(i)?;
     let (i, _minor_version) = be_u16(i)?;
     let (i, _meta_offset) = be_u32(i)?;
     let (i, _meta_length) = be_u32(i)?;
+    let (i, _meta_orig_length) = be_u32(i)?;
     let (i, _priv_offset) = be_u32(i)?;
     let (i, _priv_length) = be_u32(i)?;
 
@@ -111,38 +114,42 @@ pub fn parse_woff2<O: Outline>(i: &[u8]) -> R<TrueTypeFont<O>> {
         unimplemented!()
     }
     
-    let mut stream = Decompressor::new(i, 1024);
-    
+    let mut decompressor = Decompressor::new(Cursor::new(&i[ .. total_compressed_size as usize]), 1024);
     let mut entries = HashMap::new();
     for (&tag, entry) in &entry_tables {
-        let mut data = Vec::with_capacity(entry.orig_length as usize);
-        (&mut stream).take(entry.length as u64).read_to_end(&mut data).expect("failed to decode");
-        entries.insert(tag, data);
+        debug!("tag: {:?} ({:?}) {:?}", tag, std::str::from_utf8(&tag), entry);
+        let mut buf = vec![0; entry.length as usize];
+        decompressor.read_exact(&mut buf).expect("decode failed");
+        entries.insert(tag, buf);
     }
     let tables = Tables { entries };
     
-    let head = parse_head(tables.get(b"head").expect("no head")).get();
-    let hhea = parse_hhea(tables.get(b"hhea").expect("no hhea")).get();
-    let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
-    let hmtx_data = tables.get(b"hmtx").expect("no hmtx");
-    let glyf_data = tables.get(b"glyf").expect("no glyf");
-    
-    let hmtx = match entry_tables[b"hmtx"].flags {
-        0 => parse_hmtx(&hmtx_data, &hhea, &maxp).get(),
-        1 => parse_hmtx_woff2_format1(&hmtx_data, &head, &hhea, &maxp).get(),
-        f => panic!("invalid flag for hmtx: {}", f)
-    };
-    
-    let shapes = match entry_tables[b"glyf"].flags {
-        0 => parse_glyf_t0(&glyf_data).get(),
-        3 => {
-            let loca = parse_loca(tables.get(b"loca").expect("no loca"), &head, &maxp).get();
-            parse_shapes(&loca, glyf_data)
+    let hmtx = tables.get(b"hmtx").map(|hmtx_data| {
+        let head = parse_head(tables.get(b"head").expect("no head")).get();
+        let hhea = parse_hhea(tables.get(b"hhea").expect("no hhea")).get();
+        let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
+        match entry_tables[b"hmtx"].flags {
+            0 => parse_hmtx(&hmtx_data, &hhea, &maxp).get(),
+            1 => parse_hmtx_woff2_format1(&hmtx_data, &head, &hhea, &maxp).get(),
+            f => panic!("invalid flag for hmtx: {}", f)
         }
-        f => panic!("invalid flag for glyf: {}", f)
-    };
+    });
     
-    Ok((i, TrueTypeFont::from_shapes_and_metrics(tables, shapes, hmtx)))
+    let glyf = tables.get(b"glyf").map(|glyf_data| {
+        match entry_tables[b"glyf"].flags {
+            0 => parse_glyf_t0(&glyf_data).get(),
+            3 => {
+                let head = parse_head(tables.get(b"head").expect("no head")).get();
+                let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
+                let loca = parse_loca(tables.get(b"loca").expect("no loca"), &head, &maxp).get();
+                parse_shapes(&loca, glyf_data)
+            }
+            f => panic!("invalid flag for glyf: {}", f)
+        }
+    });
+    let font = OpenTypeFont::from_hmtx_glyf_and_tables(hmtx, glyf, tables);
+    
+    Ok((i, font))
 }
 
 fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
@@ -155,6 +162,7 @@ fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
     let (i, composite_stream_size) = be_u32(i)?;
     let (i, bbox_stream_size) = be_u32(i)?;
     let (i, instruction_stream_size) = be_u32(i)?;
+    dbg!(num_glyphs, n_contour_stream_size, n_points_stream_size, flag_stream_size, glyph_stream_size, composite_stream_size, bbox_stream_size, instruction_stream_size);
     
     let (i, n_contour_stream) = take(n_contour_stream_size)(i)?;
     let (i, n_points_stream) = take(n_points_stream_size)(i)?;
@@ -165,6 +173,7 @@ fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
     let (i, _bbox_stream) = take(bbox_stream_size)(i)?;
     let (i, _instruction_stream) = take(instruction_stream_size)(i)?;
     
+    dbg!(n_contour_stream, n_points_stream);
     let mut contours = iterator(n_contour_stream, be_i16);
     let mut points = iterator(n_points_stream, be_u32);
     
@@ -211,6 +220,7 @@ fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
     Ok((i, glyphs))
 }
 
+#[derive(Debug)]
 struct Entry {
     flags: u8,
     length: u32,
@@ -219,19 +229,24 @@ struct Entry {
 
 fn woff2_table_entry(i: &[u8]) -> R<([u8; 4], Entry)> {
     let (i, b0) = be_u8(i)?;
-    let table_type = b0 & 0b11111;
-    let flags = b0 >> 5;
+    debug!("{:08b}", b0);
+    let table_type = b0 & 63;
+    let flags = b0 >> 6;
     
     let (i, tag) = match table_type {
         63 => map(take(4usize), |s: &[u8]| s.try_into().unwrap())(i)?,
         n => (i, TABLE_TAGS[n as usize])
     };
+    debug!("{} -> {}", table_type, String::from_utf8_lossy(&tag));
     
     let (i, orig_length) = varint_u32(i)?;
     let is_null_transform = match &tag {
-        b"glyf" | b"loca" => flags == 3,
+        b"glyf" => flags == 3,
+        b"loca" => flags == 3,
+        b"hmtx" => flags == 0,
         _ => flags == 0
     };
+    debug!("is_null_transform: {:?}", is_null_transform);
     let (i, length) = match is_null_transform {
         true => (i, orig_length),
         false => varint_u32(i)?

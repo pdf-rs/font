@@ -15,7 +15,7 @@ use nom::{
 };
 use decorum::R32;
 use crate::{R};
-
+use indexmap::IndexMap;
 
 fn special_char(b: u8) -> bool {
     match b {
@@ -296,15 +296,19 @@ pub fn iterator_n<'a, T, F>(input: &'a [u8], parser: F, n: impl Into<usize>) -> 
 
 #[inline(always)]
 pub fn varint_u32(i: &[u8]) -> R<u32> {
-    let (mut input, b0) = be_u8(i)?;
+    let (mut i, b0) = be_u8(i)?;
+    debug!("byte 0 > {:08b}", b0);
     let mut acc = match b0 {
         0x80 => return Err(Failure(make_error(i, ErrorKind::Verify))),
-        b if b < 0x80 => return Ok((i, b as u32)),
+        b if b < 0x80 => {
+            debug!("-> {}", b);
+            return Ok((i, b as u32))
+        }
         b => (b & 0x7F) as u32
     };
-    for _ in 1 .. 5 {
-        let (i, b) = be_u8(input)?;
-        input = i;
+    for j in 1 .. 5 {
+        let b = parse(&mut i, be_u8)?;
+        debug!("byte {} > {:08b}", j, b);
         
         if acc & 0xFE_00_00_00 != 0 {
             return Err(Failure(make_error(i, ErrorKind::Verify)));
@@ -312,10 +316,11 @@ pub fn varint_u32(i: &[u8]) -> R<u32> {
         
         acc = acc << 7 | (b & 0x7F) as u32;
         if b & 0x80 == 0 {
-            return Ok((input, acc));
+            break;
         }
     }
-    Ok((input, acc))
+    debug!("-> {}", acc);
+    Ok((i, acc))
 }
 
 #[inline(always)]
@@ -336,11 +341,11 @@ pub fn parse<'a, T, E>(input: &mut &'a [u8], parser: impl Fn(&'a [u8]) -> Result
     Ok(t)
 }
 
-pub fn count_map<'a, K, V>(parser: impl Fn(&'a [u8]) -> R<'a, (K, V)>, count: usize) -> impl Fn(&'a [u8]) -> R<'a, HashMap<K, V>>
+pub fn count_map<'a, K, V>(parser: impl Fn(&'a [u8]) -> R<'a, (K, V)>, count: usize) -> impl Fn(&'a [u8]) -> R<'a, IndexMap<K, V>>
     where K: Hash + Eq
 {
     move |mut i: &[u8]| {
-        let mut map = HashMap::with_capacity(count);
+        let mut map = IndexMap::with_capacity(count);
         for _ in 0 .. count {
             let (k, v) = parse(&mut i, &parser)?; // don't steal my parser!
             map.insert(k, v);

@@ -25,7 +25,7 @@ pub struct GlyphId(pub u32);
 pub struct VMetrics {
     pub line_gap: f32
 }
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct HMetrics {
     pub lsb: Vector,
     pub advance: Vector
@@ -360,7 +360,7 @@ impl<T> IResultExt for IResult<&[u8], T, VerboseError<&[u8]>> {
 
 pub fn parse<O: Outline + 'static>(data: &[u8]) -> Box<dyn Font<O>> {
     let magic: &[u8; 4] = data[0 .. 4].try_into().unwrap();
-    info!("font magic: {:?}", magic);
+    info!("font magic: {:?} ({:?})", magic, String::from_utf8_lossy(&*magic));
     match magic {
         &[0x80, 1, _, _] => Box::new(Type1Font::parse_pfb(data)) as _,
         b"OTTO" | [0,1,0,0] => Box::new(OpenTypeFont::parse(data)) as _,

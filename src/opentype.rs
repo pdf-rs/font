@@ -23,8 +23,8 @@ pub struct OpenTypeFont<O: Outline> {
     outlines: Vec<O>,
     kern: HashMap<(u16, u16), i16>,
     cmap: Option<CMap>,
-    hmtx: Hmtx,
-    bbox: Rect,
+    hmtx: Option<Hmtx>,
+    bbox: Option<Rect>,
     font_matrix: Transform
 }
 impl<O: Outline> OpenTypeFont<O> {
@@ -36,38 +36,41 @@ impl<O: Outline> OpenTypeFont<O> {
         
         OpenTypeFont::from_tables(tables)
     }
-    pub fn from_tables<T>(tables: Tables<T>) -> Self where T: Deref<Target=[u8]> {
-        let head = parse_head(tables.get(b"head").expect("no head")).get();
-        let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
-        let hhea = parse_hhea(tables.get(b"hhea").expect("no hhea")).get();
-        
-        let outlines = if let Some(glyf) = tables.get(b"glyf") {
-            let loca = parse_loca(tables.get(b"loca").expect("no loca"), &head, &maxp).get();
-            let shapes = parse_shapes(&loca, tables.get(b"glyf").unwrap());
-            
-            fn get_outline<O: Outline>(shapes: &[Shape<O>], idx: usize) -> O {
-                match shapes[idx] {
-                    Shape::Simple(ref path) => path.clone(),
-                    Shape::Compound(ref parts) => {
-                        let mut outline = O::empty();
-                        for &(gid, tr) in parts {
-                            outline.add_outline(get_outline(shapes, gid as usize).transform(tr));
+    pub fn from_hmtx_glyf_and_tables(hmtx: Option<Hmtx>, glyf: Option<Vec<Shape<O>>>, tables: Tables<impl Deref<Target=[u8]>>) -> Self {
+        let (outlines, font_matrix, bbox) = match glyf {
+            Some(shapes) => {
+                fn get_outline<O: Outline>(shapes: &[Shape<O>], idx: usize) -> O {
+                    match shapes[idx] {
+                        Shape::Simple(ref path) => path.clone(),
+                        Shape::Compound(ref parts) => {
+                            let mut outline = O::empty();
+                            for &(gid, tr) in parts {
+                                outline.add_outline(get_outline(shapes, gid as usize).transform(tr));
+                            }
+                            outline
                         }
-                        outline
+                        Shape::Empty => O::empty()
                     }
-                    Shape::Empty => O::empty()
-                }
-            };
-            
-            (0 .. shapes.len()).map(|idx| get_outline(&shapes, idx)).collect()
-        } else if let Some(cff) = tables.get(b"CFF ") {
-            let slot = read_cff(cff).get().slot(0);
-            slot.outlines().map(|(outline, _, _)| outline).collect()
-        } else {
-            panic!()
+                };
+                
+                let head = parse_head(tables.get(b"head").expect("no head")).get();
+                let bbox = head.bbox();
+                let outlines = (0 .. shapes.len()).map(|idx| get_outline(&shapes, idx)).collect();
+                let font_matrix = Transform::from_scale(Vector::splat(1.0 / head.units_per_em as f32));
+                (outlines, font_matrix, Some(bbox))
+            },
+            None => {
+                let cff = tables.get(b"CFF ").expect("neither glyf nor CFF tables … might be SVG");
+                let slot = read_cff(cff).get().slot(0);
+                let bbox = slot.bbox();
+                let outlines = slot.outlines().map(|(outline, _, _)| outline).collect();
+                let font_matrix = slot.font_matrix();
+                (outlines, font_matrix, bbox)
+            }
         };
         
         let kern = if let Some(data) = tables.get(b"GPOS") {
+            let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
             let gpos = parse_gpos(data, &maxp).get();
             gpos.kern
         } else if let Some(data) = tables.get(b"kern") {
@@ -76,17 +79,30 @@ impl<O: Outline> OpenTypeFont<O> {
             HashMap::new()
         };
         
-        info!("{} glyphs", maxp.num_glyphs);
         info!("{} kern table entries", kern.len());
     
         OpenTypeFont {
             outlines,
             kern,
             cmap: tables.get(b"cmap").map(|data| parse_cmap(data).get()),
-            hmtx: parse_hmtx(tables.get(b"hmtx").expect("no hmtx"), &hhea, &maxp).get(),
-            bbox: head.bbox(),
-            font_matrix: Transform::from_scale(Vector::splat(1.0 / head.units_per_em as f32))
+            hmtx,
+            bbox,
+            font_matrix
         }
+    }
+    pub fn from_tables<T>(tables: Tables<T>) -> Self where T: Deref<Target=[u8]> {
+        let head = parse_head(tables.get(b"head").expect("no head")).get();
+        let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
+        let hhea = parse_hhea(tables.get(b"hhea").expect("no hhea")).get();
+        
+        let glyf = tables.get(b"glyf").map(|data| {
+            let loca = parse_loca(tables.get(b"loca").expect("no loca"), &head, &maxp).get();
+            parse_shapes(&loca, tables.get(b"glyf").unwrap())
+        });
+        
+        let hmtx = tables.get(b"hmtx").map(|data| parse_hmtx(data, &hhea, &maxp).get());
+        
+        OpenTypeFont::from_hmtx_glyf_and_tables(hmtx, glyf, tables)
     }
 }
 impl<O: Outline> Font<O> for OpenTypeFont<O> {
@@ -100,7 +116,7 @@ impl<O: Outline> Font<O> for OpenTypeFont<O> {
         self.outlines.get(gid.0 as usize).map(|outline| {
             Glyph {
                 path: outline.clone(),
-                metrics: self.hmtx.metrics_for_gid(gid.0 as u16)
+                metrics: self.hmtx.as_ref().map(|m| m.metrics_for_gid(gid.0 as u16)).unwrap_or_default()
             }
         })
     }
@@ -117,7 +133,7 @@ impl<O: Outline> Font<O> for OpenTypeFont<O> {
         None
     }
     fn bbox(&self) -> Option<Rect> {
-        Some(self.bbox)
+        self.bbox
     }
     fn vmetrics(&self) -> Option<VMetrics> {
         None
