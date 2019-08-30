@@ -25,16 +25,16 @@ fn main() {
     
     for _ in 0 .. loops {
         for entry in &files {
-            print!("parsing {:100}", entry.path().to_str().unwrap());
+            eprintln!("parsing {:100}", entry.path().to_str().unwrap());
             let data = fs::read(entry.path()).expect("can't read file");
             
             match catch_unwind(|| parse::<Outline>(&data)) {
                 Ok(font) => {
                     font.glyphs();
-                    println!("    OK");
+                    eprintln!("    OK");
                 }
                 Err(e) => {
-                    println!("    FAIL");
+                    eprintln!("    FAIL");
                 }
             }
         }

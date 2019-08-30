@@ -61,20 +61,7 @@ impl<O: Outline> TrueTypeFont<O> {
         }
     }
     fn get_path(&self, idx: u32) -> O {
-        let shape = &self.shapes[idx as usize];
-    
-        match shape {
-            Shape::Simple(ref path) => path.clone(),
-            Shape::Compound(ref parts) => {
-                dbg!(parts);
-                let mut path = O::empty();
-                for &(gid, tr) in parts {
-                    path.add_outline(self.get_path(gid).transform(tr));
-                }
-                path
-            }
-            Shape::Empty => O::empty()
-        }
+        get_outline(&self.shapes, idx)
     }
 }
 impl<O: Outline> Font<O> for TrueTypeFont<O> {
@@ -204,6 +191,22 @@ pub fn compound<O: Outline>(mut input: &[u8]) -> R<Shape<O>> {
         }
     }
     Ok((input, Shape::Compound(parts)))
+}
+
+pub fn get_outline<O: Outline>(shapes: &[Shape<O>], idx: u32) -> O {
+    match shapes[idx as usize] {
+        Shape::Simple(ref path) => path.clone(),
+        Shape::Compound(ref parts) => {
+            let mut outline = O::empty();
+            for &(gid, tr) in parts {
+                if let Some(Shape::Simple(ref path)) = shapes.get(gid as usize) {
+                    outline.add_outline(path.clone().transform(tr));
+                }
+            }
+            outline
+        }
+        Shape::Empty => O::empty()
+    }
 }
 
 #[derive(Copy, Clone, Debug)]

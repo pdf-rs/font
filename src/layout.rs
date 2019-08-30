@@ -11,7 +11,7 @@ pub fn line<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: &str,
             if let Some(left) = last_gid.replace(gid) {
                 offset = offset + Vector::new(dbg!(font.kerning(left, gid)), 0.0);
             }
-            let p = offset - glyph.metrics.lsb;
+            let p = offset;
             offset = offset + glyph.metrics.advance;
             (glyph, p)
         })

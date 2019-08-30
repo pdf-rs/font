@@ -4,7 +4,7 @@ use std::convert::TryInto;
 use std::collections::HashMap;
 use std::ops::Deref;
 use crate::{Font, R, IResultExt, VMetrics, Glyph, HMetrics, GlyphId};
-use crate::truetype::{Shape, parse_shapes};
+use crate::truetype::{Shape, parse_shapes, get_outline};
 use crate::cff::{read_cff};
 use crate::gpos::parse_gpos;
 use encoding::Encoding;
@@ -39,23 +39,9 @@ impl<O: Outline> OpenTypeFont<O> {
     pub fn from_hmtx_glyf_and_tables(hmtx: Option<Hmtx>, glyf: Option<Vec<Shape<O>>>, tables: Tables<impl Deref<Target=[u8]>>) -> Self {
         let (outlines, font_matrix, bbox) = match glyf {
             Some(shapes) => {
-                fn get_outline<O: Outline>(shapes: &[Shape<O>], idx: usize) -> O {
-                    match shapes[idx] {
-                        Shape::Simple(ref path) => path.clone(),
-                        Shape::Compound(ref parts) => {
-                            let mut outline = O::empty();
-                            for &(gid, tr) in parts {
-                                outline.add_outline(get_outline(shapes, gid as usize).transform(tr));
-                            }
-                            outline
-                        }
-                        Shape::Empty => O::empty()
-                    }
-                };
-                
                 let head = parse_head(tables.get(b"head").expect("no head")).get();
                 let bbox = head.bbox();
-                let outlines = (0 .. shapes.len()).map(|idx| get_outline(&shapes, idx)).collect();
+                let outlines = (0 .. shapes.len()).map(|idx| get_outline(&shapes, idx as u32)).collect();
                 let font_matrix = Transform::from_scale(Vector::splat(1.0 / head.units_per_em as f32));
                 (outlines, font_matrix, Some(bbox))
             },
