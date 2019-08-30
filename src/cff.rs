@@ -166,7 +166,7 @@ impl<'a> CffSlot<'a> {
         self.top_dict.get(&Operator::FontBBox)
             .map(|arr| {
                 let (a, b, c, d) = TupleElements::from_iter(arr.iter().map(|&v| v.to_float())).unwrap();
-                Rect::new(Vector::new(a, b), Vector::new(c, d))
+                Rect::from_points(Vector::new(a, b), Vector::new(c, d))
             })
     }
     // -> (outline, width, lsb)
