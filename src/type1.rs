@@ -171,7 +171,6 @@ fn parse_binary<'a>(vm: &mut Vm, data: &'a [u8]) {
 
 #[test]
 fn test_parser() {
-    use crate::IResultExt;
     let mut vm = Vm::new();
     vm.parse_and_exec(b"/FontBBox{-180 -293 1090 1010}readonly ");
     vm.print_stack();
@@ -212,7 +211,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
         //trace!("input: {:?}", &input[.. input.len().min(10)]);
         trace!("current: {:?}", s.current);
         let b0 = parse(&mut input, be_u8)?;
-        let i = match b0 {
+        match b0 {
             1 => { // ⊦ y dy hstem (1) ⊦
                 trace!("hstem");
                 s.stack.clear();
@@ -431,7 +430,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                 s.push(v as f32 / 65536.);
             }
             c => panic!("unknown code {}", c)
-        };
+        }
         
         trace!("stack: {:?}", s.stack);
     };

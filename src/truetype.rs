@@ -49,8 +49,6 @@ impl<O: Outline> TrueTypeFont<O> {
         let head = parse_head(tables.get(b"head").expect("no head")).get();
         let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
         
-        let cvt = |i: i16| i as f32;
-        
         TrueTypeFont {
             shapes,
             cmap,

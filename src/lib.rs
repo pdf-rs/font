@@ -57,14 +57,14 @@ pub trait Font<O: Outline> {
     ///
     /// (see `encoding()` to find out which that is).
     /// Returns None if there is no "native encoding", or the font does not contain a glyph for this codepoint.
-    fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
+    fn gid_for_codepoint(&self, _codepoint: u32) -> Option<GlyphId> {
         None
     }
     
     /// Get the *gid* for the glyph with the given *name*.
     ///
     /// Returns None if the underlying font does not define any names, or does not contain a glyph with this name.
-    fn gid_for_name(&self, name: &str) -> Option<GlyphId> {
+    fn gid_for_name(&self, _name: &str) -> Option<GlyphId> {
         None
     }
     
@@ -103,7 +103,7 @@ pub trait Font<O: Outline> {
     }
     
     /// Kerning distance for the given glyph pair
-    fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
+    fn kerning(&self, _left: GlyphId, _right: GlyphId) -> f32 {
         0.0
     }
     fn full_name(&self) -> Option<&str> {
@@ -220,7 +220,7 @@ pub trait TryIndex {
 }
 impl TryIndex for () {
     #[inline]
-    fn try_index(&self, idx: usize) -> Option<&[u8]> {
+    fn try_index(&self, _idx: usize) -> Option<&[u8]> {
         None
     }
 }

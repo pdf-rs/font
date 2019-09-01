@@ -19,7 +19,7 @@ use nom::{
 };
 use tuple::T4;
 use vector::{Outline, Transform, Rect, Vector};
-use itertools::{Itertools, Either};
+use itertools::{Either};
 
 pub struct OpenTypeFont<O: Outline> {
     outlines: Vec<O>,
@@ -32,7 +32,7 @@ pub struct OpenTypeFont<O: Outline> {
 }
 impl<O: Outline> OpenTypeFont<O> {
     pub fn parse(data: &[u8]) -> Self {
-        let mut tables = parse_tables(data).get();
+        let tables = parse_tables(data).get();
         for (tag, _) in tables.entries() {
             debug!("tag: {:?} ({:?})", tag, std::str::from_utf8(&tag));
         }
@@ -90,7 +90,7 @@ impl<O: Outline> OpenTypeFont<O> {
         
         let glyf = tables.get(b"glyf").map(|data| {
             let loca = parse_loca(tables.get(b"loca").expect("no loca"), &head, &maxp).get();
-            parse_shapes(&loca, tables.get(b"glyf").unwrap())
+            parse_shapes(&loca, data)
         });
         
         let hmtx = tables.get(b"hmtx").map(|data| parse_hmtx(data, &hhea, &maxp).get());
@@ -122,7 +122,7 @@ impl<O: Outline> Font<O> for OpenTypeFont<O> {
             None => None
         }
     }
-    fn gid_for_name(&self, name: &str) -> Option<GlyphId> {
+    fn gid_for_name(&self, _name: &str) -> Option<GlyphId> {
         None
     }
     fn encoding(&self) -> Option<Encoding> {
@@ -485,15 +485,15 @@ fn parse_kern_format0<'a>(i: &'a [u8], table: &mut HashMap<(u16, u16), i16>) -> 
 }
     
 fn parse_kern_format2<'a>(data: &'a [u8], table: &mut HashMap<(u16, u16), i16>) -> R<'a, ()> {
-    let (i, row_width) = be_u16(data)?;
+    let (i, _row_width) = be_u16(data)?;
     let (i, left_class_table_off) = be_u16(i)?;
     let (i, right_class_table_off) = be_u16(i)?;
-    let (i, array_off) = be_u16(i)?;
+    let (i, _array_off) = be_u16(i)?;
     
     let class_table = |off| {
         let (i, first_glyph) = be_u16(&data[off as usize ..])?;
         let (i, n_glyphs) = be_u16(i)?;
-        let (i, offsets) = take(n_glyphs as usize * 2)(i)?;
+        let (_, offsets) = take(n_glyphs as usize * 2)(i)?;
         Ok((first_glyph ..).zip(iterator(offsets, map(be_u16, |n| n as usize))))
     };
     for (left_gid, left_off) in class_table(left_class_table_off)? {
@@ -529,7 +529,7 @@ pub fn parse_kern_ms(i: &[u8]) -> R<HashMap<(u16, u16), i16>> {
     let mut table = HashMap::new();
     let (mut i, n_tables) = be_u16(i)?;
     for _ in 0 .. n_tables {
-        let (version, length, format, coverage) = parse(&mut i, tuple((be_u16, be_u16, be_u8, be_u8)))?;
+        let (_version, length, format, coverage) = parse(&mut i, tuple((be_u16, be_u16, be_u8, be_u8)))?;
         debug!("format={}, coverage={:02x}", format, coverage);
         let data = parse(&mut i, take(length as usize - 6))?;
         match (format, coverage) {
@@ -548,15 +548,15 @@ pub fn parse_skript_list(data: &[u8]) -> R<()> {
         debug!("script {}", String::from_utf8_lossy(tag));
         let script_data = &data[offset as usize ..];
         
-        let (i, default_lang_sys_off) = be_u16(script_data)?;
+        let (i, _default_lang_sys_off) = be_u16(script_data)?;
         let (i, sys_lang_count) = be_u16(i)?;
         
-        for (tag, offset) in iterator_n(i, tuple((take(4usize), be_u16)), sys_lang_count) {
+        for (_tag, offset) in iterator_n(i, tuple((take(4usize), be_u16)), sys_lang_count) {
             let i = &script_data[offset as usize ..];
             let (i, _lookup_order) = be_u16(i)?;
-            let (i, required_feature_index) = be_u16(i)?;
+            let (i, _required_feature_index) = be_u16(i)?;
             let (i, feature_index_count) = be_u16(i)?;
-            for feature_index in iterator_n(i, be_u16, feature_index_count) {
+            for _feature_index in iterator_n(i, be_u16, feature_index_count) {
             
             }
         }
@@ -624,7 +624,7 @@ pub fn coverage_table<'a>(i: &'a [u8]) -> R<impl Iterator<Item=u16> + 'a> {
             let (i, range_count) = be_u16(i)?;
             Ok((i, Either::Right(
                 iterator_n(i, tuple((be_u16, be_u16, be_u16)), range_count)
-                    .flat_map(|(start, end, i)| start ..= end)
+                    .flat_map(|(start, end, _i)| start ..= end)
             )))
         },
         n => panic!("invalid coverage format {}", n)

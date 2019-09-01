@@ -223,9 +223,6 @@ impl<'a> CffSlot<'a> {
         })
     }
     fn parse_font<O: Outline>(&self) -> CffFont<O> {
-        let offset = self.top_dict[&Operator::CharStrings][0].to_int() as usize;
-        let char_strings = index(self.cff.data.get(offset ..).unwrap()).get();
-        
         let glyph_name = |sid: SID|
             STANDARD_STRINGS.get(sid as usize).cloned().unwrap_or_else(||
                 ::std::str::from_utf8(self.cff.string_index.get(sid as usize - STANDARD_STRINGS.len()).expect("no such string")).expect("Invalid glyph name")

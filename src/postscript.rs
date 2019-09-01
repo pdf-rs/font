@@ -34,7 +34,7 @@ pub enum Item {
     File
 }
 
-fn recursive_trap(item: Item, f: &mut fmt::Formatter<'_>, mut func: impl FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result) -> fmt::Result {
+fn recursive_trap(item: Item, f: &mut fmt::Formatter<'_>, func: impl FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result) -> fmt::Result {
     use std::cell::RefCell;
     
     #[thread_local]

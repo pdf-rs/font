@@ -152,7 +152,7 @@ pub fn parse_woff2<O: Outline>(i: &[u8]) -> R<OpenTypeFont<O>> {
 }
 
 fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
-    let (i, _) = tag([0u8; 4])(i)?;;
+    let (i, _) = tag([0u8; 4])(i)?;
     let (i, num_glyphs) = be_u16(i)?;
     let (i, _index_format) = be_u16(i)?;
     let (i, n_contour_stream_size) = be_u32(i)?;
@@ -165,7 +165,7 @@ fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
     
     let (i, n_contour_stream) = take(n_contour_stream_size)(i)?;
     let (i, n_points_stream) = take(n_points_stream_size)(i)?;
-    let (i, mut flag_stream) = take(flag_stream_size)(i)?;
+    let (i, flag_stream) = take(flag_stream_size)(i)?;
     let (i, mut glyph_stream) = take(glyph_stream_size)(i)?;
     let (i, mut composite_stream) = take(composite_stream_size)(i)?;
     
@@ -174,13 +174,13 @@ fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
     let (i, _bbox_stream) = take(bbox_stream_size - bbox_bitmap_len)(i)?;
     let (i, _instruction_stream) = take(instruction_stream_size)(i)?;
     
-    let mut contours = iterator(n_contour_stream, be_i16);
+    let contours = iterator(n_contour_stream, be_i16);
     let mut points = iterator(n_points_stream, varint_u16);
     let mut flags = iterator(flag_stream, be_u8);
     
     let mut glyphs = Vec::with_capacity(num_glyphs as usize);
     
-    for (gid, n_contour) in contours.enumerate() {
+    for n_contour in contours {
         match n_contour {
             0 => glyphs.push(Shape::Empty),
             -1 => glyphs.push(parse(&mut composite_stream, compound)?),

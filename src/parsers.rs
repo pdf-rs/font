@@ -1,6 +1,5 @@
 use std::fmt;
 use std::marker::PhantomData;
-use std::collections::HashMap;
 use std::hash::Hash;
 use nom::{
     bytes::complete::{take_till, take_till1, take_while, take_while_m_n, tag},
@@ -85,16 +84,6 @@ pub fn float(i: &[u8]) -> R<f32> {
         ))),
         |s| std::str::from_utf8(s).unwrap().parse::<f32>().expect("overflow")
     )(i)
-}
-pub fn bound<T>(f: impl Fn(&[u8]) -> R<T>, n: usize) -> impl Fn(&[u8]) -> R<T> {
-    move |i: &[u8]| {
-        let s = &i[.. i.len().min(n)];
-        let map = |r: &[u8]| &i[s.len() - r.len() ..];
-        match f(s) {
-            Ok((r, t)) => Ok((map(r), t)),
-            Err(e) => Err(e)
-        }
-    }
 }
 pub fn delimited_literal(i: &[u8]) -> R<Vec<u8>> {
     let mut level = 0;
@@ -267,12 +256,6 @@ pub fn iterator<'a, T, F>(input: &'a [u8], parser: F) -> ParserIterator<'a, T, F
 {
     ParserIterator { parser, input, _m: PhantomData }
 }
-impl<'a, T, F> ParserIterator<'a, T, F> {
-    #[inline(always)]
-    pub fn input(&self) -> &'a [u8] {
-        self.input
-    }
-}
 impl<'a, T, F> Iterator for ParserIterator<'a, T, F> where
     F: Fn(&'a [u8]) -> R<'a, T>
 {
@@ -304,7 +287,7 @@ pub fn varint_u32(i: &[u8]) -> R<u32> {
         }
         b => (b & 0x7F) as u32
     };
-    for j in 1 .. 5 {
+    for _ in 1 .. 5 {
         let b = parse(&mut i, be_u8)?;
         
         if acc & 0xFE_00_00_00 != 0 {
