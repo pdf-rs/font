@@ -1,15 +1,42 @@
 use vector::{Surface, PathStyle, Vector, Transform, PathBuilder, Outline};
-use crate::Font;
+use crate::{Font, GlyphId};
+
 
 pub fn line<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: &str, style: PathStyle, baseline: Option<PathStyle>) -> S {
     let mut last_gid = None;
     let mut offset = Vector::default();
-    let glyphs: Vec<_> = text.chars()
-        .map(|c| dbg!(font.gid_for_unicode_codepoint(dbg!(c) as u32)).unwrap_or(font.get_notdef_gid()))
-        .filter_map(|gid| font.glyph(gid).map(|glyph| (gid, glyph)))
+
+    let mut gids: Vec<GlyphId> = text.chars().map(|c| font.gid_for_unicode_codepoint(c as u32).unwrap_or(font.get_notdef_gid())).collect();
+    if let Some(gsub) = font.get_gsub() {
+        let mut substituted_gids = Vec::new();
+        let mut pos = 0;
+    'a: while let Some(&first) = gids.get(pos) {
+            pos += 1;
+            if let Some(subs) = gsub.substitutions(first) {
+            'b: for (sub, glyph) in subs {
+                    let mut len = 0;
+                    for (a, b) in sub.zip(gids[pos ..].iter().cloned()) {
+                        if a != b {
+                            continue 'b;
+                        }
+                        len += 1;
+                    }
+                    substituted_gids.push(glyph);
+                    pos += len;
+                    continue 'a;
+                }
+            }
+
+            substituted_gids.push(first);
+        }
+
+        gids = substituted_gids;
+    }
+    let glyphs: Vec<_> = gids.iter()
+        .filter_map(|&gid| font.glyph(gid).map(|glyph| (gid, glyph)))
         .map(|(gid, glyph)| {
             if let Some(left) = last_gid.replace(gid) {
-                offset = offset + Vector::new(dbg!(font.kerning(left, gid)), 0.0);
+                offset = offset + Vector::new(font.kerning(left, gid), 0.0);
             }
             let p = offset;
             offset = offset + glyph.metrics.advance;
@@ -17,9 +44,13 @@ pub fn line<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: &str,
         })
         .collect();
     
-    let bbox = dbg!(font.bbox().expect("no bbox"));
+    let bbox = font.bbox().expect("no bbox");
+    let last_p = match glyphs.last() {
+        Some((_, p)) => p,
+        _ => return S::new(Vector::default())
+    };
     let origin = Vector::new(0., -bbox.origin().y());
-    let width = (offset.x()) * font.font_matrix().m11();
+    let width = (last_p.x() + bbox.size().x()) * font.font_matrix().m11();
     let height = bbox.size().y() * font.font_matrix().m22();
     let mut surface = S::new(Vector::new(width * font_size, font_size * height));
     

@@ -15,7 +15,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     let data = fs::read(file).expect("can't read specified file");
     let font = parse::<<Svg as Surface>::Outline>(&data);
-    dbg!(font.font_matrix());
     let glyph_style = PathStyle {
         fill: Some((0, 0, 255, 100)),
         stroke: Some(((0, 0, 0, 255), 0.05))

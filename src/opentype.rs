@@ -7,8 +7,9 @@ use crate::{Font, R, IResultExt, VMetrics, Glyph, HMetrics, GlyphId};
 use crate::truetype::{Shape, parse_shapes, get_outline};
 use crate::cff::{read_cff};
 use crate::gpos::parse_gpos;
+use crate::gsub::{Gsub, parse_gsub};
 use encoding::Encoding;
-use crate::parsers::{iterator, parse};
+use crate::parsers::{iterator, iterator_n, parse};
 use nom::{
     number::complete::{be_u8, be_i16, be_u16, be_i64, be_i32, be_u32, be_u24},
     multi::{count, many0},
@@ -18,6 +19,7 @@ use nom::{
 };
 use tuple::T4;
 use vector::{Outline, Transform, Rect, Vector};
+use itertools::{Itertools, Either};
 
 pub struct OpenTypeFont<O: Outline> {
     outlines: Vec<O>,
@@ -25,6 +27,7 @@ pub struct OpenTypeFont<O: Outline> {
     cmap: Option<CMap>,
     hmtx: Option<Hmtx>,
     bbox: Option<Rect>,
+    gsub: Option<Gsub>,
     font_matrix: Transform
 }
 impl<O: Outline> OpenTypeFont<O> {
@@ -65,6 +68,8 @@ impl<O: Outline> OpenTypeFont<O> {
             HashMap::new()
         };
         
+        let gsub = tables.get(b"GSUB").map(|data| parse_gsub(data).get());
+        
         info!("{} kern table entries", kern.len());
         let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
         
@@ -74,6 +79,7 @@ impl<O: Outline> OpenTypeFont<O> {
             cmap,
             hmtx,
             bbox,
+            gsub,
             font_matrix
         }
     }
@@ -130,6 +136,9 @@ impl<O: Outline> Font<O> for OpenTypeFont<O> {
     }
     fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
         self.kern.get(&(left.0 as u16, right.0 as u16)).cloned().unwrap_or(0) as f32
+    }
+    fn get_gsub(&self) -> Option<&Gsub> {
+        self.gsub.as_ref()
     }
 }
 
@@ -530,4 +539,94 @@ pub fn parse_kern_ms(i: &[u8]) -> R<HashMap<(u16, u16), i16>> {
         }
     }
     Ok((i, table))
+}
+
+pub fn parse_skript_list(data: &[u8]) -> R<()> {
+    let (i, script_count) = be_u16(data)?;
+    
+    for (tag, offset) in iterator_n(i, tuple((take(4usize), be_u16)), script_count) {
+        debug!("script {}", String::from_utf8_lossy(tag));
+        let script_data = &data[offset as usize ..];
+        
+        let (i, default_lang_sys_off) = be_u16(script_data)?;
+        let (i, sys_lang_count) = be_u16(i)?;
+        
+        for (tag, offset) in iterator_n(i, tuple((take(4usize), be_u16)), sys_lang_count) {
+            let i = &script_data[offset as usize ..];
+            let (i, _lookup_order) = be_u16(i)?;
+            let (i, required_feature_index) = be_u16(i)?;
+            let (i, feature_index_count) = be_u16(i)?;
+            for feature_index in iterator_n(i, be_u16, feature_index_count) {
+            
+            }
+        }
+    }
+    Ok((i, ()))
+}
+
+pub fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(&[u8], u16, u16) -> R<()>) -> R<()> {
+    let (i, lookup_count) = be_u16(data)?;
+    for table_off in iterator_n(i, be_u16, lookup_count) {
+        let table_data = &data[table_off as usize ..];
+        let (i, lookup_type) = be_u16(table_data)?;
+        let (i, lookup_flag) = be_u16(i)?;
+        let (i, subtable_count) = be_u16(i)?;
+        
+        for subtable_off in iterator_n(i, be_u16, subtable_count) {
+            inner(&table_data[subtable_off as usize ..], lookup_type, lookup_flag)?;
+        }
+    }
+    Ok((i, ()))
+}
+
+// maps gid -> class id
+pub fn parse_class_def(data: &[u8]) -> R<HashMap<u16, u16>> {
+    let (i, format) = be_u16(data)?;
+    let mut map = HashMap::new();
+    match format {
+        1 => {
+            let (i, start_glyph_id) = be_u16(i)?;
+            let (i, glyph_count) = be_u16(i)?;
+            for (gid, class) in (start_glyph_id ..).zip(iterator_n(i, be_u16, glyph_count)) {
+                map.insert(gid, class);
+            }
+        }
+        2 => {
+            let (i, class_rage_count) = be_u16(i)?;
+            for (start_gid, end_gid, class) in iterator_n(i, tuple((be_u16, be_u16, be_u16)), class_rage_count) {
+                for gid in start_gid ..= end_gid {
+                    map.insert(gid, class);
+                }
+            }
+        }
+        f => panic!("invalid class list format {}", f)
+    }
+    Ok((i, map))
+}
+pub fn invert_class_def(map: &HashMap<u16, u16>, num_glyphs: u16) -> HashMap<u16, Vec<u16>> {
+    let mut map2 = HashMap::new();
+    for gid in 0 .. num_glyphs {
+        let class = map.get(&gid).cloned().unwrap_or(0);
+        map2.entry(class).or_insert(vec![]).push(gid);
+    }
+    map2
+}
+
+pub fn coverage_table<'a>(i: &'a [u8]) -> R<impl Iterator<Item=u16> + 'a> {
+    let (i, format) = be_u16(i)?;
+    debug!("coverage table format {}", format);
+    match format {
+        1 => {
+            let (i, glyph_count) = be_u16(i)?;
+            Ok((i, Either::Left(iterator_n(i, be_u16, glyph_count))))
+        },
+        2 => {
+            let (i, range_count) = be_u16(i)?;
+            Ok((i, Either::Right(
+                iterator_n(i, tuple((be_u16, be_u16, be_u16)), range_count)
+                    .flat_map(|(start, end, i)| start ..= end)
+            )))
+        },
+        n => panic!("invalid coverage format {}", n)
+    }
 }

@@ -6,112 +6,9 @@ use nom::{
 };
 use crate::{R};
 use crate::parsers::{iterator_n, parse};
-use crate::opentype::Maxp;
+use crate::opentype::{Maxp, parse_skript_list, parse_lookup_list, parse_class_def, invert_class_def, coverage_table};
 use itertools::{Itertools, Either};
 
-fn parse_skript_list(data: &[u8]) -> R<()> {
-    let (i, script_count) = be_u16(data)?;
-    
-    for (tag, offset) in iterator_n(i, tuple((take(4usize), be_u16)), script_count) {
-        debug!("script {}", String::from_utf8_lossy(tag));
-        let script_data = &data[offset as usize ..];
-        
-        let (i, default_lang_sys_off) = be_u16(script_data)?;
-        let (i, sys_lang_count) = be_u16(i)?;
-        
-        for (tag, offset) in iterator_n(i, tuple((take(4usize), be_u16)), sys_lang_count) {
-            let i = &script_data[offset as usize ..];
-            let (i, _lookup_order) = be_u16(i)?;
-            let (i, required_feature_index) = be_u16(i)?;
-            let (i, feature_index_count) = be_u16(i)?;
-            for feature_index in iterator_n(i, be_u16, feature_index_count) {
-            
-            }
-        }
-    }
-    Ok((i, ()))
-}
-
-fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(&[u8], LookupType, u16) -> R<()>) -> R<()> {
-    let (i, lookup_count) = be_u16(data)?;
-    for table_off in iterator_n(i, be_u16, lookup_count) {
-        let table_data = &data[table_off as usize ..];
-        let (i, lookup_type) = be_u16(table_data)?;
-        let (i, lookup_flag) = be_u16(i)?;
-        let (i, subtable_count) = be_u16(i)?;
-        
-        for subtable_off in iterator_n(i, be_u16, subtable_count) {
-            if let Some(lookup_type) = LookupType::from_u16(lookup_type) {
-                inner(&table_data[subtable_off as usize ..], lookup_type, lookup_flag)?;
-            }
-        }
-    }
-    Ok((i, ()))
-}
-
-// maps gid -> class id
-fn parse_class_def(data: &[u8]) -> R<HashMap<u16, u16>> {
-    let (i, format) = be_u16(data)?;
-    let mut map = HashMap::new();
-    match format {
-        1 => {
-            let (i, start_glyph_id) = be_u16(i)?;
-            let (i, glyph_count) = be_u16(i)?;
-            for (gid, class) in (start_glyph_id ..).zip(iterator_n(i, be_u16, glyph_count)) {
-                map.insert(gid, class);
-            }
-        }
-        2 => {
-            let (i, class_rage_count) = be_u16(i)?;
-            for (start_gid, end_gid, class) in iterator_n(i, tuple((be_u16, be_u16, be_u16)), class_rage_count) {
-                for gid in start_gid ..= end_gid {
-                    map.insert(gid, class);
-                }
-            }
-        }
-        f => panic!("invalid class list format {}", f)
-    }
-    Ok((i, map))
-}
-fn invert_class_def(map: &HashMap<u16, u16>, num_glyphs: u16) -> HashMap<u16, Vec<u16>> {
-    let mut map2 = HashMap::new();
-    for gid in 0 .. num_glyphs {
-        let class = map.get(&gid).cloned().unwrap_or(0);
-        map2.entry(class).or_insert(vec![]).push(gid);
-    }
-    map2
-}
-
-#[derive(Debug)]
-enum LookupType {
-    SingleAdjustment,
-    PairAdjustment,
-    CursiveAttachment,
-    MarkToBaseAttachment,
-    MarkToLigatureAttachment,
-    MarkToMarkAttachment,
-    ContextPositioning,
-    ChainedContextPositioning,
-    ExtensionPositioning,
-}
-impl LookupType {
-    fn from_u16(n: u16) -> Option<LookupType> {
-        use LookupType::*;
-        let t = match n {
-            1 => SingleAdjustment,
-            2 => PairAdjustment,
-            3 => CursiveAttachment,
-            4 => MarkToBaseAttachment,
-            5 => MarkToLigatureAttachment,
-            6 => MarkToMarkAttachment,
-            7 => ContextPositioning,
-            8 => ChainedContextPositioning,
-            9 => ExtensionPositioning,
-            _ => return None
-        };
-        Some(t)
-    }
-}
 
 #[derive(Default)]
 pub struct Gpos {
@@ -120,7 +17,7 @@ pub struct Gpos {
 
 // figure out how to replace with a dedicated sparse 2d map
 pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> R<'a, Gpos> {
-    debug!("parse gpos");
+    debug!("parse GPOS");
     let (i, major_version) = be_u16(data)?;
     assert_eq!(major_version, 1);
     let (i, minor_version) = be_u16(i)?;
@@ -139,7 +36,7 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> R<'a, Gpos> {
     
     parse_lookup_list(&data[lookup_list_off as usize ..], |data, lookup_type, lookup_flag| {
         match lookup_type { 
-            LookupType::PairAdjustment => parse_pair_adjustment(data, &mut gpos.kern, maxp.num_glyphs)?.1,
+            2 => parse_pair_adjustment(data, &mut gpos.kern, maxp.num_glyphs)?.1,
             _ => {}
         }
         Ok((data, ()))
@@ -148,24 +45,6 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> R<'a, Gpos> {
     Ok((i, gpos))
 }
 
-fn coverage_table<'a>(i: &'a [u8]) -> R<impl Iterator<Item=u16> + 'a> {
-    let (i, format) = be_u16(i)?;
-    debug!("coverage table format {}", format);
-    match format {
-        1 => {
-            let (i, glyph_count) = be_u16(i)?;
-            Ok((i, Either::Left(iterator_n(i, be_u16, glyph_count))))
-        },
-        2 => {
-            let (i, range_count) = be_u16(i)?;
-            Ok((i, Either::Right(
-                iterator_n(i, tuple((be_u16, be_u16, be_u16)), range_count)
-                    .flat_map(|(start, end, i)| start ..= end)
-            )))
-        },
-        n => panic!("invalid coverage format {}", n)
-    }
-}
 
 #[derive(Default, Debug)]
 struct ValueRecord {

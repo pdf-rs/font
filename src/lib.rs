@@ -8,6 +8,7 @@ use nom::{IResult, Err::*, error::VerboseError};
 use tuple::{TupleElements};
 use encoding::Encoding;
 use vector::{Outline, Vector, PathBuilder, Transform, Rect};
+use crate::gsub::Gsub;
 
 #[derive(Clone)]
 pub struct Glyph<O: Outline> {
@@ -111,6 +112,9 @@ pub trait Font<O: Outline> {
     fn postscript_name(&self) -> Option<&str> {
         None
     }
+    fn get_gsub(&self) -> Option<&Gsub> {
+        None
+    }
 }
 pub struct Glyphs<O: Outline> {
     glyphs: Vec<Glyph<O>>
@@ -132,6 +136,7 @@ mod parsers;
 mod eexec;
 mod woff;
 mod gpos;
+mod gsub;
 pub mod layout;
 
 pub use truetype::TrueTypeFont;
