@@ -10,13 +10,24 @@ use crate::parsers::{iterator_n, parse};
 use crate::opentype::{Maxp, parse_skript_list, parse_lookup_list, parse_class_def, invert_class_def, coverage_table};
 
 #[derive(Debug)]
+pub struct GlyphList(Vec<u16>);
+impl GlyphList {
+    pub fn matches(&self, glyphs: &[GlyphId]) -> Option<usize> {
+        if self.0.len() <= glyphs.len() && self.0.iter().zip(glyphs).all(|(&a, &b)| a as u32 == b.0) {
+            return Some(self.0.len())
+        }
+        None
+    }
+}
+
+#[derive(Debug)]
 pub struct Gsub {
-    ligatures: HashMap<u16, Vec<(Vec<u16>, u16)>>
+    ligatures: HashMap<u16, Vec<(GlyphList, u16)>>
 }
 impl Gsub {
-    pub fn substitutions<'a>(&'a self, first: GlyphId) -> Option<impl Iterator<Item=(impl Iterator<Item=GlyphId> + 'a, GlyphId)> + 'a> {
+    pub fn substitutions<'a>(&'a self, first: GlyphId) -> Option<impl Iterator<Item=(&'a GlyphList, GlyphId)> + 'a> {
         self.ligatures.get(&(first.0 as u16)).map(|subs| subs.iter().map(|&(ref others, substutute)| {
-            (others.iter().map(|&gid| GlyphId(gid as u32)), GlyphId(substutute as u32))
+            (others, GlyphId(substutute as u32))
         }))
     }
 }
@@ -81,7 +92,7 @@ fn parse_ligatures<'a>(data: &'a [u8], gsub: &mut Gsub) -> R<'a, ()> {
             let (i, component_count) = be_u16(i)?;
             let (_, components) = count(be_u16, component_count as usize - 1)(i)?;
             
-            entry.push((components, ligature_glyph));
+            entry.push((GlyphList(components), ligature_glyph));
         }
     }
     Ok((i, ()))

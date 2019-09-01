@@ -14,16 +14,11 @@ pub fn line<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: &str,
             pos += 1;
             if let Some(subs) = gsub.substitutions(first) {
             'b: for (sub, glyph) in subs {
-                    let mut len = 0;
-                    for (a, b) in sub.zip(gids[pos ..].iter().cloned()) {
-                        if a != b {
-                            continue 'b;
-                        }
-                        len += 1;
+                    if let Some(len) = sub.matches(&gids[pos ..]) {
+                        substituted_gids.push(glyph);
+                        pos += len;
+                        continue 'a;
                     }
-                    substituted_gids.push(glyph);
-                    pos += len;
-                    continue 'a;
                 }
             }
 
