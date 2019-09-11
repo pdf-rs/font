@@ -1,7 +1,6 @@
 use vector::{Surface, PathStyle, Vector, Transform, PathBuilder, Outline};
 use crate::{Font, GlyphId};
 
-
 pub fn line<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: &str, style: PathStyle, baseline: Option<PathStyle>) -> S {
     let mut last_gid = None;
     let mut offset = Vector::default();
@@ -70,3 +69,15 @@ pub fn line<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: &str,
     
     surface
 }
+
+/*
+1. split into paragraphs
+2. split into runs
+3. render each run
+
+pub fn paragraphs(text: &str) {
+    let info = BidiInfo::new(text, None);
+    for paragraph in &info.paragraphs {
+        for (level, run) in info.visual_runs(para, line: Range<usize>)
+}
+*/

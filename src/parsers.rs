@@ -333,3 +333,25 @@ pub fn count_map<'a, K, V>(parser: impl Fn(&'a [u8]) -> R<'a, (K, V)>, count: us
     }
 }
 
+pub struct Array<'a, P> {
+    data: &'a [u8],
+    item_size: usize,
+    len: usize,
+    parser: P
+}
+pub fn array<'a, P>(data: &'a[u8], item_size: usize, parser: P, count: impl Into<usize>) -> Array<'a, P> {
+    Array {
+        data,
+        item_size,
+        parser,
+        len: count.into()
+    }
+}
+impl<'a, O, P> Array<'a, P> where P: Fn(&'a [u8]) -> O {
+    pub fn get(&self, index: usize) -> O {
+        assert!(index < self.len);
+        let off = index * self.item_size;
+        let slice = &self.data[off .. off + self.item_size];
+        (self.parser)(slice)
+    }
+}

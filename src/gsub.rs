@@ -97,4 +97,15 @@ fn parse_ligatures<'a>(data: &'a [u8], gsub: &mut Gsub) -> R<'a, ()> {
     }
     Ok((i, ()))
 }
+/*
+enum Action {
+    GoTo(u16),
+    Glyph(u16)
+}
 
+struct StateMachine {
+    transitions: HashMap<(u16, u16), Action>, // current state, input gid
+    num_states: usize
+}
+impl StateMachine {
+*/

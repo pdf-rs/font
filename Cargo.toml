@@ -23,9 +23,5 @@ indexmap = "1.0"
 brotli-decompressor = "2.3.0"
 inflate = "0.4.5"
 raqote = { version = "*", default-features = false }
-
 walkdir = "2.2.9"
 #jemallocator = "0.3.0"
-
-[patch."https://github.com/s3bk/vector/"]
-vector = { path = "../vector" }
