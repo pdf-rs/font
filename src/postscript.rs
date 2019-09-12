@@ -2,12 +2,17 @@ use std::collections::HashMap;
 use std::fmt;
 use std::ops::Deref;
 use std::borrow::{Cow};
-use slotmap::SlotMap;
 use tuple::{TupleElements, Map};
 use decorum::R32;
 use indexmap::set::IndexSet;
 use crate::R;
 use crate::parsers::{token, Token, comment, space};
+
+#[cfg(feature="unstable")]
+use slotmap::SlotMap;
+
+#[cfg(not(feature="unstable"))]
+use slotmap::DenseSlotMap as SlotMap;
 
 new_key_type! {
     pub struct DictKey;
