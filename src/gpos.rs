@@ -46,8 +46,6 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> R<'a, Gpos> {
         Ok((data, ()))
     })?.1;
     
-    dbg!(&gpos.mark_to_base);
-    
     Ok((i, gpos))
 }
 
