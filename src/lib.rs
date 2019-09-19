@@ -9,6 +9,7 @@ use tuple::{TupleElements};
 use encoding::Encoding;
 use vector::{Outline, Vector, PathBuilder, Transform, Rect};
 use crate::gsub::Gsub;
+use crate::opentype::CMap;
 
 #[derive(Clone)]
 pub struct Glyph<O: Outline> {
@@ -113,6 +114,9 @@ pub trait Font<O: Outline> {
         None
     }
     fn get_gsub(&self) -> Option<&Gsub> {
+        None
+    }
+    fn get_cmap(&self) -> Option<&CMap> {
         None
     }
 }

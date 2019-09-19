@@ -100,6 +100,9 @@ impl<O: Outline> Font<O> for TrueTypeFont<O> {
     fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
         self.kern.get(&(left.0 as u16, right.0 as u16)).cloned().unwrap_or(0) as f32
     }
+    fn get_cmap(&self) -> Option<&CMap> {
+        self.cmap.as_ref()
+    }
 }
 
 #[inline]

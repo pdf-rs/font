@@ -140,6 +140,9 @@ impl<O: Outline> Font<O> for OpenTypeFont<O> {
     fn get_gsub(&self) -> Option<&Gsub> {
         self.gsub.as_ref()
     }
+    fn get_cmap(&self) -> Option<&CMap> {
+        self.cmap.as_ref()
+    }
 }
 
 pub struct Tables<T> {
