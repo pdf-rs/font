@@ -259,6 +259,9 @@ impl CMap {
     pub fn get_codepoint(&self, cp: u32) -> Option<u32> {
         self.single_codepoint.get(&cp).cloned()
     }
+    pub fn items<'a>(&'a self) -> impl Iterator<Item=(u32, GlyphId)> + 'a {
+        self.single_codepoint.iter().map(|(&cp, &gid)| (cp, GlyphId(gid)))
+    }
 }
 
 pub fn parse_cmap(input: &[u8]) -> R<CMap> {
