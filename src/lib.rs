@@ -1,4 +1,4 @@
-#![feature(thread_local, const_vec_new)]
+#![feature(thread_local)]
 #[macro_use] extern crate log;
 #[macro_use] extern crate slotmap;
 
