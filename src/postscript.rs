@@ -39,6 +39,7 @@ pub enum Item {
     File
 }
 
+#[cfg(feature="unstable")]
 fn recursive_trap(item: Item, f: &mut fmt::Formatter<'_>, func: impl FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result) -> fmt::Result {
     use std::cell::RefCell;
     
@@ -80,6 +81,8 @@ impl<'a> RefDict<'a> {
     }
 }
 
+
+#[cfg(feature="unstable")]
 impl<'a> fmt::Debug for RefDict<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let vm = self.vm;
@@ -113,6 +116,8 @@ impl<'a> RefArray<'a> {
         self.array.len()
     }
 }
+
+#[cfg(feature="unstable")]
 impl<'a> fmt::Debug for RefArray<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let vm = self.vm;
@@ -208,11 +213,14 @@ impl<'a> fmt::Debug for RefItem<'a> {
             RefItem::Bool(b) => b.fmt(f),
             RefItem::Int(i) => i.fmt(f),
             RefItem::Real(r) => r.fmt(f),
+            #[cfg(feature="unstable")]
             RefItem::Dict(dict) => dict.fmt(f),
+            #[cfg(feature="unstable")]
             RefItem::Array(array) => array.fmt(f),
             RefItem::String(s) => write!(f, "({:?})", print_string(s)),
             RefItem::Literal(s) => write!(f, "/{:?}", print_string(s)),
             RefItem::Name(s) => write!(f, "{:?}", print_string(s)),
+            _ => Ok(())
         }
     }
 }
