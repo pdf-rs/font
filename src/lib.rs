@@ -379,6 +379,7 @@ pub fn parse<O: Outline + 'static>(data: &[u8]) -> Box<dyn Font<O>> {
         b"wOFF" => woff(data),
         b"wOF2" => woff2(data),
         &[1, _, _, _] => Box::new(CffFont::parse(data, 0)) as _,
+        &[37, 33, _, _] => Box::new(Type1Font::parse_pfa(data)) as _,
         magic => panic!("unknown magic {:?}", magic)
     }
 }

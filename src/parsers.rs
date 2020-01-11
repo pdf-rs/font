@@ -2,7 +2,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::hash::Hash;
 use nom::{
-    bytes::complete::{take_till, take_till1, take_while, take_while_m_n, tag},
+    bytes::complete::{take_till, take_till1, take_while, take_while_m_n, tag, is_a},
     number::complete::{be_u8, be_u16},
     sequence::{delimited, tuple, preceded, terminated},
     combinator::{opt, map, recognize},
@@ -311,6 +311,37 @@ pub fn varint_u16(i: &[u8]) -> R<u16> {
         255 => map(be_u8, |n| n as u16 + 253)(i),
         n => Ok((i, n as u16))
     }
+}
+
+fn hex_digit(i: u8) -> Option<u8> {
+    match i {
+        b'0' ..= b'9' => Some(i - b'0'),
+        b'A' ..= b'F' => Some(i - b'A' + 10),
+        _ => None
+    }
+}
+
+pub fn hex_string(input: &[u8]) -> R<Vec<u8>> {
+    let mut data = Vec::new();
+    let mut odd = None;
+    let mut add_digit = |digit: u8| {
+        odd = match odd {
+            Some(high) => {
+                data.push(high << 4 | digit);
+                None
+            }
+            None => Some(digit)
+        };
+    };
+    for (idx, &b) in input.iter().enumerate() {
+        match b {
+            b @ b'0' ..= b'9' => add_digit(b - b'0'),
+            b @ b'A' ..= b'F' => add_digit(b - b'A' + 10),
+            b' ' | b'\n' | b'\t' => {},
+            _ => return Ok((&input[idx ..], data))
+        }
+    }
+    Ok((input, data))
 }
 
 #[inline(always)]

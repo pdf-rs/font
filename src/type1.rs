@@ -55,6 +55,11 @@ impl<O: Outline> Font<O> for Type1Font<O> {
 }
 
 impl<O: Outline> Type1Font<O> {
+    pub fn parse_pfa(data: &[u8]) -> Self {
+        let mut vm = Vm::new();
+        vm.parse_and_exec(data);
+        Self::from_vm(vm)
+    }
     pub fn parse_pfb(data: &[u8]) -> Self {
         let mut vm = Vm::new();
         parse_pfb(&mut vm, data).get();
@@ -112,7 +117,13 @@ impl<O: Outline> Type1Font<O> {
                     let name = std::str::from_utf8(name).unwrap();
                     let unicode = glyphname_to_unicode(name);
                     debug!("glyph: {} {:?}, gid={}", name, unicode, glyphs.len());
-                    let char_string = char_strings.get(name).unwrap().as_bytes().unwrap();
+                    let char_string = match char_strings.get(name) {
+                        Some(item) => item.as_bytes().unwrap(),
+                        None => {
+                            warn!("no charstring for {}", name);
+                            continue;
+                        }
+                    };
                     
                     let decoded = Decoder::charstring().decode(&char_string, len_iv);
                     //debug!("{} decoded: {:?}", name, String::from_utf8_lossy(&decoded));

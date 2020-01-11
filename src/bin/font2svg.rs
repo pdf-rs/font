@@ -19,7 +19,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let font = parse::<Outline>(&data);
     
     let num_glyphs = font.num_glyphs();
-    let bbox = font.bbox().unwrap_or(RectF::new(Vector2F::default(), Vector2F::new(1.0, 1.0)));
+    let mut bbox = font.bbox().unwrap_or(RectF::new(Vector2F::default(), Vector2F::new(1.0, 1.0)));
+    for i in 0 .. num_glyphs {
+        let glyph = font.glyph(GlyphId(i)).unwrap();
+        bbox = bbox.union_rect(glyph.path.bounds());
+    }
     let scale = Vector2F::new(200., 200.);
     let bbox_ratio = bbox.size().x() / bbox.size().y();
     let aspect_ratio = 4. / 3.; // width to height

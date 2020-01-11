@@ -29,6 +29,11 @@ impl Decoder {
         vec.extend(data.iter().map(|&b| self.decode_byte(b)).skip(skip));
         vec
     }
+    pub fn decode_inline(&mut self, data: &mut [u8]) {
+        for b in data {
+            *b = self.decode_byte(*b);
+        }
+    }
 }
 
 struct ExecReader<R: Read> {

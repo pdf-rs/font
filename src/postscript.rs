@@ -6,7 +6,7 @@ use tuple::{TupleElements, Map};
 use decorum::R32;
 use indexmap::set::IndexSet;
 use crate::R;
-use crate::parsers::{token, Token, comment, space};
+use crate::parsers::{token, Token, comment, space, hex_string};
 
 #[cfg(feature="unstable")]
 use slotmap::SlotMap;
@@ -315,11 +315,12 @@ operators!{
 }
 
 pub struct Input<'a> {
-    data:   &'a [u8]
+    data:   &'a [u8],
+    open:   bool
 }
 impl<'a> Input<'a> {
     pub fn new(data: &'a [u8]) -> Input<'a> {
-        Input { data }
+        Input { data, open: true }
     }
     pub fn len(&self) -> usize {
         self.data.len()
@@ -942,13 +943,21 @@ impl Vm {
             Operator::CurrentFile => self.push(Item::File),
             Operator::CloseFile => {
                 match self.pop() {
-                    Item::File => {},
+                    Item::File => {
+                        input.open = false;
+                    },
                     arg => panic!("closefile: invalid arg {:?})", self.display(arg))
                 }
             }
             Operator::Eexec => {
                 match self.pop() {
-                    Item::File => {},
+                    Item::File => {
+                        let mut data = input.parse(hex_string);
+                        use crate::eexec::Decoder;
+                        Decoder::file().decode_inline(&mut data);
+                        debug!("data: {}", String::from_utf8_lossy(&data));
+                        self.parse_and_exec(&data[4..]);
+                    },
                     Item::String(_) => {
                         unimplemented!()
                         // let mut input = Input::new(self.get_string(key));
@@ -990,7 +999,7 @@ impl Vm {
         let mut input = Input::new(data);
         // skip leading whitespace
         
-        while input.len() > 0 {
+        while input.len() > 0 && input.open {
             self.step(&mut input);
         }
     }
