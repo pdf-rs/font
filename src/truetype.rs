@@ -11,6 +11,7 @@ use nom::{
 };
 use vector::{Outline, Contour, Transform, Vector, Rect};
 use crate::opentype::{parse_tables, parse_head, parse_maxp, parse_loca, parse_cmap, parse_hhea, parse_hmtx, parse_kern, Hmtx, Tables, CMap};
+use crate::gpos::KernTable;
 use pathfinder_geometry::{transform2d::Matrix2x2F};
 use itertools::Itertools;
 
@@ -26,7 +27,7 @@ pub struct TrueTypeFont<O: Outline> {
     hmtx: Hmtx,
     units_per_em: u16,
     bbox: Rect,
-    kern: HashMap<(u16, u16), i16>,
+    kern: KernTable,
 }
 
 impl<O: Outline> TrueTypeFont<O> {
@@ -98,7 +99,7 @@ impl<O: Outline> Font<O> for TrueTypeFont<O> {
         Some(self.bbox)
     }
     fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
-        self.kern.get(&(left.0 as u16, right.0 as u16)).cloned().unwrap_or(0) as f32
+        self.kern.get(left.0 as u16, right.0 as u16).unwrap_or(0) as f32
     }
     fn get_cmap(&self) -> Option<&CMap> {
         self.cmap.as_ref()

@@ -13,8 +13,27 @@ use itertools::{Itertools};
 
 #[derive(Default)]
 pub struct Gpos {
-    pub kern: HashMap<(u16, u16), i16>,
+    pub kern: KernTable,
     pub mark_to_base: HashMap<(u16, u16), (i16, i16)>
+}
+
+#[derive(Default)]
+pub struct KernTable {
+    pub left_classes: HashMap<u16, u16>, // gid -> class id,
+    pub right_classes: HashMap<u16, u16>, // gid -> class id,
+    pub class_pairs: HashMap<(u16, u16), i16>,
+    pub glyph_pairs: HashMap<(u16, u16), i16>
+}
+impl KernTable {
+    pub fn get(&self, left: u16, right: u16) -> Option<i16> {
+        if let Some(&kern) = self.glyph_pairs.get(&(left, right)) {
+            return Some(kern);
+        }
+        let &left_class = self.left_classes.get(&left)?;
+        let &right_class = self.right_classes.get(&right)?;
+        let &kern = self.class_pairs.get(&(left_class, right_class))?;
+        Some(kern)
+    }
 }
 
 // figure out how to replace with a dedicated sparse 2d map
@@ -78,7 +97,7 @@ fn value_record(flags: u16) -> impl Fn(&[u8]) -> R<ValueRecord> {
     }
 }
 
-fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut HashMap<(u16, u16), i16>, num_glyphs: u16) -> R<'a, ()> {
+fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, num_glyphs: u16) -> R<'a, ()> {
     let (i, format) = be_u16(data)?;
     match format {
         1 => {
@@ -97,7 +116,7 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut HashMap<(u16, u16), i16>
                 let iter = iterator_n(i, tuple((be_u16, value_record(value_format_1), value_record(value_format_2))), pair_value_count);
                 for (second_glyph, value_record_1, _value_record_2) in iter {
                     //debug!("{:?}/{}: {:?} {:?}", first_glyph, second_glyph, value_record_1, value_record_2);
-                    kern.insert((first_glyph, second_glyph), value_record_1.x_advance);
+                    kern.glyph_pairs.insert((first_glyph, second_glyph), value_record_1.x_advance);
                 }
             }
         },
@@ -110,19 +129,16 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut HashMap<(u16, u16), i16>
             let (i, class_1_count) = be_u16(i)?;
             let (i, class_2_count) = be_u16(i)?;
             
-            let class_def_1 = parse_class_def(&data[class_def_1_offset as usize ..])?.1;
-            let inverse_1 = invert_class_def(&class_def_1, num_glyphs);
-            
-            let class_def_2 = parse_class_def(&data[class_def_2_offset as usize ..])?.1;
-            let inverse_2 = invert_class_def(&class_def_2, num_glyphs);
-            
+            let class_def_1 = parse_class_def(&data[class_def_1_offset as usize ..], &mut kern.left_classes)?.1;
+            let class_def_2 = parse_class_def(&data[class_def_2_offset as usize ..], &mut kern.right_classes)?.1;
             let iter = (0 .. class_1_count).cartesian_product(0 .. class_2_count)
                 .zip(iterator_n(i, tuple((value_record(value_format_1), value_record(value_format_2))), class_1_count * class_2_count));
+            
+            kern.class_pairs.reserve(class_1_count as usize * class_2_count as usize);
+
             for ((class_1, class_2), (value_record_1, _value_record_2)) in iter {
                 if value_record_1.x_advance != 0 {
-                    for (&gid1, &gid2) in inverse_1[&class_1].iter().cartesian_product(inverse_2[&class_2].iter()) {
-                        kern.insert((gid1, gid2), value_record_1.x_advance);
-                    }
+                    kern.class_pairs.insert((class_1, class_2), value_record_1.x_advance);
                 }
             }
         }

@@ -6,7 +6,7 @@ use std::ops::Deref;
 use crate::{Font, R, IResultExt, VMetrics, Glyph, HMetrics, GlyphId};
 use crate::truetype::{Shape, parse_shapes, get_outline};
 use crate::cff::{read_cff};
-use crate::gpos::parse_gpos;
+use crate::gpos::{parse_gpos, KernTable};
 use crate::gsub::{Gsub, parse_gsub};
 use encoding::Encoding;
 use crate::parsers::{iterator, iterator_n, parse};
@@ -23,7 +23,7 @@ use itertools::{Either};
 
 pub struct OpenTypeFont<O: Outline> {
     outlines: Vec<O>,
-    kern: HashMap<(u16, u16), i16>,
+    kern: KernTable,
     cmap: Option<CMap>,
     hmtx: Option<Hmtx>,
     bbox: Option<Rect>,
@@ -65,12 +65,13 @@ impl<O: Outline> OpenTypeFont<O> {
         } else if let Some(data) = tables.get(b"kern") {
             parse_kern(data).get()
         } else {
-            HashMap::new()
+            Default::default()
         };
         
         let gsub = tables.get(b"GSUB").map(|data| parse_gsub(data).get());
         
-        info!("{} kern table entries", kern.len());
+        info!("{} glyph pair kern entries and {} class pair kern entries", kern.glyph_pairs.len(), kern.class_pairs.len());
+
         let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
         
         OpenTypeFont {
@@ -135,7 +136,7 @@ impl<O: Outline> Font<O> for OpenTypeFont<O> {
         None
     }
     fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
-        self.kern.get(&(left.0 as u16, right.0 as u16)).cloned().unwrap_or(0) as f32
+        self.kern.get(left.0 as u16, right.0 as u16).unwrap_or(0) as f32
     }
     fn get_gsub(&self) -> Option<&Gsub> {
         self.gsub.as_ref()
@@ -478,24 +479,29 @@ pub fn parse_hmtx_woff2_format1<'a>(i: &'a [u8], head: &Head, hhea: &Hhea, maxp:
     }))
 }
 
-fn parse_kern_format0<'a>(i: &'a [u8], table: &mut HashMap<(u16, u16), i16>) -> R<'a, ()> {
+fn parse_kern_format0<'a>(i: &'a [u8], table: &mut KernTable) -> R<'a, ()> {
     let (i, n_pairs) = be_u16(i)?;
     let (i, _search_range) = be_u16(i)?;
     let (i, _entry_selector) = be_u16(i)?;
     let (i, _range_shift) = be_u16(i)?;
     
+    table.glyph_pairs.reserve(n_pairs as usize);
     for (left, right, kern) in iterator(i, tuple((be_u16, be_u16, be_i16))).take(n_pairs as usize) {
-        table.insert((left, right), kern);
+        table.glyph_pairs.insert((left, right), kern);
     }
     Ok((i, ()))
 }
     
-fn parse_kern_format2<'a>(data: &'a [u8], table: &mut HashMap<(u16, u16), i16>) -> R<'a, ()> {
+fn parse_kern_format2<'a>(data: &'a [u8], table: &mut KernTable) -> R<'a, ()> {
     let (i, _row_width) = be_u16(data)?;
     let (i, left_class_table_off) = be_u16(i)?;
     let (i, right_class_table_off) = be_u16(i)?;
     let (i, _array_off) = be_u16(i)?;
     
+    let num_left = be_u16(&data[left_class_table_off as usize + 2 ..])?.1 as usize;
+    let num_right = be_u16(&data[right_class_table_off as usize + 2 ..])?.1 as usize;
+    table.glyph_pairs.reserve(num_left * num_right);
+
     let class_table = |off| {
         let (i, first_glyph) = be_u16(&data[off as usize ..])?;
         let (i, n_glyphs) = be_u16(i)?;
@@ -506,13 +512,13 @@ fn parse_kern_format2<'a>(data: &'a [u8], table: &mut HashMap<(u16, u16), i16>) 
         for (right_gid, right_off) in class_table(right_class_table_off)? {
             let off = left_off + right_off;
             let (_, kern) = be_i16(&data[off .. off + 2])?;
-            table.insert((left_gid, right_gid), kern);
+            table.glyph_pairs.insert((left_gid, right_gid), kern);
         }
     }
     Ok((i, ()))
 }
 
-pub fn parse_kern(input: &[u8]) -> R<HashMap<(u16, u16), i16>> {
+pub fn parse_kern(input: &[u8]) -> R<KernTable> {
     let (i, version) = be_u16(input)?;
     debug!("kern table version {}", version);
     match version {
@@ -522,17 +528,17 @@ pub fn parse_kern(input: &[u8]) -> R<HashMap<(u16, u16), i16>> {
     }
 }
 
-pub fn parse_kern_apple(i: &[u8]) -> R<HashMap<(u16, u16), i16>> {
+pub fn parse_kern_apple(i: &[u8]) -> R<KernTable> {
     let (i, version) = be_u32(i)?;
     assert_eq!(version, 0x00010000);
     
     unimplemented!()
 }
-pub fn parse_kern_ms(i: &[u8]) -> R<HashMap<(u16, u16), i16>> {
+pub fn parse_kern_ms(i: &[u8]) -> R<KernTable> {
     let (i, version) = be_u16(i)?;
     assert_eq!(version, 0);
     
-    let mut table = HashMap::new();
+    let mut table = KernTable::default();
     let (mut i, n_tables) = be_u16(i)?;
     for _ in 0 .. n_tables {
         let (_version, length, format, coverage) = parse(&mut i, tuple((be_u16, be_u16, be_u8, be_u8)))?;
@@ -586,19 +592,20 @@ pub fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(&[u8], u16, u16) -> 
 }
 
 // maps gid -> class id
-pub fn parse_class_def(data: &[u8]) -> R<HashMap<u16, u16>> {
+pub fn parse_class_def<'a>(data: &'a [u8], map: &mut HashMap<u16, u16>) -> R<'a, ()> {
     let (i, format) = be_u16(data)?;
-    let mut map = HashMap::new();
     match format {
         1 => {
             let (i, start_glyph_id) = be_u16(i)?;
             let (i, glyph_count) = be_u16(i)?;
+            map.reserve(glyph_count as usize);
             for (gid, class) in (start_glyph_id ..).zip(iterator_n(i, be_u16, glyph_count)) {
                 map.insert(gid, class);
             }
         }
         2 => {
             let (i, class_rage_count) = be_u16(i)?;
+            map.reserve(class_rage_count as usize);
             for (start_gid, end_gid, class) in iterator_n(i, tuple((be_u16, be_u16, be_u16)), class_rage_count) {
                 for gid in start_gid ..= end_gid {
                     map.insert(gid, class);
@@ -607,7 +614,7 @@ pub fn parse_class_def(data: &[u8]) -> R<HashMap<u16, u16>> {
         }
         f => panic!("invalid class list format {}", f)
     }
-    Ok((i, map))
+    Ok((i, ()))
 }
 pub fn invert_class_def(map: &HashMap<u16, u16>, num_glyphs: u16) -> HashMap<u16, Vec<u16>> {
     let mut map2 = HashMap::new();
