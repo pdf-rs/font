@@ -59,7 +59,7 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> R<'a, Gpos> {
         debug!("lookup type {}", lookup_type);
         match lookup_type { 
             2 => parse_pair_adjustment(data, &mut gpos.kern, maxp.num_glyphs)?.1,
-            4 => parse_mark_to_base_attachment(data, &mut gpos.mark_to_base)?.1,
+            4 => {}, //parse_mark_to_base_attachment(data, &mut gpos.mark_to_base)?.1,
             _ => {}
         }
         Ok((data, ()))
