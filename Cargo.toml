@@ -6,6 +6,7 @@ edition = "2018"
 
 [features]
 unstable = ["slotmap/unstable", "tuple/nightly"]
+tools = ["env_logger"]
 
 [dependencies]
 encoding = { git = "https://github.com/pdf-rs/encoding/" }
@@ -15,7 +16,6 @@ vector = { git = "https://github.com/s3bk/vector/" }
 tuple = { git = "https://github.com/s3bk/tuple/" }
 nom = "5.0.0"
 log = "0.4.8"
-env_logger = "0.6.2"
 rand = { version = "0.7.0", features = ["wasm-bindgen"] }
 slotmap = { version = "0.4.0" }
 decorum = "0.1.3"
@@ -26,3 +26,21 @@ inflate = "0.4.5"
 raqote = { version = "*", default-features = false }
 walkdir = "2.2.9"
 #jemallocator = "0.3.0"
+env_logger = { version = "*", optional=true }
+
+
+[[bin]]
+name = "font2svg"
+required-features = ["tools"]
+
+[[bin]]
+name = "glyph2svg"
+required-features = ["tools"]
+
+[[bin]]
+name = "parse_fonts"
+required-features = ["tools"]
+
+[[bin]]
+name = "render_text"
+required-features = ["tools"]
