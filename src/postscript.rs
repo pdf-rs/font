@@ -79,6 +79,14 @@ impl<'a> RefDict<'a> {
     pub fn len(&self) -> usize {
         self.dict.len()
     }
+    pub fn string_entries(&self) -> impl Iterator<Item=(&'a str, RefItem<'a>)> {
+        self.iter().filter_map(|(key, val)| {
+            match key {
+                RefItem::Literal(s) => std::str::from_utf8(s).ok().map(|s| (s, val)),
+                _ => None
+            }
+        })
+    }
 }
 
 

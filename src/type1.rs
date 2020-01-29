@@ -13,8 +13,8 @@ use vector::{Outline, Transform, Rect, Vector};
 use encoding::{glyphname_to_unicode};
 
 pub struct Type1Font<O: Outline> {
-    glyphs: IndexMap<u32, Glyph<O>>, // codepoint -> glyph
-    names: HashMap<String, u32>, // name -> glyph id
+    glyphs: IndexMap<String, Glyph<O>>, // namee -> glyph
+    codepoints: HashMap<u32, u32>, // codepoint -> glyph id
     unicode_map: HashMap<&'static str, u32>,
     font_matrix: Transform,
     bbox: Option<Rect>,
@@ -32,10 +32,11 @@ impl<O: Outline> Font<O> for Type1Font<O> {
         self.glyphs.get_index(gid.0 as usize).map(|(_, glyph)| glyph.clone())
     }
     fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
-        self.glyphs.get_full(&codepoint).map(|(index, _, _)| GlyphId(index as u32))
+        let &index = self.codepoints.get(&codepoint)?;
+        Some(GlyphId(index as u32))
     }
     fn gid_for_name(&self, name: &str) -> Option<GlyphId> {
-        self.names.get(name).map(|&id| GlyphId(id))
+        self.glyphs.get_full(name).map(|(id, _, _)| GlyphId(id as u32))
     }
     fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
         let c = std::char::from_u32(codepoint)?;
@@ -105,9 +106,31 @@ impl<O: Outline> Type1Font<O> {
 
         let encoding = font_dict.get("Encoding").expect("no /Encoding").as_array().expect("/Encoding is not an array");
         
-        let mut names = HashMap::new();
-        let mut unicode_map = HashMap::new();
-        let mut glyphs = IndexMap::new();
+        let mut glyphs = IndexMap::with_capacity(char_strings.len());
+        let mut unicode_map = HashMap::with_capacity(char_strings.len());
+        for (name, item) in char_strings.string_entries() {
+            let data = item.as_bytes().unwrap();
+
+            let decoded = Decoder::charstring().decode(&data, len_iv);
+            //debug!("{} decoded: {:?}", name, String::from_utf8_lossy(&decoded));
+            
+            let mut state = State::new();
+            charstring(&decoded, &context, &mut state).unwrap();
+
+            let (index, _) = glyphs.insert_full(name.to_owned(), Glyph {
+                path: state.path.into_outline(),
+                metrics: HMetrics {
+                    advance: Vector::new(state.char_width.unwrap(), 0.0),
+                    lsb: state.lsb.unwrap_or_default()
+                }
+            });
+
+            if let Some(unicode) = glyphname_to_unicode(name) {
+                unicode_map.insert(unicode, index as u32);
+            }
+        }
+        
+        let mut codepoints = HashMap::with_capacity(encoding.len());
         let mut codepoint = 0;
         for item in encoding.iter() {
             match item {
@@ -115,39 +138,15 @@ impl<O: Outline> Type1Font<O> {
                 RefItem::Literal(b".notdef") => {},
                 RefItem::Literal(name) => {
                     let name = std::str::from_utf8(name).unwrap();
-                    let unicode = glyphname_to_unicode(name);
-                    debug!("glyph: {} {:?}, gid={}", name, unicode, glyphs.len());
-                    let char_string = match char_strings.get(name) {
-                        Some(item) => item.as_bytes().unwrap(),
-                        None => {
-                            warn!("no charstring for {}", name);
-                            continue;
-                        }
-                    };
-                    
-                    let decoded = Decoder::charstring().decode(&char_string, len_iv);
-                    //debug!("{} decoded: {:?}", name, String::from_utf8_lossy(&decoded));
-                    
-                    let mut state = State::new();
-                    charstring(&decoded, &context, &mut state).unwrap();
-                    
-                    let (index, _) = glyphs.insert_full(codepoint, Glyph {
-                        path: state.path.into_outline(),
-                        metrics: HMetrics {
-                            advance: Vector::new(state.char_width.unwrap(), 0.0),
-                            lsb: state.lsb.unwrap_or_default()
-                        }
-                    });
-                    names.insert(name.to_owned(), index as u32);
-                    
-                    if let Some(unicode) = unicode {
-                        unicode_map.insert(unicode, index as u32);
+                    if let Some((index, _, _)) = glyphs.get_full(name) {
+                        codepoints.insert(codepoint, index as u32);
                     }
                 }
                 _ => {}
             }
             codepoint += 1;
         }
+
         let font_matrix = font_dict.get("FontMatrix").unwrap().as_array().unwrap();
         assert_eq!(font_matrix.len(), 6);
         
@@ -164,7 +163,7 @@ impl<O: Outline> Type1Font<O> {
         Type1Font {
             font_matrix: Transform::row_major(a, b, c, d, e, f),
             glyphs,
-            names,
+            codepoints,
             unicode_map,
             bbox,
             postscript_name,
