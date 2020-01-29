@@ -177,7 +177,7 @@ fn parse_binary<'a>(vm: &mut Vm, data: &'a [u8]) {
     let mut decoder = Decoder::file();
     let decoded = decoder.decode(data, 4);
     
-    vm.parse_and_exec(&decoded)
+    vm.parse_and_exec(&decoded);
 }
 
 #[test]
@@ -204,7 +204,9 @@ fn parse_pfb<'a>(mut vm: &mut Vm, i: &'a [u8]) -> R<'a, ()> {
     
         let block = &i[.. block_len as usize];
         match block_type {
-            1 => vm.parse_and_exec(block),
+            1 => {
+                vm.parse_and_exec(block);
+            }
             2 => parse_binary(&mut vm, block),
             _ => unreachable!()
         }

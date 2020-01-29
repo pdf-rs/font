@@ -952,11 +952,19 @@ impl Vm {
             Operator::Eexec => {
                 match self.pop() {
                     Item::File => {
-                        let mut data = input.parse(hex_string);
                         use crate::eexec::Decoder;
-                        Decoder::file().decode_inline(&mut data);
-                        debug!("data: {}", String::from_utf8_lossy(&data));
-                        self.parse_and_exec(&data[4..]);
+                        match input.try_parse(hex_string) {
+                            Some(mut data) if data.len() > 4 => {
+                                Decoder::file().decode_inline(&mut data);
+                                debug!("data: {}", String::from_utf8_lossy(&data));
+                                self.parse_and_exec(&data[4..]);
+                            }
+                            _ => {
+                                let decoded = Decoder::file().decode(input.data, 4);
+                                let skip = self.parse_and_exec(&decoded) + 4;
+                                input.advance(skip);
+                            }
+                        };
                     },
                     Item::String(_) => {
                         unimplemented!()
@@ -995,13 +1003,16 @@ impl Vm {
         debug!("token: {:?}", tk);
         self.exec_token(tk, input);
     }
-    pub fn parse_and_exec(&mut self, data: &[u8]) {
+    // returns the number of bytes processed
+    pub fn parse_and_exec(&mut self, data: &[u8]) -> usize {
+        let input_size = data.len();
         let mut input = Input::new(data);
         // skip leading whitespace
         
         while input.len() > 0 && input.open {
             self.step(&mut input);
         }
+        input_size - input.len()
     }
 }
 
