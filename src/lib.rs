@@ -147,7 +147,6 @@ pub use truetype::TrueTypeFont;
 pub use cff::CffFont;
 pub use type1::Type1Font;
 pub use opentype::{OpenTypeFont};
-use woff::{woff, woff2};
 
 pub type R<'a, T> = IResult<&'a [u8], T, VerboseError<&'a [u8]>>;
 
@@ -367,7 +366,7 @@ impl<T> IResultExt for IResult<&[u8], T, VerboseError<&[u8]>> {
     }
 }
 
-pub fn parse<O: Outline + 'static>(data: &[u8]) -> Box<dyn Font<O>> {
+pub fn parse<O: Outline + Send + 'static>(data: &[u8]) -> Box<dyn Font<O> + Send + 'static> {
     let magic: &[u8; 4] = data[0 .. 4].try_into().unwrap();
     info!("font magic: {:?} ({:?})", magic, String::from_utf8_lossy(&*magic));
     match magic {
@@ -376,8 +375,8 @@ pub fn parse<O: Outline + 'static>(data: &[u8]) -> Box<dyn Font<O>> {
         b"ttcf" | b"typ1" => unimplemented!(), // Box::new(TrueTypeFont::parse(data, 0)) as _,
         b"true" => Box::new(TrueTypeFont::parse(data)) as _,
         b"%!PS" => Box::new(Type1Font::parse_postscript(data)) as _,
-        b"wOFF" => woff(data),
-        b"wOF2" => woff2(data),
+        b"wOFF" => Box::new(woff::parse_woff::<O>(data).get()) as _,
+        b"wOF2" => Box::new(woff::parse_woff2::<O>(data).get()) as _,
         &[1, _, _, _] => Box::new(CffFont::parse(data, 0)) as _,
         &[37, 33, _, _] => Box::new(Type1Font::parse_pfa(data)) as _,
         magic => panic!("unknown magic {:?}", magic)

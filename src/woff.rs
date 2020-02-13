@@ -21,14 +21,8 @@ use nom::{
     combinator::map
 };
 
-pub fn woff<O: Outline + 'static>(data: &[u8]) -> Box<dyn Font<O>> {
-    Box::new(parse_woff::<O>(data).get()) as _
-}
-pub fn woff2<O: Outline + 'static>(data: &[u8]) -> Box<dyn Font<O>> {
-    Box::new(parse_woff2::<O>(data).get()) as _
-}
 
-fn parse_woff<O: Outline>(data: &[u8]) -> R<OpenTypeFont<O>> {
+pub fn parse_woff<O: Outline>(data: &[u8]) -> R<OpenTypeFont<O>> {
     let (i, _) = tag(b"wOFF")(data)?;
     let (i, flavor) = take(4usize)(i)?;
     let (i, _length) = be_u32(i)?;
