@@ -9,7 +9,7 @@ use crate::{R, GlyphId};
 use crate::parsers::{iterator_n, parse};
 use crate::opentype::{Maxp, parse_skript_list, parse_lookup_list, parse_class_def, invert_class_def, coverage_table};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GlyphList(Vec<u16>);
 impl GlyphList {
     pub fn matches(&self, glyphs: &[GlyphId]) -> Option<usize> {
@@ -20,7 +20,7 @@ impl GlyphList {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Gsub {
     ligatures: HashMap<u16, Vec<(GlyphList, u16)>>
 }

@@ -21,6 +21,8 @@ pub enum Shape<O: Outline> {
     Compound(Vec<(u32, Transform)>),
     Empty
 }
+
+#[derive(Clone)]
 pub struct TrueTypeFont<O: Outline> {
     shapes: Vec<Shape<O>>,
     cmap: Option<CMap>,

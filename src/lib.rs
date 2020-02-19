@@ -366,7 +366,7 @@ impl<T> IResultExt for IResult<&[u8], T, VerboseError<&[u8]>> {
     }
 }
 
-pub fn parse<O: Outline + Send + 'static>(data: &[u8]) -> Box<dyn Font<O> + Send + 'static> {
+pub fn parse<O: Outline + Send + Sync + 'static>(data: &[u8]) -> Box<dyn Font<O> + Send + Sync + 'static> {
     let magic: &[u8; 4] = data[0 .. 4].try_into().unwrap();
     info!("font magic: {:?} ({:?})", magic, String::from_utf8_lossy(&*magic));
     match magic {

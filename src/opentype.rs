@@ -21,6 +21,7 @@ use tuple::T4;
 use vector::{Outline, Transform, Rect, Vector};
 use itertools::{Either};
 
+#[derive(Clone)]
 pub struct OpenTypeFont<O: Outline> {
     outlines: Vec<O>,
     kern: KernTable,
@@ -251,7 +252,7 @@ pub fn parse_loca<'a>(i: &'a [u8], head: &Head, maxp: &Maxp) -> R<'a, Vec<u32>> 
         _ => panic!("invalid index_to_loc_format")
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CMap {
     single_codepoint: HashMap<u32, u32>,
     double_codepoint: HashMap<(u32, u32), u32>
@@ -419,6 +420,7 @@ pub fn parse_hhea(i: &[u8]) -> R<Hhea> {
         number_of_hmetrics
     }))
 }
+#[derive(Clone)]
 pub struct Hmtx {
     metrics: Vec<(u16, i16)>, // (advance, lsb)
     lsbs: Vec<i16>,

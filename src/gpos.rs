@@ -11,13 +11,13 @@ use crate::opentype::{Maxp, parse_lookup_list, parse_class_def, invert_class_def
 use itertools::{Itertools};
 
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Gpos {
     pub kern: KernTable,
     pub mark_to_base: HashMap<(u16, u16), (i16, i16)>
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct KernTable {
     pub left_classes: HashMap<u16, u16>, // gid -> class id,
     pub right_classes: HashMap<u16, u16>, // gid -> class id,
@@ -69,7 +69,7 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> R<'a, Gpos> {
 }
 
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct ValueRecord {
     x_placement: i16,
     y_placement: i16,

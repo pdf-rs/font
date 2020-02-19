@@ -12,6 +12,7 @@ use crate::parsers::parse;
 use vector::{Outline, Transform, Rect, Vector};
 use encoding::{glyphname_to_unicode};
 
+#[derive(Clone)]
 pub struct Type1Font<O: Outline> {
     glyphs: IndexMap<String, Glyph<O>>, // namee -> glyph
     codepoints: HashMap<u32, u32>, // codepoint -> glyph id

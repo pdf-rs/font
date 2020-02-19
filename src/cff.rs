@@ -17,6 +17,7 @@ use encoding::{Encoding};
 use vector::{Outline, Transform, Vector, Rect};
 use tuple::TupleElements;
 
+#[derive(Clone)]
 pub struct CffFont<O: Outline> {
     glyphs: Vec<Glyph<O>>,
     font_matrix: Transform,
