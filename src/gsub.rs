@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 use nom::{
-    bytes::complete::{take},
-    number::complete::{be_i16, be_u16, be_u32},
-    sequence::{tuple},
+    number::complete::{be_u16, be_u32},
     multi::count
 };
 use crate::{R, GlyphId};
-use crate::parsers::{iterator_n, parse};
-use crate::opentype::{Maxp, parse_skript_list, parse_lookup_list, parse_class_def, invert_class_def, coverage_table};
+use crate::parsers::{iterator_n};
+use crate::opentype::{parse_lookup_list, coverage_table};
 
 #[derive(Debug, Clone)]
 pub struct GlyphList(Vec<u16>);
@@ -38,11 +36,11 @@ pub fn parse_gsub(data: &[u8]) -> R<Gsub> {
     assert_eq!(major_version, 1);
     let (i, minor_version) = be_u16(i)?;
     
-    let (i, script_list_off) = be_u16(i)?;
-    let (i, feature_list_off) = be_u16(i)?;
+    let (i, _script_list_off) = be_u16(i)?;
+    let (i, _feature_list_off) = be_u16(i)?;
     let (i, lookup_list_off) = be_u16(i)?;
     
-    let (i, feature_variations_offset) = match minor_version {
+    let (i, _feature_variations_offset) = match minor_version {
         0 => (i, 0),
         1 => be_u32(i)?,
         v => panic!("unsupported GPOS version 1.{}", v)
@@ -52,14 +50,14 @@ pub fn parse_gsub(data: &[u8]) -> R<Gsub> {
         ligatures: HashMap::new()
     };
     
-    parse_lookup_list(&data[lookup_list_off as usize ..], |data, lookup_type, lookup_flag| {
+    parse_lookup_list(&data[lookup_list_off as usize ..], |data, lookup_type, _lookup_flag| {
         match lookup_type { 
             1 => {} // Single · Replace one glyph with one glyph
             2 => {} // Multiple · Replace one glyph with more than one glyph
             3 => {} // Alternate · Replace one glyph with one of many glyphs
             4 => {
                 // Ligature · Replace multiple glyphs with one glyph
-                parse_ligatures(data, &mut gsub);
+                parse_ligatures(data, &mut gsub)?;
             }
             5 => {} // Context · Replace one or more glyphs in context
             6 => {} // Chaining Context · Replace one or more glyphs in chained context
@@ -68,7 +66,7 @@ pub fn parse_gsub(data: &[u8]) -> R<Gsub> {
             _ => {}
         }
         Ok((data, ()))
-    });
+    })?;
     
     Ok((i, gsub))
 }

@@ -2,7 +2,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::hash::Hash;
 use nom::{
-    bytes::complete::{take_till, take_till1, take_while, take_while_m_n, tag, is_a},
+    bytes::complete::{take_till, take_till1, take_while, take_while_m_n, tag},
     number::complete::{be_u8, be_u16},
     sequence::{delimited, tuple, preceded, terminated},
     combinator::{opt, map, recognize},
@@ -313,14 +313,6 @@ pub fn varint_u16(i: &[u8]) -> R<u16> {
     }
 }
 
-fn hex_digit(i: u8) -> Option<u8> {
-    match i {
-        b'0' ..= b'9' => Some(i - b'0'),
-        b'A' ..= b'F' => Some(i - b'A' + 10),
-        _ => None
-    }
-}
-
 pub fn hex_string(input: &[u8]) -> R<Vec<u8>> {
     let mut data = Vec::new();
     let mut odd = None;
@@ -361,28 +353,5 @@ pub fn count_map<'a, K, V>(parser: impl Fn(&'a [u8]) -> R<'a, (K, V)>, count: us
             map.insert(k, v);
         }
         Ok((i, map))
-    }
-}
-
-pub struct Array<'a, P> {
-    data: &'a [u8],
-    item_size: usize,
-    len: usize,
-    parser: P
-}
-pub fn array<'a, P>(data: &'a[u8], item_size: usize, parser: P, count: impl Into<usize>) -> Array<'a, P> {
-    Array {
-        data,
-        item_size,
-        parser,
-        len: count.into()
-    }
-}
-impl<'a, O, P> Array<'a, P> where P: Fn(&'a [u8]) -> O {
-    pub fn get(&self, index: usize) -> O {
-        assert!(index < self.len);
-        let off = index * self.item_size;
-        let slice = &self.data[off .. off + self.item_size];
-        (self.parser)(slice)
     }
 }

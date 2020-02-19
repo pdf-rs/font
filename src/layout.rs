@@ -12,7 +12,7 @@ pub fn line<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: &str,
     'a: while let Some(&first) = gids.get(pos) {
             pos += 1;
             if let Some(subs) = gsub.substitutions(first) {
-            'b: for (sub, glyph) in subs {
+            for (sub, glyph) in subs {
                     if let Some(len) = sub.matches(&gids[pos ..]) {
                         substituted_gids.push(glyph);
                         pos += len;

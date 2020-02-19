@@ -40,19 +40,6 @@ struct ExecReader<R: Read> {
     reader: R,
     decoder: Decoder
 }
-impl<R: Read> ExecReader<R> {
-    fn new(reader: R, skip: usize, r: u16) -> io::Result<ExecReader<R>> {
-        let decoder = Decoder::new(r);
-        let mut e = ExecReader {
-            reader,
-            decoder
-        };
-        for _ in 0 .. skip {
-            e.read(&mut [0])?;
-        }
-        Ok(e)
-    }
-}
 impl<R: Read> Read for ExecReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let len = self.reader.read(buf)?;

@@ -3,11 +3,10 @@ use nom::{
     bytes::complete::{take},
     number::complete::{be_i16, be_u16, be_u32},
     sequence::{tuple},
-    combinator::map
 };
-use crate::{R, IResultExt};
-use crate::parsers::{iterator_n, parse, array};
-use crate::opentype::{Maxp, parse_lookup_list, parse_class_def, invert_class_def, coverage_table};
+use crate::{R};
+use crate::parsers::{iterator_n, parse};
+use crate::opentype::{Maxp, parse_lookup_list, coverage_table};
 use itertools::{Itertools};
 
 
@@ -97,7 +96,7 @@ fn value_record(flags: u16) -> impl Fn(&[u8]) -> R<ValueRecord> {
     }
 }
 
-fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, num_glyphs: u16) -> R<'a, ()> {
+fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, _num_glyphs: u16) -> R<'a, ()> {
     let (i, format) = be_u16(data)?;
     match format {
         1 => {
@@ -124,13 +123,11 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, num_glyphs: u
             let (i, _coverage_off) = be_u16(i)?;
             let (i, value_format_1) = be_u16(i)?;
             let (i, value_format_2) = be_u16(i)?;
-            let (i, class_def_1_offset) = be_u16(i)?;
-            let (i, class_def_2_offset) = be_u16(i)?;
+            let (i, _class_def_1_offset) = be_u16(i)?;
+            let (i, _class_def_2_offset) = be_u16(i)?;
             let (i, class_1_count) = be_u16(i)?;
             let (i, class_2_count) = be_u16(i)?;
             
-            let class_def_1 = parse_class_def(&data[class_def_1_offset as usize ..], &mut kern.left_classes)?.1;
-            let class_def_2 = parse_class_def(&data[class_def_2_offset as usize ..], &mut kern.right_classes)?.1;
             let iter = (0 .. class_1_count).cartesian_product(0 .. class_2_count)
                 .zip(iterator_n(i, tuple((value_record(value_format_1), value_record(value_format_2))), class_1_count * class_2_count));
             
@@ -145,52 +142,4 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, num_glyphs: u
         n => panic!("unsupported pair adjustment format {}", n)
     }
     Ok((i, ()))
-}
-
-fn parse_mark_to_base_attachment<'a>(data: &'a [u8], pairs: &mut HashMap<(u16, u16), (i16, i16)>) -> R<'a, ()> {
-    let (i, format) = be_u16(data)?;
-    assert_eq!(format, 1);
-    
-    let (i, mark_coverage_off) = be_u16(i)?;
-    let (i, base_coverage_off) = be_u16(i)?;
-    let (i, mark_class_count) = be_u16(i)?;
-    let (i, mark_array_off) = be_u16(i)?;
-    let (i, base_array_off) = be_u16(i)?;
-    
-    let (_, mark_coverage) = coverage_table(&data[mark_coverage_off as usize ..])?;
-    
-    let base_array_data = &data[base_array_off as usize ..];
-    let (i, base_count) = be_u16(base_array_data)?;
-    let base_array = array(i, 2, map(be_u16, |off| parse_anchor_table(&data[off as usize .. ]).get()), base_count);
-    
-    let mark_array = parse_mark_array_table(&data[mark_array_off as usize ..])?.1;
-    for (mark_gid, (class, mark_anchor)) in mark_coverage.zip(mark_array) {
-        let base_anchor = base_array.get(class as usize).get();
-        let delta = (base_anchor.0 - mark_anchor.0, base_anchor.1 - mark_anchor.1);
-        
-        for base_gid in coverage_table(&data[base_coverage_off as usize ..])?.1 {
-            pairs.insert((base_gid, mark_gid), delta);
-        }
-    }
-    
-    Ok((i, ()))
-}
-
-fn parse_anchor_table(i: &[u8]) -> R<(i16, i16)> {
-    let (i, _format) = be_u16(i)?;
-    let (i, x) = be_i16(i)?;
-    let (i, y) = be_i16(i)?;
-    // ignore the rest
-    Ok((i, ((x, y))))
-}
-
-// yields (markClass, Anchor)
-fn parse_mark_array_table<'a>(data: &'a [u8]) -> R<'a, impl Iterator<Item=(u16, (i16, i16))> + 'a> {
-    let (i, mark_count) = be_u16(data)?;
-    Ok((i, iterator_n(i, tuple((be_u16, be_u16)), mark_count)
-        .map(move |(mark_class, mark_anchor_off)| {
-            let mark_anchor = parse_anchor_table(data.get(mark_anchor_off as usize ..).unwrap()).get();
-            (mark_class, mark_anchor)
-        })
-    ))
 }

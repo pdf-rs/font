@@ -391,7 +391,7 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
 }
 
 pub struct Hhea {
-    line_gap: i16,
+    pub line_gap: i16,
     number_of_hmetrics: u16 
 }
 pub fn parse_hhea(i: &[u8]) -> R<Hhea> {
@@ -531,7 +531,7 @@ pub fn parse_kern(input: &[u8]) -> R<KernTable> {
 }
 
 pub fn parse_kern_apple(i: &[u8]) -> R<KernTable> {
-    let (i, version) = be_u32(i)?;
+    let (_i, version) = be_u32(i)?;
     assert_eq!(version, 0x00010000);
     
     unimplemented!()
@@ -617,14 +617,6 @@ pub fn parse_class_def<'a>(data: &'a [u8], map: &mut HashMap<u16, u16>) -> R<'a,
         f => panic!("invalid class list format {}", f)
     }
     Ok((i, ()))
-}
-pub fn invert_class_def(map: &HashMap<u16, u16>, num_glyphs: u16) -> HashMap<u16, Vec<u16>> {
-    let mut map2 = HashMap::new();
-    for gid in 0 .. num_glyphs {
-        let class = map.get(&gid).cloned().unwrap_or(0);
-        map2.entry(class).or_insert(vec![]).push(gid);
-    }
-    map2
 }
 
 pub fn coverage_table<'a>(i: &'a [u8]) -> R<impl Iterator<Item=u16> + 'a> {

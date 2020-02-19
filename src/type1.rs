@@ -342,7 +342,7 @@ pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, 
                             0 => {
                                 // end of flex sequences
                                 assert_eq!(n, 3);
-                                let (flex_height, x, y) = s.pop_tuple();
+                                let (_flex_height, x, y) = s.pop_tuple();
                                 let (_ref, c0, c1, p2, c3, c4, p5) = TupleElements::from_iter(s.flex_sequence.take().unwrap().into_iter()).unwrap();
                                 //assert_eq!(p5, v(x, y));
                                 s.path.cubic_curve_to(c0, c1, p2);

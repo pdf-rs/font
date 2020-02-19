@@ -6,7 +6,7 @@ use inflate::inflate_bytes_zlib;
 use brotli_decompressor::{Decompressor};
 
 use crate::{
-    R, IResultExt, Font,
+    R, IResultExt,
     truetype::{Shape, contour, compound, parse_shapes},
     parsers::{iterator, varint_u32, varint_u16, parse, count_map},
     opentype::{Tables, parse_head, parse_hhea, parse_maxp, parse_hmtx, parse_hmtx_woff2_format1, parse_loca, OpenTypeFont},

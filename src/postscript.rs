@@ -62,7 +62,6 @@ fn recursive_trap(item: Item, f: &mut fmt::Formatter<'_>, func: impl FnOnce(&mut
 
 #[derive(Copy, Clone)]
 pub struct RefDict<'a> {
-    item: Item,
     vm: &'a Vm,
     dict: &'a Dictionary
 }
@@ -106,7 +105,6 @@ impl<'a> fmt::Debug for RefDict<'a> {
 
 #[derive(Copy, Clone)]
 pub struct RefArray<'a> {
-    item: Item,
     vm: &'a Vm,
     array: &'a Array
 }
@@ -161,8 +159,8 @@ impl<'a> RefItem<'a> {
             Item::Bool(b) => RefItem::Bool(b),
             Item::Int(i) => RefItem::Int(i),
             Item::Real(r) => RefItem::Real(r.into()),
-            Item::Dict(key) => RefItem::Dict(RefDict { item, vm, dict: vm.get_dict(key) }),
-            Item::Array(key) => RefItem::Array(RefArray { item, vm, array: vm.get_array(key) }),
+            Item::Dict(key) => RefItem::Dict(RefDict { vm, dict: vm.get_dict(key) }),
+            Item::Array(key) => RefItem::Array(RefArray { vm, array: vm.get_array(key) }),
             Item::String(key) => RefItem::String(vm.get_string(key)),
             Item::Name(key) => RefItem::Name(vm.get_lit(key)),
             Item::Literal(key) => RefItem::Literal(vm.get_lit(key)),
@@ -388,7 +386,6 @@ pub struct Vm {
     fonts:      HashMap<String, DictKey>,
     dict_stack: Vec<DictKey>,
     stack:      Vec<Item>,
-    error_dict: DictKey,
     internal_dict: DictKey
 }
 impl Vm {
@@ -405,7 +402,6 @@ impl Vm {
             fonts: HashMap::new(),
             dict_stack: Vec::new(),
             stack: Vec::new(),
-            error_dict: error_dict_key,
             internal_dict: internal_dict_key
         };
         let mut system_dict: Dictionary = OPERATOR_MAP.iter()
@@ -450,7 +446,7 @@ impl Vm {
     pub fn fonts<'a>(&'a self) -> impl Iterator<Item=(&'a str, RefDict<'a>)> {
         self.fonts.iter().map(move |(key, &dict)| (
             key.as_str(),
-            RefDict { item: Item::Null, vm: self, dict: self.get_dict(dict) }
+            RefDict { vm: self, dict: self.get_dict(dict) }
         ))
     }
     fn pop_tuple<T>(&mut self) -> T where
@@ -534,11 +530,6 @@ impl Vm {
     }
     pub fn stack(&self) -> &[Item] {
         &self.stack
-    }
-    
-    fn print_current_dict(&self) {
-        let r = self.display(self.dict_stack.last().map(|&d| Item::Dict(d)).unwrap_or(Item::Null));
-        println!("current dict: {:?}", r);
     }
     
     // resolve name items. or keep them unchanged if unresolved

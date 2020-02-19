@@ -1,6 +1,5 @@
 use std::iter;
 use std::ops::Deref;
-use std::collections::HashMap;
 use crate::{Font, Glyph, R, IResultExt, GlyphId};
 use crate::parsers::{iterator, parse};
 use encoding::Encoding;
