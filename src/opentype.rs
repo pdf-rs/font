@@ -269,10 +269,9 @@ impl CMap {
 pub fn parse_cmap(input: &[u8]) -> R<CMap> {
     let (i, _version) = be_u16(input)?;
     let (i, num_tables) = be_u16(i)?;
-    dbg!(num_tables);
     
     let tables = iterator(i, tuple((be_u16, be_u16, be_u32))).take(num_tables as usize)
-        .filter_map(|entry| match dbg!(entry) {
+        .filter_map(|entry| match entry {
             (0, _, off) | (1, 0, off) | (3, 10, off) | (3, 1, off) => Some(off),
             (platform, encoding, _) => {
                 warn!("unsupported cmap platform={}, encoding={}", platform, encoding);
@@ -399,8 +398,8 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
         }
     }
     Ok((&[], CMap {
-        single_codepoint: dbg!(cmap),
-        double_codepoint: dbg!(cmap2)
+        single_codepoint: cmap,
+        double_codepoint: cmap2
     }))
 }
 

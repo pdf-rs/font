@@ -14,7 +14,6 @@ fn draw_glyph<S>(file: &str, glyph: &str) -> S where
     let data = fs::read(file).expect("can't read specified file");
     let font = parse::<S::Outline>(&data);
     let bbox = font.bbox().unwrap();
-    dbg!(bbox);
     
     let gid = match glyph.parse() {
         Ok(cp) => font.gid_for_codepoint(cp).expect("no such codepoint"),
