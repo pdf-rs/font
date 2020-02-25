@@ -45,7 +45,7 @@ impl<O: Outline> OpenTypeFont<O> {
             Some(shapes) => {
                 let head = parse_head(tables.get(b"head").expect("no head")).get();
                 let bbox = head.bbox();
-                let outlines = (0 .. shapes.len()).map(|idx| get_outline(&shapes, idx as u32)).collect();
+                let outlines = (0 .. shapes.len()).filter_map(|idx| get_outline(&shapes, idx as u32)).collect();
                 let font_matrix = Transform::from_scale(Vector::splat(1.0 / head.units_per_em as f32));
                 (outlines, font_matrix, Some(bbox))
             },
@@ -292,7 +292,7 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                 
                 let (i, _language) = be_u16(data)?;
                 for (code, gid) in iterator(i, be_u8).enumerate() {
-                    if code != 0 {
+                    if gid != 0 {
                         cmap.insert(code as u32, gid as u32);
                     }
                 }
@@ -325,7 +325,9 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                         for c in start ..= end {
                             let gid = delta.wrapping_add(c);
                             trace!("codepoint {} -> gid {}", c, gid);
-                            cmap.insert(c as u32, gid as u32);
+                            if gid != 0 {
+                                cmap.insert(c as u32, gid as u32);
+                            }
                         }
                     } else {
                         for c in start ..= end {
@@ -334,8 +336,8 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                                 break;
                             }
                             let (_, gid) = be_u16(&glyph_data[index as usize ..])?;
+                            let gid = gid.wrapping_add(delta);
                             if gid != 0 {
-                                let gid = gid.wrapping_add(delta);
                                 trace!("codepoint {} -> gid {}", c, gid);
                                 cmap.insert(c as u32, gid as u32);
                             }
@@ -350,6 +352,7 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                 let (i, entry_count) = be_u16(i)?;
                 cmap.reserve(entry_count as usize);
                 cmap.extend(iterator_n(i, be_u16, entry_count).enumerate()
+                    .filter(|&(_, gid)| gid != 0)
                     .map(|(i, gid)| (first_code as u32 + i as u32, gid as u32))
                 );
             }
@@ -364,7 +367,9 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                     trace!("start_code={}, end_code={}, start_gid={}", start_code, end_code, start_gid);
                     for (code, gid) in (start_code ..= end_code).zip(start_gid ..) {
                         trace!("codepoint {} -> gid {}", code, gid);
-                        cmap.insert(code, gid);
+                        if gid != 0 {
+                            cmap.insert(code, gid);
+                        }
                     }
                 }
             }
@@ -389,7 +394,9 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                         let (i, num_uvs_mappings) = be_u32(i)?;
                         for (unicode_value, glyph_id) in iterator(i, tuple((be_u24, be_u16))).take(num_uvs_mappings as usize) {
                             // lets hope cmap is filled already…
-                            cmap2.insert((unicode_value, var_selector), glyph_id as u32);
+                            if glyph_id != 0 {
+                                cmap2.insert((unicode_value, var_selector), glyph_id as u32);
+                            }
                         }
                     }
                 }

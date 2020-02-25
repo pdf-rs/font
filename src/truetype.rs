@@ -60,7 +60,7 @@ impl<O: Outline> TrueTypeFont<O> {
             kern: tables.get(b"kern").map(|data| parse_kern(data).get()).unwrap_or_default()
         }
     }
-    fn get_path(&self, idx: u32) -> O {
+    fn get_path(&self, idx: u32) -> Option<O> {
         get_outline(&self.shapes, idx)
     }
 }
@@ -75,7 +75,7 @@ impl<O: Outline> Font<O> for TrueTypeFont<O> {
     fn glyph(&self, id: GlyphId) -> Option<Glyph<O>> {
         assert!(id.0 <= u16::max_value() as u32);
         debug!("get gid {:?}", id);
-        let path = self.get_path(id.0);
+        let path = self.get_path(id.0)?;
         let metrics = self.hmtx.metrics_for_gid(id.0 as u16);
         
         Some(Glyph {
@@ -196,19 +196,19 @@ pub fn compound<O: Outline>(mut input: &[u8]) -> R<Shape<O>> {
     Ok((input, Shape::Compound(parts)))
 }
 
-pub fn get_outline<O: Outline>(shapes: &[Shape<O>], idx: u32) -> O {
-    match shapes[idx as usize] {
-        Shape::Simple(ref path) => path.clone(),
-        Shape::Compound(ref parts) => {
+pub fn get_outline<O: Outline>(shapes: &[Shape<O>], idx: u32) -> Option<O> {
+    match shapes.get(idx as usize)? {
+        &Shape::Simple(ref path) => Some(path.clone()),
+        &Shape::Compound(ref parts) => {
             let mut outline = O::empty();
             for &(gid, tr) in parts {
                 if let Some(Shape::Simple(ref path)) = shapes.get(gid as usize) {
                     outline.add_outline(path.clone().transform(tr));
                 }
             }
-            outline
+            Some(outline)
         }
-        Shape::Empty => O::empty()
+        &Shape::Empty => Some(O::empty())
     }
 }
 
