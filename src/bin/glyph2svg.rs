@@ -7,7 +7,10 @@ use font::{Font, parse};
 use vector::{Svg, Surface, Outline, Vector, PathStyle};
 use raqote::DrawTarget;
 
-fn draw_glyph<S: Surface + 'static>(file: &str, glyph: &str) -> S {
+fn draw_glyph<S>(file: &str, glyph: &str) -> S where
+    S: Surface + Send + 'static,
+    S::Outline: Send + 'static
+{
     let data = fs::read(file).expect("can't read specified file");
     let font = parse::<S::Outline>(&data);
     let bbox = font.bbox().unwrap();

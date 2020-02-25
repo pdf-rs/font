@@ -269,11 +269,15 @@ impl CMap {
 pub fn parse_cmap(input: &[u8]) -> R<CMap> {
     let (i, _version) = be_u16(input)?;
     let (i, num_tables) = be_u16(i)?;
+    dbg!(num_tables);
     
     let tables = iterator(i, tuple((be_u16, be_u16, be_u32))).take(num_tables as usize)
-        .filter_map(|entry| match entry {
-            (0, _, off) | (3, 10, off) | (3, 1, off) => Some(off),
-            _ => None
+        .filter_map(|entry| match dbg!(entry) {
+            (0, _, off) | (1, 0, off) | (3, 10, off) | (3, 1, off) => Some(off),
+            (platform, encoding, _) => {
+                warn!("unsupported cmap platform={}, encoding={}", platform, encoding);
+                None
+            }
         })
         .filter_map(|off| input.get(off as usize ..));
     
@@ -340,6 +344,16 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                     }
                 }
             }
+            6 => {
+                let (i, _len) = be_u16(i)?;
+                let (i, _language) = be_u16(i)?;
+                let (i, first_code) = be_u16(i)?;
+                let (i, entry_count) = be_u16(i)?;
+                cmap.reserve(entry_count as usize);
+                cmap.extend(iterator_n(i, be_u16, entry_count).enumerate()
+                    .map(|(i, gid)| (first_code as u32 + i as u32, gid as u32))
+                );
+            }
             12 => {
                 let (i, _reserved) = be_u16(i)?;
                 let (i, len) = be_u32(i)?;
@@ -385,8 +399,8 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
         }
     }
     Ok((&[], CMap {
-        single_codepoint: cmap,
-        double_codepoint: cmap2
+        single_codepoint: dbg!(cmap),
+        double_codepoint: dbg!(cmap2)
     }))
 }
 
@@ -521,7 +535,7 @@ fn parse_kern_format2<'a>(data: &'a [u8], table: &mut KernTable) -> R<'a, ()> {
 }
 
 pub fn parse_kern(input: &[u8]) -> R<KernTable> {
-    let (i, version) = be_u16(input)?;
+    let (_i, version) = be_u16(input)?;
     debug!("kern table version {}", version);
     match version {
         0 => parse_kern_ms(input),
