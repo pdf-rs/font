@@ -59,12 +59,12 @@ pub fn line<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: &str,
         p.move_to(origin);
         p.line_to(origin + offset);
         let o: S::Outline = p.into_outline();
-        surface.draw_path(o.transform(tr), &style);
+        surface.draw_path(o.transform(tr), &style, None);
     }
     let style = surface.build_style(style);
     for (glyph, p) in glyphs {
         let transform = tr * Transform::from_translation(p + origin);
-        surface.draw_path(glyph.path.transform(transform), &style);
+        surface.draw_path(glyph.path.transform(transform), &style, None);
     }
     
     surface
