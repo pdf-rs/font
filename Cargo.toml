@@ -25,9 +25,7 @@ brotli-decompressor = "2.3.0"
 inflate = "0.4.5"
 raqote = { version = "*", default-features = false }
 walkdir = "2.2.9"
-#jemallocator = "0.3.0"
 env_logger = { version = "*", optional=true }
-
 
 [[bin]]
 name = "font2svg"
