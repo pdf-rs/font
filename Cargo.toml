@@ -12,7 +12,7 @@ tools = ["env_logger"]
 encoding = { git = "https://github.com/pdf-rs/encoding/" }
 pathfinder_geometry = { git = "https://github.com/s3bk/pathfinder/" }
 pathfinder_content = { git = "https://github.com/s3bk/pathfinder/" }
-vector = { git = "https://github.com/s3bk/vector/" }
+vector = { git = "https://github.com/s3bk/vector/", features = ["impl_pathfinder"] }
 tuple = { git = "https://github.com/s3bk/tuple/" }
 nom = "5.0.0"
 log = "0.4.8"

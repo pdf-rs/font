@@ -21,6 +21,7 @@ use tuple::T4;
 use vector::{Outline, Transform, Rect, Vector};
 use itertools::{Either};
 
+
 #[derive(Clone)]
 pub struct OpenTypeFont<O: Outline> {
     outlines: Vec<O>,

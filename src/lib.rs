@@ -1,4 +1,4 @@
-#![cfg_attr(feature="unstable", feature(thread_local))]
+#![cfg_attr(feature="unstable", feature(thread_local, type_alias_impl_trait))]
 #[macro_use] extern crate log;
 #[macro_use] extern crate slotmap;
 
@@ -102,6 +102,10 @@ pub trait Font<O: Outline> {
     fn vmetrics(&self) -> Option<VMetrics> {
         None
     }
+
+    fn math(&self) -> Option<MathHeader> {
+        None
+    }
     
     /// Kerning distance for the given glyph pair
     fn kerning(&self, _left: GlyphId, _right: GlyphId) -> f32 {
@@ -141,12 +145,14 @@ mod eexec;
 mod woff;
 mod gpos;
 mod gsub;
+pub mod math;
 pub mod layout;
 
 pub use truetype::TrueTypeFont;
 pub use cff::CffFont;
 pub use type1::Type1Font;
 pub use opentype::{OpenTypeFont};
+pub use math::MathHeader;
 
 pub type R<'a, T> = IResult<&'a [u8], T, VerboseError<&'a [u8]>>;
 

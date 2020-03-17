@@ -40,23 +40,23 @@ pub enum Item {
 }
 
 #[cfg(feature="unstable")]
-fn recursive_trap(item: Item, f: &mut fmt::Formatter<'_>, func: impl FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result) -> fmt::Result {
+fn recursive_trap(ptr: usize, f: &mut fmt::Formatter<'_>, func: impl FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result) -> fmt::Result {
     use std::cell::RefCell;
     
     #[thread_local]
-    static STACK: RefCell<Vec<Item>> = RefCell::new(Vec::new());
+    static STACK: RefCell<Vec<usize>> = RefCell::new(Vec::new());
     {
         let stack = &mut *STACK.borrow_mut();
-        if stack.contains(&item) {
+        if stack.contains(&ptr) {
             return write!(f, "...");
         }
-        stack.push(item);
+        stack.push(ptr);
     }
     
     func(f)?;
     
-    let item2 = STACK.borrow_mut().pop().unwrap();
-    assert_eq!(item, item2);
+    let ptr2 = STACK.borrow_mut().pop().unwrap();
+    assert_eq!(ptr, ptr2);
     Ok(())
 }
 
@@ -93,7 +93,7 @@ impl<'a> RefDict<'a> {
 impl<'a> fmt::Debug for RefDict<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let vm = self.vm;
-        recursive_trap(self.item, f, move |f| {
+        recursive_trap(self.dict as *const _ as usize, f, move |f| {
             f.debug_map().entries(
                 self.dict.iter()
                 .map(move |(&k, &v)| (RefItem::new(vm, k), RefItem::new(vm, v)))
@@ -127,7 +127,7 @@ impl<'a> RefArray<'a> {
 impl<'a> fmt::Debug for RefArray<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let vm = self.vm;
-        recursive_trap(self.item, f, move |f| {
+        recursive_trap(self.array as *const _ as usize, f, move |f| {
             f.debug_list().entries(self.array.iter().map(move |&item| RefItem::new(vm, item)))
             .finish()
         })
