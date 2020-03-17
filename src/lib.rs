@@ -103,7 +103,7 @@ pub trait Font<O: Outline> {
         None
     }
 
-    fn math(&self) -> Option<MathHeader> {
+    fn math(&self) -> Option<&MathHeader> {
         None
     }
     

@@ -10,6 +10,7 @@ use crate::gpos::{parse_gpos, KernTable};
 use crate::gsub::{Gsub, parse_gsub};
 use encoding::Encoding;
 use crate::parsers::{iterator, iterator_n, parse};
+use crate::math::{parse_math, MathHeader};
 use nom::{
     number::complete::{be_u8, be_i16, be_u16, be_i64, be_i32, be_u32, be_u24},
     multi::{count, many0},
@@ -30,6 +31,7 @@ pub struct OpenTypeFont<O: Outline> {
     hmtx: Option<Hmtx>,
     bbox: Option<Rect>,
     gsub: Option<Gsub>,
+    math: Option<MathHeader>,
     font_matrix: Transform
 }
 impl<O: Outline> OpenTypeFont<O> {
@@ -75,6 +77,7 @@ impl<O: Outline> OpenTypeFont<O> {
         info!("{} glyph pair kern entries and {} class pair kern entries", kern.glyph_pairs.len(), kern.class_pairs.len());
 
         let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
+        let math = tables.get(b"math").map(|data| parse_math(data).get());
         
         OpenTypeFont {
             outlines,
@@ -83,6 +86,7 @@ impl<O: Outline> OpenTypeFont<O> {
             hmtx,
             bbox,
             gsub,
+            math,
             font_matrix
         }
     }
@@ -145,6 +149,9 @@ impl<O: Outline> Font<O> for OpenTypeFont<O> {
     }
     fn get_cmap(&self) -> Option<&CMap> {
         self.cmap.as_ref()
+    }
+    fn math(&self) -> Option<&MathHeader> {
+        self.math.as_ref()
     }
 }
 

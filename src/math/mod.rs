@@ -7,6 +7,10 @@ use crate::opentype::coverage_table;
 use nom::number::complete::{be_i16, be_u16};
 pub mod assembly;
 
+pub fn parse_math(data: &[u8]) -> R<MathHeader> {
+    MathHeader::parse(data)
+}
+
 pub trait Parser {
     type Output;
     fn parse(data: &[u8])-> R<Self::Output>;
@@ -62,6 +66,7 @@ macro_rules! field_size {
 
 macro_rules! table {
     ($name:ident { $( $(#[$meta:meta])* $(?$ptr_opt:ident)* $(@$ptr:ident)* $parser:ident $field:tt, )* } ) => (
+        #[derive(Clone, Debug)]
         pub struct $name {
             $(
                 $(#[$meta])*
@@ -90,7 +95,7 @@ fn array_iter<'a, P: Parser + FixedSize>(input: &'a [u8], count: usize) -> R<imp
     Ok((remaining, iter))
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug)]
 pub struct MathValueRecord {
     pub value: i16
 }
@@ -307,6 +312,7 @@ table!(MathGlyphInfo {
     @uint16 MathKernInfo kern_info,
 });
 
+#[derive(Clone, Debug)]
 pub struct MathItalicsCorrectionInfo;
 impl Parser for MathItalicsCorrectionInfo {
     type Output = MathItalicsCorrectionInfo;
@@ -314,6 +320,8 @@ impl Parser for MathItalicsCorrectionInfo {
        Ok((data, MathItalicsCorrectionInfo))
     }
 }
+
+#[derive(Clone, Debug)]
 pub struct MathTopAccentAttachment;
 impl Parser for MathTopAccentAttachment {
     type Output = MathTopAccentAttachment;
@@ -383,6 +391,7 @@ impl GlyphPartRecord {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct GlyphAssembly {
     pub italics_correction: MathValueRecord,
     pub parts: Vec<GlyphPartRecord>
@@ -401,6 +410,7 @@ impl Parser for GlyphAssembly {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct MathGlyphConstruction {
     pub glyph_assembly: Option<GlyphAssembly>,
     pub variants: Vec<MathGlyphVariantRecord>,
@@ -423,6 +433,7 @@ impl Parser for MathGlyphConstruction {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct MathVariants {
     pub min_connector_overlap: u16,
     pub vert_glyph_construction: HashMap<u16, MathGlyphConstruction>,
@@ -454,7 +465,8 @@ impl Parser for MathVariants {
         }))
     }
 }
-#[derive(Default)]
+
+#[derive(Default, Debug, Clone)]
 pub struct MathKern {
     pub pairs: Vec<(MathValueRecord, MathValueRecord)>,
     pub last: MathValueRecord
@@ -492,6 +504,7 @@ table!(MathKernInfoRecord {
     ?uint16 MathKern bottom_left,
 });
 
+#[derive(Clone, Debug)]
 pub struct MathKernInfo {
     pub entries: HashMap<u16, MathKernInfoRecord>
 }
@@ -508,6 +521,7 @@ impl Parser for MathKernInfo {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct ExtendedShapes {
     pub glyphs: HashSet<u16>
 }
