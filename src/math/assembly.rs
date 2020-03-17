@@ -1,15 +1,9 @@
 use super::*;
 use std::cmp::{max, min};
 
-#[cfg(feature="unstable")]
-type GlyphVariants<'s> = impl Iterator<Item=GlyphInstruction> + 's;
-
-#[cfg(not(feature="unstable"))]
-type GlyphVariants<'s> = Box<dyn Iterator<Item=GlyphInstruction> + 's>;
-
-pub enum VariantGlyph<'s> {
+pub enum VariantGlyph {
     Replacement(u16),
-    Constructable(Direction, GlyphVariants<'s>),
+    Constructable(Direction, Vec<GlyphInstruction>),
 }
 
 #[derive(Debug, Clone)]
@@ -107,15 +101,16 @@ impl MathVariants {
         }
     }
 
-    fn construct_glyphs<'s>(&'s self, parts: &'s [GlyphPartRecord], repeats: u16, diff_ratio: f64) -> GlyphVariants<'s> {
+    fn construct_glyphs(&self, parts: &[GlyphPartRecord], repeats: u16, diff_ratio: f64) -> Vec<GlyphInstruction> {
         // Construct the variant glyph
         let mut prev_connector = 0;
         let mut first = true;
         trace!("diff: {:?}, repeats: {}", diff_ratio, repeats);
 
-        let variants = parts.iter().flat_map(move |glyph| {
+        let mut variants = Vec::with_capacity(repeats as usize + 3);
+        for glyph in parts {
             let repeat = if glyph.optional() { repeats } else { 1 };
-            (0..repeat).map(move |_| {
+            for _ in 0..repeat {
                 let overlap = if first {
                     first = false;
                     0
@@ -129,15 +124,12 @@ impl MathVariants {
                 };
                 prev_connector = min(glyph.end_connector_length, glyph.full_advance / 2);
 
-                GlyphInstruction {
+                variants.push(GlyphInstruction {
                     gid: glyph.glyph_id,
                     overlap: overlap
-                }
-            })
-        });
-
-        #[cfg(not(feature="unstable"))]
-        let variants = Box::new(variants) as _;
+                });
+            }
+        }
 
         variants
     }
