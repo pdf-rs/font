@@ -1,18 +1,19 @@
 use super::*;
 use std::cmp::{max, min};
 
+#[derive(Debug, Clone)]
 pub enum VariantGlyph {
     Replacement(u16),
     Constructable(Direction, Vec<GlyphInstruction>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Direction {
     Horizontal,
     Vertical
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct GlyphInstruction {
     pub gid: u16,
     pub overlap: u16,
