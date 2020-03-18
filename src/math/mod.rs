@@ -313,46 +313,46 @@ table!(MathGlyphInfo {
 });
 
 #[derive(Clone, Debug)]
-pub struct MathItalicsCorrectionInfo;
+pub struct MathItalicsCorrectionInfo {
+    map: HashMap<u16, MathValueRecord>
+}
+impl MathItalicsCorrectionInfo {
+    pub fn get(&self, gid: u16) -> Option<&MathValueRecord> {
+        self.map.get(&gid)
+    }
+}
 impl Parser for MathItalicsCorrectionInfo {
     type Output = MathItalicsCorrectionInfo;
     fn parse(data: &[u8]) -> R<Self> {
-       Ok((data, MathItalicsCorrectionInfo))
+        let (i, italics_correction_coverage_offset) = be_u16(data)?;
+        let (_, italics_correction_coverage) = coverage_table(&data[italics_correction_coverage_offset as usize ..])?;
+        let (i, italics_correction_count) = be_u16(i)?;
+        let (i, italics_correction) = array_iter::<MathValueRecord>(i, italics_correction_count as usize)?;
+        let map = italics_correction_coverage.zip(italics_correction).collect();
+       Ok((i, MathItalicsCorrectionInfo { map }))
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct MathTopAccentAttachment;
+pub struct MathTopAccentAttachment {
+    map: HashMap<u16, MathValueRecord>
+}
+impl MathTopAccentAttachment {
+    pub fn get(&self, gid: u16) -> Option<&MathValueRecord> {
+        self.map.get(&gid)
+    }
+}
 impl Parser for MathTopAccentAttachment {
     type Output = MathTopAccentAttachment;
     fn parse(data: &[u8]) -> R<Self> {
-       Ok((data, MathTopAccentAttachment))
+        let (i, top_accent_coverage_offset) = be_u16(data)?;
+        let (_, top_accent_coverage) = coverage_table(&data[top_accent_coverage_offset as usize ..])?;
+        let (i, top_accent_attachment_count) = be_u16(i)?;
+        let (i, top_accent_attachment) = array_iter::<MathValueRecord>(i, top_accent_attachment_count as usize)?;
+        let map = top_accent_coverage.zip(top_accent_attachment).collect();
+       Ok((i, MathTopAccentAttachment { map }))
     }
 }
-/*
-table!(MathItalicsCorrectionInfo {
-    /// Offset to Coverage table - from the beginning of MathItalicsCorrectionInfo table.
-    @uint16 Coverage italicsCorrectionCoverage,
-
-    /// Number of italics correction values. Should coincide with the number of covered glyphs.
-    uint16 italicsCorrectionCount,
-
-    /// Array of MathValueRecords defining italics correction values for each covered glyph.
-    MathValueRecord italicsCorrection[italicsCorrectionCount],
-});
-*/
-/*
-table!(MathTopAccentAttachment {
-    /// Offset to Coverage table, from the beginning of the MathTopAccentAttachment table.
-    @uint16 Coverage topAccentCoverageOffset,
-
-    /// Number of top accent attachment point values. Must be the same as the number of glyph IDs referenced in the Coverage table.
-    uint16 topAccentAttachmentCount,
-
-    /// Array of MathValueRecords defining top accent attachment points for each covered glyph.
-    MathValueRecord topAccentAttachment[topAccentAttachmentCount],
-});
-*/
 
 table!(MathGlyphVariantRecord {
     /// Glyph ID for the variant.
@@ -494,15 +494,13 @@ impl MathKern {
     }
 }
 
-table!(MathKernInfoRecord {
-    ?uint16 MathKern top_right,
-
-    ?uint16 MathKern top_left,
-
-    ?uint16 MathKern bottom_right,
-
-    ?uint16 MathKern bottom_left,
-});
+#[derive(Debug, Clone)]
+pub struct MathKernInfoRecord {
+    pub top_right: MathKern,
+    pub top_left: MathKern,
+    pub bottom_right: MathKern,
+    pub bottom_left: MathKern,
+}
 
 #[derive(Clone, Debug)]
 pub struct MathKernInfo {
@@ -511,10 +509,27 @@ pub struct MathKernInfo {
 impl Parser for MathKernInfo {
     type Output = Self;
     fn parse(data: &[u8]) -> R<Self> {
+        use itertools::Itertools;
+
         let (i, coverage_offset) = be_u16(data)?;
         let (_, coverage) = coverage_table(&data[coverage_offset as usize ..])?;
         let (i, kern_count) = be_u16(i)?;
-        let (i, records) = array_iter::<MathKernInfoRecord>(i, kern_count as usize)?;
+        let (i, records) = array_iter::<uint16>(i, 4 * kern_count as usize)?;
+
+        let parse_kern = |off| if off > 0 {
+            MathKern::parse(&data[off as usize ..]).unwrap().1
+        } else {
+            MathKern::default()
+        };
+
+        let records = records.tuples().map(|(a, b, c, d)| {
+            MathKernInfoRecord {
+                top_right: parse_kern(a),
+                top_left: parse_kern(b),
+                bottom_right: parse_kern(c),
+                bottom_left: parse_kern(d),
+            }
+        });
         let entries = coverage.zip(records).collect();
 
         Ok((i, MathKernInfo { entries }))

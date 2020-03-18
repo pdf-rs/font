@@ -77,7 +77,7 @@ impl<O: Outline> OpenTypeFont<O> {
         info!("{} glyph pair kern entries and {} class pair kern entries", kern.glyph_pairs.len(), kern.class_pairs.len());
 
         let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
-        let math = tables.get(b"math").map(|data| parse_math(data).get());
+        let math = tables.get(b"MATH").map(|data| parse_math(data).get());
         
         OpenTypeFont {
             outlines,
@@ -103,6 +103,9 @@ impl<O: Outline> OpenTypeFont<O> {
         let hmtx = tables.get(b"hmtx").map(|data| parse_hmtx(data, &hhea, &maxp).get());
         
         OpenTypeFont::from_hmtx_glyf_and_tables(hmtx, glyf, tables)
+    }
+    pub fn glyph_metrics(&self, gid: u16) -> Option<HMetrics> {
+        self.hmtx.as_ref().map(|hmtx| hmtx.metrics_for_gid(gid))
     }
 }
 impl<O: Outline> Font<O> for OpenTypeFont<O> {

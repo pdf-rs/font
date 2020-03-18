@@ -1,5 +1,6 @@
 use super::*;
 use std::cmp::{max, min};
+use itertools::Itertools;
 
 #[derive(Debug, Clone)]
 pub enum VariantGlyph {
@@ -66,7 +67,7 @@ impl MathVariants {
 
         // Check for replacement glyphs that meet the desired size first.
         // We want the largest variant that is _smaller_ than the given size.
-        if let Some(replacement) = construction.variants.iter().take_while(|r| (r.advance_measurement as u32) < size).last() {
+        if let Some((replacement, _)) = construction.variants.iter().tuples().find(|(_, b)| b.advance_measurement as u32 >= size) {
             return VariantGlyph::Replacement(replacement.variant_glyph);
         }
 
