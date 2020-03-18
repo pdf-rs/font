@@ -37,7 +37,7 @@ parser!(int16 : be_i16 -> i16);
 parser!(uint16 : be_u16 -> u16);
 
 macro_rules! parse_field {
-    ($start:expr, $input:expr, ?$ptr:ident $parser:ident) => ({
+    ($start:expr, $input:expr, ?$ptr:ident $parser:ident, $field:expr) => ({
         let (i, offset) = <$ptr as Parser>::parse($input)?;
         if offset != 0 {
             let data = &$start[offset as usize ..];
@@ -47,15 +47,15 @@ macro_rules! parse_field {
             Ok((i, Default::default()))
         }
     });
-    ($start:expr, $input:expr, @ $ptr:ident $parser:ident) => ({
+    ($start:expr, $input:expr, @ $ptr:ident $parser:ident, $field:expr) => ({
         let (i, offset) = <$ptr as Parser>::parse($input)?;
-        assert_ne!(offset, 0);
+        assert_ne!(offset, 0, stringify!($field));
 
         let data = &$start[offset as usize ..];
         let (_, value) = <$parser as Parser>::parse(data)?;
         Ok((i, value))
     });
-    ($start:expr, $input:expr, $parser:ident) => (
+    ($start:expr, $input:expr, $parser:ident, $field:expr) => (
         <$parser as Parser>::parse($input)
     );
 }
@@ -78,7 +78,7 @@ macro_rules! table {
             fn parse(input: &[u8]) -> R<$name> {
                 let i = input;
                 $(
-                    let (i, $field) = parse_field!(input, i, $(?$ptr_opt)* $(@$ptr)* $parser)?;
+                    let (i, $field) = parse_field!(input, i, $(?$ptr_opt)* $(@$ptr)* $parser, $field)?;
                 )*
                 Ok((i, $name { $( $field, )* }))
             }
@@ -309,7 +309,7 @@ table!(MathGlyphInfo {
     @uint16 ExtendedShapes extended_shape_coverage,
 
     /// Offset to MathKernInfo table, from the beginning of the MathGlyphInfo table.
-    @uint16 MathKernInfo kern_info,
+    ?uint16 MathKernInfo kern_info,
 });
 
 #[derive(Clone, Debug)]
@@ -502,7 +502,7 @@ pub struct MathKernInfoRecord {
     pub bottom_left: MathKern,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MathKernInfo {
     pub entries: HashMap<u16, MathKernInfoRecord>
 }
