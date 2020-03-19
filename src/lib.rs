@@ -124,18 +124,21 @@ pub trait Font<O: Outline>: 'static {
     fn get_cmap(&self) -> Option<&CMap> {
         None
     }
-    fn type_id(&self) -> TypeId {
+
+    #[doc(hidden)]
+    // this function must return the type id of the impl
+    unsafe fn _type_id(&self) -> TypeId {
         TypeId::of::<Self>()
     }
 }
 impl<O: Outline + 'static> dyn Font<O> {
     pub fn downcast<T: Font<O> + 'static>(&self) -> Option<&T> {
-        if self.type_id() == TypeId::of::<T>() {
-            unsafe {
+        unsafe {
+            if self._type_id() == TypeId::of::<T>() {
                 Some(&*(self as *const dyn Font<O> as *const T))
+            } else {
+                None
             }
-        } else {
-            None
         }
     }
 }
