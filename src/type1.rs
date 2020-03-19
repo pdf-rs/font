@@ -22,7 +22,7 @@ pub struct Type1Font<O: Outline> {
     postscript_name: Option<String>,
     full_name: Option<String>
 }
-impl<O: Outline> Font<O> for Type1Font<O> {
+impl<O: Outline + 'static> Font<O> for Type1Font<O> {
     fn num_glyphs(&self) -> u32 {
         self.glyphs.len() as u32
     }

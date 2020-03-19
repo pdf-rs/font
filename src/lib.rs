@@ -4,6 +4,7 @@
 
 use std::fmt;
 use std::convert::TryInto;
+use std::any::TypeId;
 use nom::{IResult, Err::*, error::VerboseError};
 use tuple::{TupleElements};
 use encoding::Encoding;
@@ -32,7 +33,7 @@ pub struct HMetrics {
     pub lsb: Vector,
     pub advance: Vector
 }
-pub trait Font<O: Outline> {
+pub trait Font<O: Outline>: 'static {
     /// Return the "number of glyphs" in the font.
     ///
     /// This may or may not correlate to the actual number of "real glyphs".
@@ -123,7 +124,22 @@ pub trait Font<O: Outline> {
     fn get_cmap(&self) -> Option<&CMap> {
         None
     }
+    fn type_id(&self) -> TypeId {
+        TypeId::of::<Self>()
+    }
 }
+impl<O: Outline + 'static> dyn Font<O> {
+    pub fn downcast<T: Font<O> + 'static>(&self) -> Option<&T> {
+        if self.type_id() == TypeId::of::<T>() {
+            unsafe {
+                Some(&*(self as *const dyn Font<O> as *const T))
+            }
+        } else {
+            None
+        }
+    }
+}
+
 pub struct Glyphs<O: Outline> {
     glyphs: Vec<Glyph<O>>
 }

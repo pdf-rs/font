@@ -33,7 +33,7 @@ impl<O: Outline> CffFont<O> {
         read_cff(data).get().slot(idx).parse_font()
     }
 }
-impl<O: Outline> Font<O> for CffFont<O> {
+impl<O: Outline + 'static> Font<O> for CffFont<O> {
     fn num_glyphs(&self) -> u32 {
         self.glyphs.len() as u32
     }

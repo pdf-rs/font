@@ -1,7 +1,7 @@
 use vector::{Surface, PathStyle, Vector, Transform, PathBuilder, Outline};
 use crate::{Font, GlyphId};
 
-pub fn line<S: Surface>(font: &dyn Font<S::Outline>, font_size: f32, text: &str, style: PathStyle<S>, baseline: Option<PathStyle<S>>) -> S {
+pub fn line<S: Surface + 'static>(font: &dyn Font<S::Outline>, font_size: f32, text: &str, style: PathStyle<S>, baseline: Option<PathStyle<S>>) -> S {
     let mut last_gid = None;
     let mut offset = Vector::default();
 

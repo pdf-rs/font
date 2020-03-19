@@ -64,7 +64,7 @@ impl<O: Outline> TrueTypeFont<O> {
         get_outline(&self.shapes, idx)
     }
 }
-impl<O: Outline> Font<O> for TrueTypeFont<O> {
+impl<O: Outline + 'static> Font<O> for TrueTypeFont<O> {
     fn num_glyphs(&self) -> u32 {
         self.shapes.len() as u32
     }

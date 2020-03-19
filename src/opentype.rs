@@ -108,7 +108,7 @@ impl<O: Outline> OpenTypeFont<O> {
         self.hmtx.as_ref().map(|hmtx| hmtx.metrics_for_gid(gid))
     }
 }
-impl<O: Outline> Font<O> for OpenTypeFont<O> {
+impl<O: Outline + 'static> Font<O> for OpenTypeFont<O> {
     fn num_glyphs(&self) -> u32 {
         self.outlines.len() as u32
     }
