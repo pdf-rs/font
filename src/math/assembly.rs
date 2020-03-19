@@ -141,7 +141,7 @@ impl MathVariants {
     /// than `ITERATION_LIMIT` we return `None`.
     fn smallest_upper_bound(&self, parts: &[GlyphPartRecord], size: u32) -> (u16, f64) {
         let (small, large) = self.advance_without_optional(parts);
-        if large >= size {
+        if small < size {
             trace!("using smallest variant glyph, {} <= smallest <= {}", small, large);
             return (0, 0.0)
         }

@@ -95,6 +95,7 @@ fn array_iter<'a, P: Parser + FixedSize>(input: &'a [u8], count: usize) -> R<imp
     Ok((remaining, iter))
 }
 
+
 #[derive(Default, Clone, Debug)]
 pub struct MathValueRecord {
     pub value: i16
@@ -306,7 +307,7 @@ table!(MathGlyphInfo {
     @uint16 MathTopAccentAttachment top_accent_attachment,
 
     /// Offset to ExtendedShapes coverage table, from the beginning of the MathGlyphInfo table. When the glyph to the left or right of a box is an extended shape variant, the (ink) box should be used for vertical positioning purposes, not the default position defined by values in MathConstants table. May be NULL.
-    @uint16 ExtendedShapes extended_shape_coverage,
+    ?uint16 ExtendedShapes extended_shape_coverage,
 
     /// Offset to MathKernInfo table, from the beginning of the MathGlyphInfo table.
     ?uint16 MathKernInfo kern_info,
@@ -446,22 +447,32 @@ impl Parser for MathVariants {
         let (i, vert_glyph_coverage_offset) = be_u16(i)?;
         let (i, horiz_glyph_coverage_offset) = be_u16(i)?;
 
-        let (_, vert_glyph_coverage) = coverage_table(&data[vert_glyph_coverage_offset as usize ..])?;
-        let (_, horiz_glyph_coverage) = coverage_table(&data[horiz_glyph_coverage_offset as usize ..])?;
-
         let (i, vert_glyph_count) = be_u16(i)?;
         let (i, horiz_glyph_count) = be_u16(i)?;
 
         let (i, vert_glyph_construction_offsets) = array_iter::<uint16>(i, vert_glyph_count as usize)?;
         let (i, horiz_glyph_construction_offsets) = array_iter::<uint16>(i, horiz_glyph_count as usize)?;
 
-        let vert_glyph_construction = vert_glyph_construction_offsets.map(|off| MathGlyphConstruction::parse(&data[off as usize ..]).unwrap().1);
-        let horiz_glyph_construction = horiz_glyph_construction_offsets.map(|off| MathGlyphConstruction::parse(&data[off as usize ..]).unwrap().1);
-
+        let vert_glyph_construction = if vert_glyph_coverage_offset != 0 {
+            let (_, vert_glyph_coverage) = coverage_table(&data[vert_glyph_coverage_offset as usize ..])?;
+            let vert_glyph_construction = vert_glyph_construction_offsets.map(|off| MathGlyphConstruction::parse(&data[off as usize ..]).unwrap().1);
+            vert_glyph_coverage.zip(vert_glyph_construction).collect()
+        } else {
+            HashMap::new()
+        };
+        
+        let horiz_glyph_construction = if horiz_glyph_coverage_offset != 0 {
+            let (_, horiz_glyph_coverage) = coverage_table(&data[horiz_glyph_coverage_offset as usize ..])?;
+            let horiz_glyph_construction = horiz_glyph_construction_offsets.map(|off| MathGlyphConstruction::parse(&data[off as usize ..]).unwrap().1);
+            horiz_glyph_coverage.zip(horiz_glyph_construction).collect()
+        } else {
+            HashMap::new()
+        };
+        
         Ok((i, MathVariants {
             min_connector_overlap,
-            vert_glyph_construction: vert_glyph_coverage.zip(vert_glyph_construction).collect(),
-            horiz_glyph_construction: horiz_glyph_coverage.zip(horiz_glyph_construction).collect(),
+            vert_glyph_construction,
+            horiz_glyph_construction
         }))
     }
 }
@@ -536,7 +547,7 @@ impl Parser for MathKernInfo {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ExtendedShapes {
     pub glyphs: HashSet<u16>
 }
