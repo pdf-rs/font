@@ -159,7 +159,7 @@ impl<'a> CffSlot<'a> {
         self.top_dict.get(&Operator::FontMatrix)
             .map(|arr| {
                 let (a, b, c, d, e, f) = TupleElements::from_iter(arr.iter().map(|&v| v.to_float())).unwrap();
-                Transform::row_major(a, b, c, d, e, f)
+                Transform::row_major(a, b, e, c, d, f)
             })
             .unwrap_or(Transform::from_scale(Vector::splat(0.001)))
     }

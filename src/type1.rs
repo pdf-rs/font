@@ -162,7 +162,7 @@ impl<O: Outline> Type1Font<O> {
         ).unwrap();
         
         Type1Font {
-            font_matrix: Transform::row_major(a, b, c, d, e, f),
+            font_matrix: Transform::row_major(a, b, e, c, d, f),
             glyphs,
             codepoints,
             unicode_map,
