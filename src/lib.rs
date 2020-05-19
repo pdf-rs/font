@@ -8,17 +8,20 @@ use std::any::TypeId;
 use nom::{IResult, Err::*, error::VerboseError};
 use tuple::{TupleElements};
 use encoding::Encoding;
-use vector::{Outline, Vector, PathBuilder, Transform, Rect};
 use crate::gsub::Gsub;
 use crate::opentype::CMap;
+use pathfinder_content::outline::Outline;
+use pathfinder_renderer::scene::Scene;
+use pathfinder_geometry::{rect::RectF, vector::Vector2F, transform2d::Transform2F};
+use pathfinder_builder::PathBuilder;
 
 #[derive(Clone)]
-pub struct Glyph<O: Outline> {
+pub struct Glyph {
     /// unit 1em
     pub metrics: HMetrics,
     
     /// transform by font_matrix to scale it to 1em
-    pub path: O 
+    pub path: Outline,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
@@ -30,10 +33,10 @@ pub struct VMetrics {
 }
 #[derive(Copy, Clone, Default)]
 pub struct HMetrics {
-    pub lsb: Vector,
-    pub advance: Vector
+    pub lsb: Vector2F,
+    pub advance: Vector2F
 }
-pub trait Font<O: Outline>: 'static {
+pub trait Font: 'static {
     /// Return the "number of glyphs" in the font.
     ///
     /// This may or may not correlate to the actual number of "real glyphs".
@@ -41,20 +44,17 @@ pub trait Font<O: Outline>: 'static {
     fn num_glyphs(&self) -> u32;
     
     /// The transformation to get from glyph space (which all methods use) into text space with a unit of 1em.
-    fn font_matrix(&self) -> Transform;
+    fn font_matrix(&self) -> Transform2F;
     
     /// Get the glyph identified by `gid`.
     ///
     /// Note, that a *gid* is only meaningful within one font and cannot be transfered to another font.
-    fn glyph(&self, gid: GlyphId) -> Option<Glyph<O>>;
+    fn glyph(&self, gid: GlyphId) -> Option<Glyph>;
     
-    /// Get all glyphs in this font
-    fn glyphs(&self) -> Glyphs<O> {
-        Glyphs {
-            glyphs: (0 .. self.num_glyphs()).map(|i| self.glyph(GlyphId(i)).unwrap()).collect()
-        }
+    fn svg_glyph(&self, gid: GlyphId) -> Option<&Scene> {
+        None
     }
-    
+
     /// Get the *gid* for the given codepoint in the "native encoding" of this font.
     ///
     /// (see `encoding()` to find out which that is).
@@ -95,7 +95,7 @@ pub trait Font<O: Outline>: 'static {
     /// The *bounding box* of all glyphs.
     ///
     /// No glyph **should** contain contours outside this rectangle.
-    fn bbox(&self) -> Option<Rect> {
+    fn bbox(&self) -> Option<RectF> {
         None
     }
     
@@ -131,25 +131,15 @@ pub trait Font<O: Outline>: 'static {
         TypeId::of::<Self>()
     }
 }
-impl<O: Outline + 'static> dyn Font<O> {
-    pub fn downcast<T: Font<O> + 'static>(&self) -> Option<&T> {
+impl dyn Font {
+    pub fn downcast<T: Font>(&self) -> Option<&T> {
         unsafe {
             if self._type_id() == TypeId::of::<T>() {
-                Some(&*(self as *const dyn Font<O> as *const T))
+                Some(&*(self as *const dyn Font as *const T))
             } else {
                 None
             }
         }
-    }
-}
-
-pub struct Glyphs<O: Outline> {
-    glyphs: Vec<Glyph<O>>
-}
-impl<O: Outline> Glyphs<O> {
-    #[inline]
-    pub fn get(&self, gid: GlyphId) -> Option<&Glyph<O>> {
-        self.glyphs.get(gid.0 as usize)
     }
 }
 
@@ -164,6 +154,8 @@ mod eexec;
 mod woff;
 mod gpos;
 mod gsub;
+mod svg;
+
 pub mod math;
 pub mod layout;
 
@@ -239,8 +231,8 @@ impl Value {
 }
 
 #[inline]
-fn v(x: impl Into<f32>, y: impl Into<f32>) -> Vector {
-    Vector::new(x.into(), y.into())
+fn v(x: impl Into<f32>, y: impl Into<f32>) -> Vector2F {
+    Vector2F::new(x.into(), y.into())
 }
 
 pub trait TryIndex {
@@ -290,26 +282,26 @@ impl<T, U> Context<T, U> where T: TryIndex, U: TryIndex {
     }
 }
 
-pub struct State<O: Outline> {
+pub struct State {
     pub stack: Vec<Value>,
-    pub path: PathBuilder<O>,
-    pub current: Vector,
-    pub lsb: Option<Vector>,
+    pub path: PathBuilder,
+    pub current: Vector2F,
+    pub lsb: Option<Vector2F>,
     pub char_width: Option<f32>,
     pub done: bool,
     pub stem_hints: u32,
     pub delta_width: Option<f32>,
     pub first_stack_clearing_operator: bool,
-    pub flex_sequence: Option<Vec<Vector>>
+    pub flex_sequence: Option<Vec<Vector2F>>
 }
 
-impl<O: Outline> State<O> {
+impl State {
     #[inline]
-    pub fn new() -> State<O> {
+    pub fn new() -> State {
         State {
             stack: Vec::new(),
             path: PathBuilder::new(),
-            current: Vector::default(),
+            current: Vector2F::default(),
             lsb: None,
             char_width: None,
             done: false,
@@ -323,7 +315,7 @@ impl<O: Outline> State<O> {
     pub fn clear(&mut self) {
         self.stack.clear();
         self.path.clear();
-        self.current = Vector::default();
+        self.current = Vector2F::default();
         self.lsb = None;
         self.char_width = None;
         self.done = false;
@@ -333,7 +325,7 @@ impl<O: Outline> State<O> {
         self.flex_sequence = None;
     }
     #[inline]
-    pub fn into_path(self) -> O {
+    pub fn into_path(self) -> Outline {
         self.path.into_outline()
     }
     #[inline]
@@ -391,7 +383,7 @@ impl<T> IResultExt for IResult<&[u8], T, VerboseError<&[u8]>> {
     }
 }
 
-pub fn parse<O: Outline + Send + Sync + 'static>(data: &[u8]) -> Box<dyn Font<O> + Send + Sync + 'static> {
+pub fn parse(data: &[u8]) -> Box<dyn Font + Send + Sync + 'static> {
     let magic: &[u8; 4] = data[0 .. 4].try_into().unwrap();
     info!("font magic: {:?} ({:?})", magic, String::from_utf8_lossy(&*magic));
     match magic {
@@ -400,8 +392,8 @@ pub fn parse<O: Outline + Send + Sync + 'static>(data: &[u8]) -> Box<dyn Font<O>
         b"ttcf" | b"typ1" => unimplemented!(), // Box::new(TrueTypeFont::parse(data, 0)) as _,
         b"true" => Box::new(TrueTypeFont::parse(data)) as _,
         b"%!PS" => Box::new(Type1Font::parse_postscript(data)) as _,
-        b"wOFF" => Box::new(woff::parse_woff::<O>(data).get()) as _,
-        b"wOF2" => Box::new(woff::parse_woff2::<O>(data).get()) as _,
+        b"wOFF" => Box::new(woff::parse_woff(data).get()) as _,
+        b"wOF2" => Box::new(woff::parse_woff2(data).get()) as _,
         &[1, _, _, _] => Box::new(CffFont::parse(data, 0)) as _,
         &[37, 33, _, _] => Box::new(Type1Font::parse_pfa(data)) as _,
         magic => panic!("unknown magic {:?}", magic)

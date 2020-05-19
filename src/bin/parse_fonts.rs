@@ -28,9 +28,8 @@ fn main() {
             eprintln!("parsing {:100}", entry.path().to_str().unwrap());
             let data = fs::read(entry.path()).expect("can't read file");
             
-            match catch_unwind(|| parse::<Outline>(&data)) {
+            match catch_unwind(|| parse(&data)) {
                 Ok(font) => {
-                    font.glyphs();
                     eprintln!("    OK");
                 }
                 Err(e) => {

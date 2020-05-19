@@ -9,14 +9,19 @@ use pathfinder_geometry::{
 };
 use pathfinder_content::outline::{Outline};
 use font::{Font, parse, GlyphId};
-use vector::{Svg, Surface, PathStyle};
+use pathfinder_renderer::{
+    scene::{Scene, DrawPath},
+    paint::Paint
+};
+use pathfinder_color::ColorU;
+use pathfinder_export::{Export, FileFormat};
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
     let args: Vec<String> = env::args().collect();
     let data = fs::read(args.get(1).expect("no filename given")).expect("can't read specified file");
-    let font = parse::<Outline>(&data);
+    let font = parse(&data);
     
     let num_glyphs = font.num_glyphs();
     let mut bbox = font.bbox().unwrap_or(RectF::new(Vector2F::default(), Vector2F::new(1.0, 1.0)));
@@ -33,13 +38,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     println!("{} glyphs in {} by {}", num_glyphs, glyphs_x, glyphs_y);
     
-    let mut surface = Svg::new(size);
-    let style = PathStyle {
-        fill: Some((0, 0, 0, 100)),
-        stroke: None
-    };
-    let style = surface.build_style(style);
-    
+    let mut scene = Scene::new();
+    scene.set_view_box(RectF::new(Vector2F::default(), size));
+    let paint = scene.push_paint(&Paint::from_color(ColorU::black()));
+
     for gid in 0 .. num_glyphs {
         let y = gid as u32 / glyphs_x;
         let x = gid as u32 % glyphs_x;
@@ -52,9 +54,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         
         let mut outline = font.glyph(GlyphId(gid)).unwrap().path;
         outline.transform(&transform);
-        surface.draw_path(outline, &style);
+        
+        scene.push_path(DrawPath::new(outline, paint));
     }
-    fs::write("font.svg", surface.finish());
+
+    let mut writer = BufWriter::new(File::create("font.svg").unwrap());
+    scene
+        .export(&mut writer, FileFormat::SVG)
+        .unwrap();
     
     Ok(())
 }

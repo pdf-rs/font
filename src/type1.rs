@@ -9,27 +9,27 @@ use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, G
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
 use crate::parsers::parse;
-use vector::{Outline, Transform, Rect, Vector};
+use pathfinder_builder::{Outline, Contour, Transform2F, RectF, Vector2F};
 use encoding::{glyphname_to_unicode};
 
 #[derive(Clone)]
-pub struct Type1Font<O: Outline> {
-    glyphs: IndexMap<String, Glyph<O>>, // namee -> glyph
+pub struct Type1Font {
+    glyphs: IndexMap<String, Glyph>, // namee -> glyph
     codepoints: HashMap<u32, u32>, // codepoint -> glyph id
     unicode_map: HashMap<&'static str, u32>,
-    font_matrix: Transform,
-    bbox: Option<Rect>,
+    font_matrix: Transform2F,
+    bbox: Option<RectF>,
     postscript_name: Option<String>,
     full_name: Option<String>
 }
-impl<O: Outline + 'static> Font<O> for Type1Font<O> {
+impl Font for Type1Font {
     fn num_glyphs(&self) -> u32 {
         self.glyphs.len() as u32
     }
-    fn font_matrix(&self) -> Transform {
+    fn font_matrix(&self) -> Transform2F {
         self.font_matrix
     }
-    fn glyph(&self, gid: GlyphId) -> Option<Glyph<O>> {
+    fn glyph(&self, gid: GlyphId) -> Option<Glyph> {
         self.glyphs.get_index(gid.0 as usize).map(|(_, glyph)| glyph.clone())
     }
     fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
@@ -45,7 +45,7 @@ impl<O: Outline + 'static> Font<O> for Type1Font<O> {
         let s = c.encode_utf8(&mut buf);
         self.unicode_map.get(&*s).map(|&id| GlyphId(id))
     }
-    fn bbox(&self) -> Option<Rect> {
+    fn bbox(&self) -> Option<RectF> {
         self.bbox
     }
     fn full_name(&self) -> Option<&str> {
@@ -56,7 +56,7 @@ impl<O: Outline + 'static> Font<O> for Type1Font<O> {
     }
 }
 
-impl<O: Outline> Type1Font<O> {
+impl Type1Font {
     pub fn parse_pfa(data: &[u8]) -> Self {
         let mut vm = Vm::new();
         vm.parse_and_exec(data);
@@ -121,7 +121,7 @@ impl<O: Outline> Type1Font<O> {
             let (index, _) = glyphs.insert_full(name.to_owned(), Glyph {
                 path: state.path.into_outline(),
                 metrics: HMetrics {
-                    advance: Vector::new(state.char_width.unwrap(), 0.0),
+                    advance: Vector2F::new(state.char_width.unwrap(), 0.0),
                     lsb: state.lsb.unwrap_or_default()
                 }
             });
@@ -154,7 +154,7 @@ impl<O: Outline> Type1Font<O> {
         let bbox = font_dict.get("FontBBox")
             .map(|val| {
                 let (a, b, c, d) = TupleElements::from_iter(val.as_array().unwrap().iter().map(|v| v.as_f32().unwrap())).unwrap();
-                Rect::from_points(Vector::new(a, b), Vector::new(c, d))
+                RectF::from_points(Vector2F::new(a, b), Vector2F::new(c, d))
             });
         
         let (a, b, c, d, e, f) = TupleElements::from_iter(
@@ -162,7 +162,7 @@ impl<O: Outline> Type1Font<O> {
         ).unwrap();
         
         Type1Font {
-            font_matrix: Transform::row_major(a, b, e, c, d, f),
+            font_matrix: Transform2F::row_major(a, b, e, c, d, f),
             glyphs,
             codepoints,
             unicode_map,
@@ -216,8 +216,8 @@ fn parse_pfb<'a>(mut vm: &mut Vm, i: &'a [u8]) -> R<'a, ()> {
     
     Ok((input, ()))
 }
-pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State<O>) -> IResult<&'a [u8], ()>
-    where O: Outline, T: TryIndex + 'a, U: TryIndex + 'a
+pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State) -> IResult<&'a [u8], ()>
+    where T: TryIndex + 'a, U: TryIndex + 'a
 {
     let mut ps_stack = vec![];
     while input.len() > 0 {

@@ -11,7 +11,7 @@ use crate::{
     parsers::{iterator, varint_u32, varint_u16, parse, count_map},
     opentype::{Tables, parse_head, parse_hhea, parse_maxp, parse_hmtx, parse_hmtx_woff2_format1, parse_loca, OpenTypeFont},
 };
-use vector::{Outline, Vector};
+use pathfinder_builder::{Outline, Vector2F};
 use nom::{
     bytes::complete::{tag, take},
     number::complete::{be_u8, be_u16, be_i16, be_u32},
@@ -22,7 +22,7 @@ use nom::{
 };
 
 
-pub fn parse_woff<O: Outline>(data: &[u8]) -> R<OpenTypeFont<O>> {
+pub fn parse_woff(data: &[u8]) -> R<OpenTypeFont> {
     let (i, _) = tag(b"wOFF")(data)?;
     let (i, flavor) = take(4usize)(i)?;
     let (i, _length) = be_u32(i)?;
@@ -83,7 +83,7 @@ fn woff_dir_entry(i: &[u8]) -> R<WoffDirEntry> {
     }))
 }
     
-pub fn parse_woff2<O: Outline>(i: &[u8]) -> R<OpenTypeFont<O>> {
+pub fn parse_woff2(i: &[u8]) -> R<OpenTypeFont> {
     let (i, _) = tag(b"wOF2")(i)?;
     let (i, flavor) = take(4usize)(i)?;
     let (i, _length) = be_u32(i)?;
@@ -145,7 +145,7 @@ pub fn parse_woff2<O: Outline>(i: &[u8]) -> R<OpenTypeFont<O>> {
     Ok((i, font))
 }
 
-fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
+fn parse_glyf_t0(i: &[u8]) -> R<Vec<Shape>> {
     let (i, _) = tag([0u8; 4])(i)?;
     let (i, num_glyphs) = be_u16(i)?;
     let (i, _index_format) = be_u16(i)?;
@@ -179,7 +179,7 @@ fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
             0 => glyphs.push(Shape::Empty),
             -1 => glyphs.push(parse(&mut composite_stream, compound)?),
             n if n > 0 => {
-                let mut outline = O::empty();
+                let mut outline = Outline::new();
                 let (mut x, mut y) = (0i16, 0i16);
                 for n_points in (&mut points).take(n_contour as usize) {
                     let mut counter = 0;
@@ -201,10 +201,10 @@ fn parse_glyf_t0<O: Outline>(i: &[u8]) -> R<Vec<Shape<O>>> {
                         y += sign(triplet.y_minus()) * (vy + triplet.dy() as i16);
                         counter += 1;
                         
-                        (on_curve, Vector::new(x as f32, y as f32))
+                        (on_curve, Vector2F::new(x as f32, y as f32))
                     });
                     if let Some(contour) = contour(points) {
-                        outline.add_contour(contour);
+                        outline.push_contour(contour);
                     }
                     // don't care about it… but it needs to be removed from the stream
                     assert_eq!(counter, n_points);

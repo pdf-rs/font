@@ -1,8 +1,9 @@
 use font::{Font, parse, layout::line};
-use vector::{Svg, Surface, PathStyle};
 use std::env;
-use std::fs;
+use std::fs::{self, File};
+use std::io::BufWriter;
 use std::error::Error;
+use pathfinder_export::{Export, FileFormat};
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
@@ -14,16 +15,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let text = args.get(2).expect("no text given");
     
     let data = fs::read(file).expect("can't read specified file");
-    let font = parse::<<Svg as Surface>::Outline>(&data);
-    let glyph_style = PathStyle {
-        fill: Some((0, 0, 255, 100)),
-        stroke: Some(((0, 0, 0, 255), 0.05))
-    };
-    let baseline_style = PathStyle {
-        fill: None,
-        stroke: Some(((0, 0, 0, 255), 0.05))
-    };
-    fs::write("text.svg", line::<Svg>(&*font, 20., &text, glyph_style, Some(baseline_style)).finish());
+    let font = parse(&data);
+    line(&*font, 20., &text)
+        .export(&mut BufWriter::new(File::create("font.svg").unwrap()), FileFormat::SVG)
+        .unwrap();
     
     Ok(())
 }

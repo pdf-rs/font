@@ -14,33 +14,33 @@ use nom::{
     Err::*,
 };
 use encoding::{Encoding};
-use vector::{Outline, Transform, Vector, Rect};
+use pathfinder_builder::{Outline, Transform2F, RectF, Vector2F};
 use tuple::TupleElements;
 
 #[derive(Clone)]
-pub struct CffFont<O: Outline> {
-    glyphs: Vec<Glyph<O>>,
-    font_matrix: Transform,
+pub struct CffFont {
+    glyphs: Vec<Glyph>,
+    font_matrix: Transform2F,
     codepoint_map: [u16; 256],  // codepoint -> glyph index
     name_map: HashMap<String, u16>,
     encoding: Option<Encoding>,
-    bbox: Option<Rect>,
+    bbox: Option<RectF>,
     vmetrics: Option<VMetrics>
 }
 
-impl<O: Outline> CffFont<O> {
+impl CffFont {
     pub fn parse(data: &[u8], idx: u32) -> Self {
         read_cff(data).get().slot(idx).parse_font()
     }
 }
-impl<O: Outline + 'static> Font<O> for CffFont<O> {
+impl Font for CffFont {
     fn num_glyphs(&self) -> u32 {
         self.glyphs.len() as u32
     }
-    fn font_matrix(&self) -> Transform {
+    fn font_matrix(&self) -> Transform2F {
         self.font_matrix
     }
-    fn glyph(&self, id: GlyphId) -> Option<Glyph<O>> {
+    fn glyph(&self, id: GlyphId) -> Option<Glyph> {
         self.glyphs.get(id.0 as usize).cloned()
     }
     fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
@@ -61,7 +61,7 @@ impl<O: Outline + 'static> Font<O> for CffFont<O> {
     fn get_notdef_gid(&self) -> GlyphId {
         GlyphId(0)
     }
-    fn bbox(&self) -> Option<Rect> {
+    fn bbox(&self) -> Option<RectF> {
         self.bbox
     }
     fn vmetrics(&self) -> Option<VMetrics> {
@@ -155,23 +155,23 @@ impl<'a> Cff<'a> {
     }
 }
 impl<'a> CffSlot<'a> {
-    pub fn font_matrix(&self) -> Transform {
+    pub fn font_matrix(&self) -> Transform2F {
         self.top_dict.get(&Operator::FontMatrix)
             .map(|arr| {
                 let (a, b, c, d, e, f) = TupleElements::from_iter(arr.iter().map(|&v| v.to_float())).unwrap();
-                Transform::row_major(a, b, e, c, d, f)
+                Transform2F::row_major(a, b, e, c, d, f)
             })
-            .unwrap_or(Transform::from_scale(Vector::splat(0.001)))
+            .unwrap_or(Transform2F::from_scale(Vector2F::splat(0.001)))
     }
-    pub fn bbox(&self) -> Option<Rect> {
+    pub fn bbox(&self) -> Option<RectF> {
         self.top_dict.get(&Operator::FontBBox)
             .map(|arr| {
                 let (a, b, c, d) = TupleElements::from_iter(arr.iter().map(|&v| v.to_float())).unwrap();
-                Rect::from_points(Vector::new(a, b), Vector::new(c, d))
+                RectF::from_points(Vector2F::new(a, b), Vector2F::new(c, d))
             })
     }
     // -> (outline, width, lsb)
-    pub fn outlines<'b, O: Outline + 'b>(&'b self) -> impl Iterator<Item=(O, f32, Vector)> + 'b {
+    pub fn outlines(&self) -> impl Iterator<Item=(Outline, f32, Vector2F)> + '_ {
         let n = self.top_dict.get(&Operator::CharstringType).map(|v| v[0].to_int()).unwrap_or(2);
         let char_string_type = match n {
             1 => CharstringType::Type1,
@@ -223,7 +223,7 @@ impl<'a> CffSlot<'a> {
             (path, width, lsb)
         })
     }
-    fn parse_font<O: Outline>(&self) -> CffFont<O> {
+    fn parse_font(&self) -> CffFont {
         let glyph_name = |sid: SID|
             STANDARD_STRINGS.get(sid as usize).cloned().unwrap_or_else(||
                 ::std::str::from_utf8(self.cff.string_index.get(sid as usize - STANDARD_STRINGS.len()).expect("no such string")).expect("Invalid glyph name")
@@ -298,7 +298,7 @@ impl<'a> CffSlot<'a> {
         let glyphs = self.outlines().map(|(outline, width, lsb)| {
             Glyph {
                 metrics: HMetrics {
-                    advance: Vector::new(width, 0.0),
+                    advance: Vector2F::new(width, 0.0),
                     lsb
                 },
                 path: outline

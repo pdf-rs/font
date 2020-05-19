@@ -1,0 +1,6 @@
+[hooks]
+pre-push = "cargo test"
+pre-push = "cargo test --all-features"
+
+[logging]
+verbose = true

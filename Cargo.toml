@@ -6,13 +6,17 @@ edition = "2018"
 
 [features]
 unstable = ["slotmap/unstable", "tuple/nightly"]
-tools = ["env_logger"]
+tools = ["env_logger", "pathfinder_export"]
 
 [dependencies]
 encoding = { git = "https://github.com/pdf-rs/encoding/" }
 pathfinder_geometry = { git = "https://github.com/s3bk/pathfinder/" }
 pathfinder_content = { git = "https://github.com/s3bk/pathfinder/" }
-vector = { git = "https://github.com/s3bk/vector/", features = ["impl_pathfinder"] }
+pathfinder_color = { git = "https://github.com/s3bk/pathfinder/" }
+pathfinder_renderer = { git = "https://github.com/s3bk/pathfinder/" }
+pathfinder_svg = { git = "https://github.com/s3bk/pathfinder/" }
+pathfinder_builder = { git = "https://github.com/s3bk/pathfinder/" }
+pathfinder_export = { git = "https://github.com/s3bk/pathfinder/", optional=true }
 tuple = { git = "https://github.com/s3bk/tuple/" }
 nom = "5.0.0"
 log = "0.4.8"
@@ -23,16 +27,12 @@ itertools = "0.8.0"
 indexmap = "1.0"
 brotli-decompressor = "2.3.0"
 inflate = "0.4.5"
-raqote = { version = "*", default-features = false }
 walkdir = "2.2.9"
 env_logger = { version = "*", optional=true }
+usvg = "0.9"
 
 [[bin]]
 name = "font2svg"
-required-features = ["tools"]
-
-[[bin]]
-name = "glyph2svg"
 required-features = ["tools"]
 
 [[bin]]

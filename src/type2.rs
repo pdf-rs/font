@@ -1,5 +1,5 @@
 use crate::{State, v, Value, Context, TryIndex};
-use vector::{Outline};
+use pathfinder_builder::{Outline};
 use nom::{IResult,
     bytes::complete::{take},
     number::complete::{be_u8, be_i16, be_i32}
@@ -51,7 +51,7 @@ macro_rules! lines {
     });
 }
 
-fn alternating_curve<O: Outline>(s: &mut State<O>, mut horizontal: bool) {
+fn alternating_curve(s: &mut State, mut horizontal: bool) {
     let mut slice = s.stack.as_slice();
     while slice.len() > 0 {
         slice = match (slice.len(), horizontal) {
@@ -65,7 +65,7 @@ fn alternating_curve<O: Outline>(s: &mut State<O>, mut horizontal: bool) {
 }
 
 #[inline]
-fn maybe_width<O: Outline>(state: &mut State<O>, cond: impl Fn(usize) -> bool) {
+fn maybe_width(state: &mut State, cond: impl Fn(usize) -> bool) {
     if state.first_stack_clearing_operator {
         state.first_stack_clearing_operator = false;
         if !cond(state.stack.len()) {
@@ -74,8 +74,8 @@ fn maybe_width<O: Outline>(state: &mut State<O>, cond: impl Fn(usize) -> bool) {
         }
     }
 }
-pub fn charstring<'a, 'b, O, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State<O>) -> IResult<&'a [u8], ()>
-    where O: Outline, T: TryIndex + 'a, U: TryIndex + 'a
+pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State) -> IResult<&'a [u8], ()>
+    where T: TryIndex + 'a, U: TryIndex + 'a
 {
     while input.len() > 0 && !s.done {
         let (i, b0) = be_u8(input)?;

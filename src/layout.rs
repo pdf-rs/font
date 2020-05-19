@@ -1,9 +1,19 @@
-use vector::{Surface, PathStyle, Vector, Transform, PathBuilder, Outline};
 use crate::{Font, GlyphId};
+use pathfinder_builder::{Transform2F, Vector2F, Outline};
+use pathfinder_renderer::{
+    scene::{Scene, DrawPath},
+    paint::Paint,
+};
+use pathfinder_color::ColorU;
 
-pub fn line<S: Surface + 'static>(font: &dyn Font<S::Outline>, font_size: f32, text: &str, style: PathStyle<S>, baseline: Option<PathStyle<S>>) -> S {
+enum Glyph<'a> {
+    Simple(Outline),
+    Complex(&'a Scene)
+}
+
+pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
     let mut last_gid = None;
-    let mut offset = Vector::default();
+    let mut offset = Vector2F::default();
 
     let mut gids: Vec<GlyphId> = text.chars().map(|c| font.gid_for_unicode_codepoint(c as u32).unwrap_or(font.get_notdef_gid())).collect();
     if let Some(gsub) = font.get_gsub() {
@@ -30,10 +40,15 @@ pub fn line<S: Surface + 'static>(font: &dyn Font<S::Outline>, font_size: f32, t
         .filter_map(|&gid| font.glyph(gid).map(|glyph| (gid, glyph)))
         .map(|(gid, glyph)| {
             if let Some(left) = last_gid.replace(gid) {
-                offset = offset + Vector::new(font.kerning(left, gid), 0.0);
+                offset = offset + Vector2F::new(font.kerning(left, gid), 0.0);
             }
             let p = offset;
             offset = offset + glyph.metrics.advance;
+
+            let glyph = match font.svg_glyph(gid) {
+                None => Glyph::Simple(glyph.path),
+                Some(scene) => Glyph::Complex(scene)
+            };
             (glyph, p)
         })
         .collect();
@@ -41,30 +56,33 @@ pub fn line<S: Surface + 'static>(font: &dyn Font<S::Outline>, font_size: f32, t
     let bbox = font.bbox().expect("no bbox");
     let last_p = match glyphs.last() {
         Some((_, p)) => p,
-        _ => return S::new(Vector::default())
+        _ => return Scene::new()
     };
-    let origin = Vector::new(0., -bbox.origin().y());
+    let origin = Vector2F::new(0., -bbox.origin().y());
     let width = (last_p.x() + bbox.size().x()) * font.font_matrix().m11();
     let height = bbox.size().y() * font.font_matrix().m22();
-    let mut surface = S::new(Vector::new(width * font_size, font_size * height));
+    let mut surface = Scene::new();
     
-    let tr = Transform::from_scale(Vector::splat(font_size))
-            * Transform::from_translation(Vector::new(0., height))
-            * Transform::from_scale(Vector::new(1.0, -1.0))
+    let tr = Transform2F::from_scale(Vector2F::splat(font_size))
+            * Transform2F::from_translation(Vector2F::new(0., height))
+            * Transform2F::from_scale(Vector2F::new(1.0, -1.0))
             * font.font_matrix();
     
-    if let Some(style) = baseline {
-        let style = surface.build_style(style);
-        let mut p = PathBuilder::new();
-        p.move_to(origin);
-        p.line_to(origin + offset);
-        let o: S::Outline = p.into_outline();
-        surface.draw_path(o.transform(tr), &style, None);
-    }
-    let style = surface.build_style(style);
+    let paint = surface.push_paint(&Paint::from_color(ColorU::black()));
     for (glyph, p) in glyphs {
-        let transform = tr * Transform::from_translation(p + origin);
-        surface.draw_path(glyph.path.transform(transform), &style, None);
+        let transform = tr * Transform2F::from_translation(p + origin);
+        match glyph {
+            Glyph::Simple(mut path) => {
+                path.transform(&transform);
+                let mut draw_path = DrawPath::new(path, paint);
+                surface.push_path(draw_path);
+            }
+            Glyph::Complex(scene) => {
+                let mut scene = scene.clone();
+                scene.transform(&tr);
+                surface.append_scene(scene);
+            }
+        }
     }
     
     surface

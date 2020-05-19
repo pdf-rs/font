@@ -19,22 +19,24 @@ use nom::{
     sequence::tuple,
 };
 use tuple::T4;
-use vector::{Outline, Transform, Rect, Vector};
+use pathfinder_builder::{Outline, Transform2F, RectF, Vector2F};
 use itertools::{Either};
-
+use crate::svg::{Svg, parse_svg};
+use pathfinder_renderer::scene::Scene;
 
 #[derive(Clone)]
-pub struct OpenTypeFont<O: Outline> {
-    outlines: Vec<O>,
+pub struct OpenTypeFont {
+    outlines: Vec<Outline>,
     kern: KernTable,
     cmap: Option<CMap>,
     hmtx: Option<Hmtx>,
-    bbox: Option<Rect>,
+    bbox: Option<RectF>,
     gsub: Option<Gsub>,
     math: Option<MathHeader>,
-    font_matrix: Transform
+    svg:  Option<Svg>,
+    font_matrix: Transform2F,
 }
-impl<O: Outline> OpenTypeFont<O> {
+impl OpenTypeFont {
     pub fn parse(data: &[u8]) -> Self {
         let tables = parse_tables(data).get();
         for (tag, _) in tables.entries() {
@@ -43,17 +45,18 @@ impl<O: Outline> OpenTypeFont<O> {
         
         OpenTypeFont::from_tables(tables)
     }
-    pub fn from_hmtx_glyf_and_tables(hmtx: Option<Hmtx>, glyf: Option<Vec<Shape<O>>>, tables: Tables<impl Deref<Target=[u8]>>) -> Self {
+
+    pub fn from_hmtx_glyf_and_tables(hmtx: Option<Hmtx>, glyf: Option<Vec<Shape>>, tables: Tables<impl Deref<Target=[u8]>>) -> Self {
         let (outlines, font_matrix, bbox) = match glyf {
             Some(shapes) => {
                 let head = parse_head(tables.get(b"head").expect("no head")).get();
                 let bbox = head.bbox();
                 let outlines = (0 .. shapes.len()).filter_map(|idx| get_outline(&shapes, idx as u32)).collect();
-                let font_matrix = Transform::from_scale(Vector::splat(1.0 / head.units_per_em as f32));
+                let font_matrix = Transform2F::from_scale(Vector2F::splat(1.0 / head.units_per_em as f32));
                 (outlines, font_matrix, Some(bbox))
             },
             None => {
-                let cff = tables.get(b"CFF ").expect("neither glyf nor CFF tables … might be SVG");
+                let cff = tables.get(b"CFF ").expect("neither glyf nor CFF tables found");
                 let slot = read_cff(cff).get().slot(0);
                 let bbox = slot.bbox();
                 let outlines = slot.outlines().map(|(outline, _, _)| outline).collect();
@@ -61,6 +64,8 @@ impl<O: Outline> OpenTypeFont<O> {
                 (outlines, font_matrix, bbox)
             }
         };
+
+        let svg = tables.get(b"SVG ").map(|data| parse_svg(data).unwrap().1);
         
         let kern = if let Some(data) = tables.get(b"GPOS") {
             let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
@@ -87,6 +92,7 @@ impl<O: Outline> OpenTypeFont<O> {
             bbox,
             gsub,
             math,
+            svg,
             font_matrix
         }
     }
@@ -108,20 +114,23 @@ impl<O: Outline> OpenTypeFont<O> {
         self.hmtx.as_ref().map(|hmtx| hmtx.metrics_for_gid(gid))
     }
 }
-impl<O: Outline + 'static> Font<O> for OpenTypeFont<O> {
+impl Font for OpenTypeFont {
     fn num_glyphs(&self) -> u32 {
         self.outlines.len() as u32
     }
-    fn font_matrix(&self) -> Transform {
+    fn font_matrix(&self) -> Transform2F {
         self.font_matrix
     }
-    fn glyph(&self, gid: GlyphId) -> Option<Glyph<O>> {
+    fn glyph(&self, gid: GlyphId) -> Option<Glyph> {
         self.outlines.get(gid.0 as usize).map(|outline| {
             Glyph {
                 path: outline.clone(),
                 metrics: self.hmtx.as_ref().map(|m| m.metrics_for_gid(gid.0 as u16)).unwrap_or_default()
             }
         })
+    }
+    fn svg_glyph(&self, gid: GlyphId) -> Option<&Scene> {
+        self.svg.as_ref().and_then(|svg| svg.glyphs.get(&(gid.0 as u16)))
     }
     fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
         self.gid_for_unicode_codepoint(codepoint)
@@ -138,7 +147,7 @@ impl<O: Outline + 'static> Font<O> for OpenTypeFont<O> {
     fn encoding(&self) -> Option<Encoding> {
         None
     }
-    fn bbox(&self) -> Option<Rect> {
+    fn bbox(&self) -> Option<RectF> {
         self.bbox
     }
     fn vmetrics(&self) -> Option<VMetrics> {
@@ -206,10 +215,10 @@ pub struct Head {
     pub y_max: i16,
 }
 impl Head {
-    pub fn bbox(&self) -> Rect {
-        let bb_min = Vector::new(self.x_min as f32, self.y_min as f32);
-        let bb_max = Vector::new(self.x_max as f32, self.y_max as f32);
-        Rect::from_points(bb_min, bb_max)
+    pub fn bbox(&self) -> RectF {
+        let bb_min = Vector2F::new(self.x_min as f32, self.y_min as f32);
+        let bb_max = Vector2F::new(self.x_max as f32, self.y_max as f32);
+        RectF::from_points(bb_min, bb_max)
     }
 }
 pub fn parse_head(i: &[u8]) -> R<Head> {
@@ -463,8 +472,8 @@ impl Hmtx {
             (self.last_advance, self.lsbs.get(gid as usize - self.metrics.len()).cloned().unwrap_or(0))
         });
         HMetrics {
-            advance: Vector::new(advance as f32, 0.0),
-            lsb: Vector::new(lsb as f32, 0.0)
+            advance: Vector2F::new(advance as f32, 0.0),
+            lsb: Vector2F::new(lsb as f32, 0.0)
         }
     }
 }

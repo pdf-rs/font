@@ -8,30 +8,30 @@ use nom::{
     bytes::complete::take,
     sequence::tuple
 };
-use vector::{Outline, Contour, Transform, Vector, Rect};
+use pathfinder_builder::{Outline, Contour, Transform2F, RectF, Vector2F};
 use crate::opentype::{parse_tables, parse_head, parse_maxp, parse_loca, parse_cmap, parse_hhea, parse_hmtx, parse_kern, Hmtx, Tables, CMap};
 use crate::gpos::KernTable;
 use pathfinder_geometry::{transform2d::Matrix2x2F};
 use itertools::Itertools;
 
 #[derive(Clone)]
-pub enum Shape<O: Outline> {
-    Simple(O),
-    Compound(Vec<(u32, Transform)>),
+pub enum Shape {
+    Simple(Outline),
+    Compound(Vec<(u32, Transform2F)>),
     Empty
 }
 
 #[derive(Clone)]
-pub struct TrueTypeFont<O: Outline> {
-    shapes: Vec<Shape<O>>,
+pub struct TrueTypeFont {
+    shapes: Vec<Shape>,
     cmap: Option<CMap>,
     hmtx: Hmtx,
     units_per_em: u16,
-    bbox: Rect,
+    bbox: RectF,
     kern: KernTable,
 }
 
-impl<O: Outline> TrueTypeFont<O> {
+impl TrueTypeFont {
     pub fn parse(data: &[u8]) -> Self {
         let tables = parse_tables(data).get();
         TrueTypeFont::parse_glyf(tables)
@@ -47,7 +47,7 @@ impl<O: Outline> TrueTypeFont<O> {
         
         TrueTypeFont::from_shapes_and_metrics(tables, shapes, hmtx)
     }
-    pub fn from_shapes_and_metrics(tables: Tables<impl Deref<Target=[u8]>>, shapes: Vec<Shape<O>>, hmtx: Hmtx) -> TrueTypeFont<O> {
+    pub fn from_shapes_and_metrics(tables: Tables<impl Deref<Target=[u8]>>, shapes: Vec<Shape>, hmtx: Hmtx) -> TrueTypeFont {
         let head = parse_head(tables.get(b"head").expect("no head")).get();
         let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
         
@@ -60,19 +60,19 @@ impl<O: Outline> TrueTypeFont<O> {
             kern: tables.get(b"kern").map(|data| parse_kern(data).get()).unwrap_or_default()
         }
     }
-    fn get_path(&self, idx: u32) -> Option<O> {
+    fn get_path(&self, idx: u32) -> Option<Outline> {
         get_outline(&self.shapes, idx)
     }
 }
-impl<O: Outline + 'static> Font<O> for TrueTypeFont<O> {
+impl Font for TrueTypeFont {
     fn num_glyphs(&self) -> u32 {
         self.shapes.len() as u32
     }
-    fn font_matrix(&self) -> Transform {
+    fn font_matrix(&self) -> Transform2F {
         let scale = 1.0 / self.units_per_em as f32;
-        Transform::from_scale(Vector::splat(scale.into()))
+        Transform2F::from_scale(Vector2F::splat(scale.into()))
     }
-    fn glyph(&self, id: GlyphId) -> Option<Glyph<O>> {
+    fn glyph(&self, id: GlyphId) -> Option<Glyph> {
         assert!(id.0 <= u16::max_value() as u32);
         debug!("get gid {:?}", id);
         let path = self.get_path(id.0)?;
@@ -96,7 +96,7 @@ impl<O: Outline + 'static> Font<O> for TrueTypeFont<O> {
     fn encoding(&self) -> Option<Encoding> {
         Some(Encoding::Unicode)
     }
-    fn bbox(&self) -> Option<Rect> {
+    fn bbox(&self) -> Option<RectF> {
         Some(self.bbox)
     }
     fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
@@ -108,16 +108,16 @@ impl<O: Outline + 'static> Font<O> for TrueTypeFont<O> {
 }
 
 #[inline]
-fn vec_i8(i: &[u8]) -> R<Vector> {
+fn vec_i8(i: &[u8]) -> R<Vector2F> {
     let (i, x) = be_i8(i)?;
     let (i, y) = be_i8(i)?;
-    Ok((i, Vector::new(x as f32, y as f32)))
+    Ok((i, Vector2F::new(x as f32, y as f32)))
 }
 #[inline]
-fn vec_i16(i: &[u8]) -> R<Vector> {
+fn vec_i16(i: &[u8]) -> R<Vector2F> {
     let (i, x) = be_i16(i)?;
     let (i, y) = be_i16(i)?;
-    Ok((i, Vector::new(x as f32, y as f32)))
+    Ok((i, Vector2F::new(x as f32, y as f32)))
 }
 #[inline]
 fn fraction_i16(i: &[u8]) -> R<f32> {
@@ -125,7 +125,7 @@ fn fraction_i16(i: &[u8]) -> R<f32> {
     Ok((i, s as f32 / 16384.0))
 }
 
-pub fn parse_shapes<O: Outline>(loca: &[u32], data: &[u8]) -> Vec<Shape<O>> {
+pub fn parse_shapes(loca: &[u32], data: &[u8]) -> Vec<Shape> {
     let mut shapes = Vec::with_capacity(loca.len() - 1);
     for (i, (start, end)) in loca.iter().cloned().tuple_windows().enumerate() {
         let slice = &data[start as usize .. end as usize];
@@ -137,7 +137,7 @@ pub fn parse_shapes<O: Outline>(loca: &[u32], data: &[u8]) -> Vec<Shape<O>> {
 }
 // the following code is borrowed from stb-truetype and modified heavily
 
-fn parse_glyph_shape<O: Outline>(data: &[u8]) -> R<Shape<O>> {
+fn parse_glyph_shape(data: &[u8]) -> R<Shape> {
     if data.len() == 0 {
         debug!("empty glyph");
         return Ok((data, Shape::Empty));
@@ -154,12 +154,12 @@ fn parse_glyph_shape<O: Outline>(data: &[u8]) -> R<Shape<O>> {
     }
 }
 
-pub fn compound<O: Outline>(mut input: &[u8]) -> R<Shape<O>> {
+pub fn compound(mut input: &[u8]) -> R<Shape> {
     // Compound shapes
     let mut parts = Vec::new();
     loop {
         let (flags, gidx) = parse(&mut input, tuple((be_u16, be_u16)))?;
-        let mut transform = Transform::default();
+        let mut transform = Transform2F::default();
         if flags & 2 != 0 {
             // XY values
             if flags & 1 != 0 {
@@ -174,11 +174,11 @@ pub fn compound<O: Outline>(mut input: &[u8]) -> R<Shape<O>> {
         if flags & (1 << 3) != 0 {
             // WE_HAVE_A_SCALE
             let scale = parse(&mut input, fraction_i16)?;
-            transform.matrix = Matrix2x2F::from_scale(Vector::splat(scale));
+            transform.matrix = Matrix2x2F::from_scale(Vector2F::splat(scale));
         } else if flags & (1 << 6) != 0 {
             // WE_HAVE_AN_X_AND_YSCALE
             let (sx, sy) = parse(&mut input, tuple((fraction_i16, fraction_i16)))?;
-            let s = Vector::new(sx, sy);
+            let s = Vector2F::new(sx, sy);
             transform.matrix = Matrix2x2F::from_scale(s);
         } else if flags & (1 << 7) != 0 {
             // WE_HAVE_A_TWO_BY_TWO
@@ -196,19 +196,21 @@ pub fn compound<O: Outline>(mut input: &[u8]) -> R<Shape<O>> {
     Ok((input, Shape::Compound(parts)))
 }
 
-pub fn get_outline<O: Outline>(shapes: &[Shape<O>], idx: u32) -> Option<O> {
+pub fn get_outline(shapes: &[Shape], idx: u32) -> Option<Outline> {
     match shapes.get(idx as usize)? {
         &Shape::Simple(ref path) => Some(path.clone()),
         &Shape::Compound(ref parts) => {
-            let mut outline = O::empty();
+            let mut outline = Outline::new();
             for &(gid, tr) in parts {
                 if let Some(Shape::Simple(ref path)) = shapes.get(gid as usize) {
-                    outline.add_outline(path.clone().transform(tr));
+                    let mut path = path.clone();
+                    path.transform(&tr);
+                    outline.merge(path);
                 }
             }
             Some(outline)
         }
-        &Shape::Empty => Some(O::empty())
+        &Shape::Empty => Some(Outline::new())
     }
 }
 
@@ -234,10 +236,10 @@ fn parse_coord(short: bool, same_or_pos: bool) -> impl Fn(&[u8]) -> R<i16> {
         (false, true) => Ok((i, 0))
     }
 }
-fn mid(a: Vector, b: Vector) -> Vector {
-    (a + b) * Vector::splat(0.5)
+fn mid(a: Vector2F, b: Vector2F) -> Vector2F {
+    (a + b) * 0.5
 }
-fn glyph_shape_positive_contours<O: Outline>(i: &[u8], number_of_contours: usize) -> R<Shape<O>> {
+fn glyph_shape_positive_contours(i: &[u8], number_of_contours: usize) -> R<Shape> {
     let (i, point_indices) = take(2 * number_of_contours)(i)?;
     let (i, num_instructions) = be_u16(i)?;
     let (mut i, _instructions) = take(num_instructions)(i)?;
@@ -277,23 +279,23 @@ fn glyph_shape_positive_contours<O: Outline>(i: &[u8], number_of_contours: usize
     }
 
     let mut points = flag_data.iter().map(|&FlagData { flags, p }| 
-        (flags & 1 != 0, Vector::new(p.0 as f32, p.1 as f32))
+        (flags & 1 != 0, Vector2F::new(p.0 as f32, p.1 as f32))
     );
     let mut start = 0;
-    let mut outline = O::empty();
+    let mut outline = Outline::new();
     for end in iterator(point_indices, be_u16) {
         let n_points = end + 1 - start;
         start += n_points;
         
         if let Some(contour) = contour((&mut points).take(n_points as usize)) {
-            outline.add_contour(contour);
+            outline.push_contour(contour);
         }
     }
     
     Ok((i, Shape::Simple(outline)))
 }
 
-pub fn contour<C: Contour>(points: impl Iterator<Item=(bool, Vector)>) -> Option<C> {
+pub fn contour(points: impl Iterator<Item=(bool, Vector2F)>) -> Option<Contour> {
     let mut points = points.peekable();
     
     let (start_on, p) = points.next().unwrap();
@@ -325,8 +327,8 @@ pub fn contour<C: Contour>(points: impl Iterator<Item=(bool, Vector)>) -> Option
         (p, None)
     };
     
-    let mut contour = C::new();
-    contour.move_to(s);
+    let mut contour = Contour::new();
+    contour.push_endpoint(s);
     
     let mut c = None;
     for (on_curve, p) in points {
@@ -335,28 +337,28 @@ pub fn contour<C: Contour>(points: impl Iterator<Item=(bool, Vector)>) -> Option
             if let Some(c) = c {
                 // two off-curve control points in a row means interpolate an on-curve
                 // midpoint
-                contour.quadratic_curve_to(c, mid(c, p));
+                contour.push_quadratic(c, mid(c, p));
             }
             c = Some(p);
         } else {
             if let Some(c) = c.take() {
-                contour.quadratic_curve_to(c, p);
+                contour.push_quadratic(c, p);
             } else {
-                contour.line_to(p);
+                contour.push_endpoint(p);
             }
         }
     }
     
     if let Some(sc) = sc {
         if let Some(c) = c {
-            contour.quadratic_curve_to(c, mid(c, sc));
+            contour.push_quadratic(c, mid(c, sc));
         }
-        contour.quadratic_curve_to(sc, s);
+        contour.push_quadratic(sc, s);
     } else {
         if let Some(c) = c {
-            contour.quadratic_curve_to(c, s);
+            contour.push_quadratic(c, s);
         } else {
-            contour.line_to(s);
+            contour.push_endpoint(s);
         }
     }
 
