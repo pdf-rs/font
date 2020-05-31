@@ -171,7 +171,11 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             12 => {
                 let (i, b1) = be_u8(i)?;
                 match b1 {
-                    0 | 1 | 2 => panic!("reserved"),
+                    0 => { // dotsection (NOOP)
+                        s.stack.clear();
+                        i
+                    }
+                    1 | 2 => panic!("reserved: 12 {}", b1),
                     3 => unimplemented!("and"),
                     4 => unimplemented!("or"),
                     5 => unimplemented!("not"),
