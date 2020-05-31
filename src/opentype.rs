@@ -21,7 +21,11 @@ use nom::{
 use tuple::T4;
 use pathfinder_builder::{Outline, Transform2F, RectF, Vector2F};
 use itertools::{Either};
+
+#[cfg(feature="svg")]
 use crate::svg::{Svg, parse_svg};
+
+#[cfg(feature="svg")]
 use pathfinder_renderer::scene::Scene;
 
 #[derive(Clone)]
@@ -33,7 +37,10 @@ pub struct OpenTypeFont {
     bbox: Option<RectF>,
     gsub: Option<Gsub>,
     math: Option<MathHeader>,
+
+    #[cfg(feature="svg")]
     svg:  Option<Svg>,
+
     font_matrix: Transform2F,
 }
 impl OpenTypeFont {
@@ -65,6 +72,7 @@ impl OpenTypeFont {
             }
         };
 
+        #[cfg(feature="svg")]
         let svg = tables.get(b"SVG ").map(|data| parse_svg(data).unwrap().1);
         
         let kern = if let Some(data) = tables.get(b"GPOS") {
@@ -92,7 +100,10 @@ impl OpenTypeFont {
             bbox,
             gsub,
             math,
+
+            #[cfg(feature="svg")]
             svg,
+
             font_matrix
         }
     }
@@ -129,6 +140,8 @@ impl Font for OpenTypeFont {
             }
         })
     }
+
+    #[cfg(feature="svg")]
     fn svg_glyph(&self, gid: GlyphId) -> Option<&Scene> {
         self.svg.as_ref().and_then(|svg| svg.glyphs.get(&(gid.0 as u16)))
     }

@@ -11,7 +11,10 @@ use encoding::Encoding;
 use crate::gsub::Gsub;
 use crate::opentype::CMap;
 use pathfinder_content::outline::Outline;
+
+#[cfg(feature="svg")]
 use pathfinder_renderer::scene::Scene;
+
 use pathfinder_geometry::{rect::RectF, vector::Vector2F, transform2d::Transform2F};
 use pathfinder_builder::PathBuilder;
 
@@ -51,6 +54,7 @@ pub trait Font: 'static {
     /// Note, that a *gid* is only meaningful within one font and cannot be transfered to another font.
     fn glyph(&self, gid: GlyphId) -> Option<Glyph>;
     
+    #[cfg(feature="svg")]
     fn svg_glyph(&self, gid: GlyphId) -> Option<&Scene> {
         None
     }
@@ -154,6 +158,8 @@ mod eexec;
 mod woff;
 mod gpos;
 mod gsub;
+
+#[cfg(feature="svg")]
 mod svg;
 
 pub mod math;

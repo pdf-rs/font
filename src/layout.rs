@@ -11,6 +11,33 @@ enum Glyph<'a> {
     Complex(&'a Scene)
 }
 
+struct SuperFont {
+    fonts: Vec<Box<dyn Font>>
+}
+struct Grapheme<'a> {
+    font: &'a dyn Font,
+    gid: u32,
+    advance: Vector2F
+}
+/*
+impl SuperFont {
+    pub fn new(fonts: Vec<Box<dyn Font>>) -> SuperFont {
+        SuperFont { fonts }
+    }
+    pub fn shape(&self, text: &str) {
+        let mut current_font = &self.fonts[0]:
+        let mut remaining = text;
+        let mut done = Vec::new();
+        loop {
+
+            // keep going
+            let mut chars = remaining.chars();
+            for c in chars {
+                if let Some(gid) = 
+            }
+        }
+}*/
+
 pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
     let mut last_gid = None;
     let mut offset = Vector2F::default();
@@ -45,10 +72,12 @@ pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
             let p = offset;
             offset = offset + glyph.metrics.advance;
 
+            #[cfg(feature="svg")]
             let glyph = match font.svg_glyph(gid) {
                 None => Glyph::Simple(glyph.path),
                 Some(scene) => Glyph::Complex(scene)
             };
+
             (glyph, p)
         })
         .collect();
@@ -71,10 +100,11 @@ pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
     let paint = surface.push_paint(&Paint::from_color(ColorU::black()));
     for (glyph, p) in glyphs {
         let transform = tr * Transform2F::from_translation(p + origin);
+        #[cfg(feature="svg")]
         match glyph {
             Glyph::Simple(mut path) => {
                 path.transform(&transform);
-                let mut draw_path = DrawPath::new(path, paint);
+                let draw_path = DrawPath::new(path, paint);
                 surface.push_path(draw_path);
             }
             Glyph::Complex(scene) => {
@@ -82,6 +112,13 @@ pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
                 scene.transform(&tr);
                 surface.append_scene(scene);
             }
+        }
+        #[cfg(not(feature="svg"))]
+        {
+            let mut path = glyph.path;
+            path.transform(&transform);
+            let draw_path = DrawPath::new(path, paint);
+            surface.push_path(draw_path);
         }
     }
     

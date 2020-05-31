@@ -39,8 +39,20 @@ fn read_document_list(input: &[u8]) -> R<Svg> {
         data = i;
 
         let svg_data = &input[data_offset as usize .. data_offset as usize + data_len as usize];
-        let svg = Tree::from_data(svg_data, &Options::default())
-        .map_err(|e| Failure(make_error(svg_data, ErrorKind::Verify)))?;
+        { // DEBUG
+            use std::io::Write;
+            let stdout = std::io::stdout();
+            let mut stdout = stdout.lock();
+            stdout.write_all(svg_data).unwrap();
+            stdout.write(b"\n").unwrap();
+            stdout.flush().unwrap();
+        }
+        let svg = match Tree::from_data(svg_data, &Options::default()) {
+            Ok(tree) => tree,
+            Err(e) => {
+                panic!("SVG error: {:?}", e)
+            }
+        };
         for gid in start_gid ..= end_gid {
             let glyph_id = format!("glyph{}", gid);
             let node = svg.node_by_id(&glyph_id).unwrap();
