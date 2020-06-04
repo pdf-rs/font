@@ -93,10 +93,11 @@ impl Type1Font {
         
         let char_strings = font_dict.get("CharStrings").expect("no /CharStrings").as_dict().unwrap();
         
-        let subrs: Vec<Vec<u8>> = private_dict.get("Subrs").expect("no /Subrs")
-            .as_array().unwrap().iter()
+        let subrs: Vec<Vec<u8>> = private_dict.get("Subrs").map(|subrs|
+            subrs.as_array().unwrap().iter()
             .map(|item| Decoder::charstring().decode(item.as_bytes().unwrap(), len_iv).into())
-            .collect();
+            .collect()
+        ).unwrap_or_default();
         
         let context = Context {
             subr_bias: 0,

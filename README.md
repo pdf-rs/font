@@ -24,7 +24,7 @@
 
 ### OpenType
 - The `glyf` (TrueType) and `CFF ` (Type1) outlines are supported.
-- `SVG ` outlines are not implemented yet, so emoticon fonts do not work.
+- `SVG ` outlines are supported.
 - Most of the `CMAP` formats are implemented.
 - Kerning using the `kern` and `GPOS` table is implemented.
 
@@ -34,21 +34,6 @@
 ## API
 NOTE: The code may change a bit. Especially multi-codepoint glyphs cannot be looked up yet.
 Fonts are loaded with `parse`, which returns a trait object.
-	
-    pub trait Font<O: Outline> {
-	    fn num_glyphs(&self) -> u32;
-	    fn font_matrix(&self) -> Transform;
-	    fn glyph(&self, gid: u32) -> Option<Glyph<O>>;
-	    fn glyphs(&self) -> Glyphs<O>;
-	    fn gid_for_codepoint(&self, _codepoint: u32) -> Option<u32>;
-	    fn gid_for_name(&self, _name: &str) -> Option<u32>;
-	    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<u32>;
-	    fn encoding(&self) -> Option<Encoding>;
-	    fn get_notdef_gid(&self) -> u32;
-	    fn bbox(&self) -> Option<Rect>;
-	    fn vmetrics(&self) -> Option<VMetrics>;
-	    fn kerning(&self, left: u32, right: u32) -> f32;
-    }
 
 ## Demo
 [You can try it out here](https://s3bk.github.io/font_wasm/)
