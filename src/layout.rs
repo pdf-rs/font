@@ -105,7 +105,7 @@ pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
             Glyph::Simple(mut path) => {
                 path.transform(&transform);
                 let draw_path = DrawPath::new(path, paint);
-                surface.push_path(draw_path);
+                surface.push_draw_path(draw_path);
             }
             Glyph::Complex(scene) => {
                 let mut scene = scene.clone();
@@ -118,7 +118,7 @@ pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
             let mut path = glyph.path;
             path.transform(&transform);
             let draw_path = DrawPath::new(path, paint);
-            surface.push_path(draw_path);
+            surface.push_draw_path(draw_path);
         }
     }
     
