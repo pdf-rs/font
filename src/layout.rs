@@ -50,7 +50,7 @@ pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
             pos += 1;
             if let Some(subs) = gsub.substitutions(first) {
             for (sub, glyph) in subs {
-                    if let Some(len) = sub.matches(&gids[pos ..]) {
+                    if let Some(len) = sub.matches(gids[pos ..].iter().cloned()) {
                         substituted_gids.push(glyph);
                         pos += len;
                         continue 'a;

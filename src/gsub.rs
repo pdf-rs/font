@@ -10,11 +10,14 @@ use crate::opentype::{parse_lookup_list, coverage_table};
 #[derive(Debug, Clone)]
 pub struct GlyphList(Vec<u16>);
 impl GlyphList {
-    pub fn matches(&self, glyphs: &[GlyphId]) -> Option<usize> {
-        if self.0.len() <= glyphs.len() && self.0.iter().zip(glyphs).all(|(&a, &b)| a as u32 == b.0) {
-            return Some(self.0.len())
+    pub fn matches(&self, mut glyphs: impl Iterator<Item=GlyphId>) -> Option<usize> {
+        for &a in &self.0 {
+            match glyphs.next() {
+                Some(b) if a as u32 == b.0 => continue,
+                _ => return None
+            }
         }
-        None
+        Some(self.0.len())
     }
 }
 
