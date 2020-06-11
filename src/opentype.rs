@@ -3,7 +3,7 @@
 use std::convert::TryInto;
 use std::collections::HashMap;
 use std::ops::Deref;
-use crate::{Font, R, IResultExt, VMetrics, Glyph, HMetrics, GlyphId};
+use crate::{Font, R, IResultExt, VMetrics, HMetrics, Glyph, GlyphId};
 use crate::truetype::{Shape, parse_shapes, get_outline};
 use crate::cff::{read_cff};
 use crate::gpos::{parse_gpos, KernTable};
@@ -37,6 +37,7 @@ pub struct OpenTypeFont {
     bbox: Option<RectF>,
     gsub: Option<Gsub>,
     math: Option<MathHeader>,
+    vmetrics: Option<VMetrics>,
 
     #[cfg(feature="svg")]
     svg:  Option<Svg>,
@@ -91,6 +92,7 @@ impl OpenTypeFont {
 
         let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
         let math = tables.get(b"MATH").map(|data| parse_math(data).get());
+        let vmetrics = tables.get(b"hhea").map(|data| parse_hhea(data).get().into());
         
         OpenTypeFont {
             outlines,
@@ -100,6 +102,7 @@ impl OpenTypeFont {
             bbox,
             gsub,
             math,
+            vmetrics,
 
             #[cfg(feature="svg")]
             svg,
@@ -444,14 +447,16 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
 }
 
 pub struct Hhea {
-    pub line_gap: i16,
+    line_gap: i16,
+    ascender: i16,
+    descender: i16,
     number_of_hmetrics: u16 
 }
 pub fn parse_hhea(i: &[u8]) -> R<Hhea> {
     let (i, _majorVersion) = be_u16(i)?;
     let (i, _minorVersion) = be_u16(i)?;
-    let (i, _ascender) = be_i16(i)?;
-    let (i, _descender) = be_i16(i)?;
+    let (i, ascender) = be_i16(i)?;
+    let (i, descender) = be_i16(i)?;
     let (i, line_gap) = be_i16(i)?;
     let (i, _advanceWidthMax) = be_u16(i)?;
     let (i, _minLeftSideBearing) = be_i16(i)?;
@@ -470,8 +475,19 @@ pub fn parse_hhea(i: &[u8]) -> R<Hhea> {
     
     Ok((i, Hhea {
         line_gap,
+        ascender,
+        descender,
         number_of_hmetrics
     }))
+}
+impl Into<VMetrics> for Hhea {
+    fn into(self) -> VMetrics {
+        VMetrics {
+            line_gap: self.line_gap as f32,
+            ascent: self.ascender as f32,
+            descent: self.descender as f32,
+        }
+    }
 }
 #[derive(Clone)]
 pub struct Hmtx {
@@ -531,6 +547,18 @@ pub fn parse_hmtx_woff2_format1<'a>(i: &'a [u8], head: &Head, hhea: &Hhea, maxp:
         metrics,
         lsbs,
         last_advance
+    }))
+}
+
+pub fn parse_vhea(i: &[u8]) -> R<VMetrics> {
+    let (i, _version) = be_u16(i)?;
+    let (i, ascent) = be_i16(i)?;
+    let (i, descent) = be_i16(i)?;
+    let (i, line_gap) = be_i16(i)?;
+    Ok((i, VMetrics {
+        ascent: ascent as f32,
+        descent: descent as f32,
+        line_gap: line_gap as f32,
     }))
 }
 

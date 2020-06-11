@@ -32,7 +32,9 @@ pub struct GlyphId(pub u32);
 
 #[derive(Copy, Clone)]
 pub struct VMetrics {
-    pub line_gap: f32
+    pub line_gap: f32,
+    pub ascent: f32,
+    pub descent: f32,
 }
 #[derive(Copy, Clone, Default)]
 pub struct HMetrics {
