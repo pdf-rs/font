@@ -13,7 +13,7 @@ use crate::opentype::CMap;
 use pathfinder_content::outline::Outline;
 
 #[cfg(feature="svg")]
-use pathfinder_renderer::scene::Scene;
+pub use svg::SvgGlyph;
 
 use pathfinder_geometry::{rect::RectF, vector::Vector2F, transform2d::Transform2F};
 use pathfinder_builder::PathBuilder;
@@ -57,7 +57,7 @@ pub trait Font: 'static {
     fn glyph(&self, gid: GlyphId) -> Option<Glyph>;
     
     #[cfg(feature="svg")]
-    fn svg_glyph(&self, gid: GlyphId) -> Option<&Scene> {
+    fn svg_glyph(&self, gid: GlyphId) -> Option<&SvgGlyph> {
         None
     }
 

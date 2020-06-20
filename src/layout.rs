@@ -6,9 +6,17 @@ use pathfinder_renderer::{
 };
 use pathfinder_color::ColorU;
 
+#[cfg(feature="svg")]
+use crate::SvgGlyph;
+
+#[cfg(feature="svg")]
 enum Glyph<'a> {
     Simple(Outline),
-    Complex(&'a Scene)
+    Complex(&'a SvgGlyph)
+}
+#[cfg(not(feature="svg"))]
+enum Glyph {
+    Simple(Outline),
 }
 
 struct SuperFont {
@@ -75,7 +83,7 @@ pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
             #[cfg(feature="svg")]
             let glyph = match font.svg_glyph(gid) {
                 None => Glyph::Simple(glyph.path),
-                Some(scene) => Glyph::Complex(scene)
+                Some(svg) => Glyph::Complex(svg)
             };
 
             (glyph, p)
@@ -90,27 +98,28 @@ pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
     let origin = Vector2F::new(0., -bbox.origin().y());
     let width = (last_p.x() + bbox.size().x()) * font.font_matrix().m11();
     let height = bbox.size().y() * font.font_matrix().m22();
-    let mut surface = Scene::new();
+    let mut scene = Scene::new();
     
     let tr = Transform2F::from_scale(Vector2F::splat(font_size))
-            * Transform2F::from_translation(Vector2F::new(0., height))
-            * Transform2F::from_scale(Vector2F::new(1.0, -1.0))
-            * font.font_matrix();
-    
-    let paint = surface.push_paint(&Paint::from_color(ColorU::black()));
+        * Transform2F::from_translation(Vector2F::new(0., height))
+        * Transform2F::from_scale(Vector2F::new(1.0, -1.0))
+        * font.font_matrix();
+
+    let paint = scene.push_paint(&Paint::from_color(ColorU::black()));
     for (glyph, p) in glyphs {
         let transform = tr * Transform2F::from_translation(p + origin);
+
         #[cfg(feature="svg")]
-        match glyph {
-            Glyph::Simple(mut path) => {
-                path.transform(&transform);
-                let draw_path = DrawPath::new(path, paint);
-                surface.push_draw_path(draw_path);
-            }
-            Glyph::Complex(scene) => {
-                let mut scene = scene.clone();
-                scene.transform(&tr);
-                surface.append_scene(scene);
+        {
+            match glyph {
+                Glyph::Simple(mut path) => {
+                    path.transform(&transform);
+                    let draw_path = DrawPath::new(path, paint);
+                    scene.push_draw_path(draw_path);
+                }
+                Glyph::Complex(glyph) => {
+                    glyph.draw_to(&mut scene, transform);
+                }
             }
         }
         #[cfg(not(feature="svg"))]
@@ -118,11 +127,11 @@ pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
             let mut path = glyph.path;
             path.transform(&transform);
             let draw_path = DrawPath::new(path, paint);
-            surface.push_draw_path(draw_path);
+            scene.push_draw_path(draw_path);
         }
     }
     
-    surface
+    scene
 }
 
 /*

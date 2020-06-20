@@ -7,7 +7,7 @@ edition = "2018"
 [features]
 unstable = ["slotmap/unstable", "tuple/nightly"]
 tools = ["env_logger", "pathfinder_export"]
-svg = ["pathfinder_svg", "usvg"]
+svg = ["pathfinder_svg"]
 
 [dependencies]
 encoding = { git = "https://github.com/pdf-rs/encoding/" }
@@ -15,7 +15,6 @@ pathfinder_geometry = { git = "https://github.com/s3bk/pathfinder/" }
 pathfinder_content = { git = "https://github.com/s3bk/pathfinder/" }
 pathfinder_color = { git = "https://github.com/s3bk/pathfinder/" }
 pathfinder_renderer = { git = "https://github.com/s3bk/pathfinder/" }
-pathfinder_svg = { git = "https://github.com/s3bk/pathfinder/", optional=true }
 pathfinder_builder = { git = "https://github.com/s3bk/pathfinder/" }
 pathfinder_export = { git = "https://github.com/s3bk/pathfinder/", optional=true }
 tuple = { git = "https://github.com/s3bk/tuple/" }
@@ -30,7 +29,7 @@ brotli-decompressor = "2.3.0"
 inflate = "0.4.5"
 walkdir = "2.2.9"
 env_logger = { version = "*", optional=true }
-usvg = { version = "0.9", default-features=false, optional=true }
+pathfinder_svg = { git = "https://github.com/s3bk/pathfinder_svg/", optional=true }
 
 [[bin]]
 name = "font2svg"
@@ -43,6 +42,3 @@ required-features = ["tools"]
 [[bin]]
 name = "render_text"
 required-features = ["tools"]
-
-[path.crates-io]
-usvg = { path = "../resvg/usvg" }

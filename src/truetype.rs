@@ -8,7 +8,8 @@ use nom::{
     bytes::complete::take,
     sequence::tuple
 };
-use pathfinder_builder::{Outline, Contour, Transform2F, RectF, Vector2F};
+use pathfinder_content::outline::{Outline, Contour};
+use pathfinder_geometry::{vector::Vector2F, transform2d::Transform2F, rect::RectF};
 use crate::opentype::{parse_tables, parse_head, parse_maxp, parse_loca, parse_cmap, parse_hhea, parse_hmtx, parse_kern, Hmtx, Tables, CMap};
 use crate::gpos::KernTable;
 use pathfinder_geometry::{transform2d::Matrix2x2F};

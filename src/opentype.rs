@@ -19,14 +19,12 @@ use nom::{
     sequence::tuple,
 };
 use tuple::T4;
-use pathfinder_builder::{Outline, Transform2F, RectF, Vector2F};
+use pathfinder_content::outline::{Outline, Contour};
+use pathfinder_geometry::{vector::Vector2F, transform2d::Transform2F, rect::RectF};
 use itertools::{Either};
 
 #[cfg(feature="svg")]
-use crate::svg::{Svg, parse_svg};
-
-#[cfg(feature="svg")]
-use pathfinder_renderer::scene::Scene;
+use crate::svg::{SvgTable, parse_svg, SvgGlyph};
 
 #[derive(Clone)]
 pub struct OpenTypeFont {
@@ -40,7 +38,7 @@ pub struct OpenTypeFont {
     vmetrics: Option<VMetrics>,
 
     #[cfg(feature="svg")]
-    svg:  Option<Svg>,
+    svg:  Option<SvgTable>,
 
     font_matrix: Transform2F,
 }
@@ -145,7 +143,7 @@ impl Font for OpenTypeFont {
     }
 
     #[cfg(feature="svg")]
-    fn svg_glyph(&self, gid: GlyphId) -> Option<&Scene> {
+    fn svg_glyph(&self, gid: GlyphId) -> Option<&SvgGlyph> {
         self.svg.as_ref().and_then(|svg| svg.glyphs.get(&(gid.0 as u16)))
     }
     fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {

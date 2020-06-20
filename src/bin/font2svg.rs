@@ -52,9 +52,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         * Transform2F::from_scale(Vector2F::new(1.0, -1.0))
         * Transform2F::from_translation(-bbox.origin());
         
+        #[cfg(feature="svg")]
+        if let Some(svg) = font.svg_glyph(GlyphId(gid)) {
+            svg.draw_to(&mut scene, transform);
+            continue;
+        }
+         
         let mut outline = font.glyph(GlyphId(gid)).unwrap().path;
         outline.transform(&transform);
-        
         scene.push_path(DrawPath::new(outline, paint));
     }
 
