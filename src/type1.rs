@@ -122,7 +122,7 @@ impl Type1Font {
             let (index, _) = glyphs.insert_full(name.to_owned(), Glyph {
                 path: state.path.into_outline(),
                 metrics: HMetrics {
-                    advance: Vector2F::new(state.char_width.unwrap(), 0.0),
+                    advance: state.char_width.unwrap(),
                     lsb: state.lsb.unwrap_or_default()
                 }
             });
@@ -376,9 +376,9 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             13 => { // ⊦ sbx wx hsbw (13) ⊦
                 trace!("hsbw");
                 let (sbx, wx) = s.args();
-                let lsb = v(sbx, 0.);
+                let lsb = sbx.to_float();
                 s.lsb = Some(lsb);
-                s.current = lsb;
+                s.current = Vector2F::new(lsb, 0.0);
                 s.char_width = Some(wx.to_float());
                 s.stack.clear();
             }

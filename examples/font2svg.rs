@@ -15,6 +15,7 @@ use pathfinder_renderer::{
 };
 use pathfinder_color::ColorU;
 use pathfinder_export::{Export, FileFormat};
+use svg_draw::draw_glyph;
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
@@ -24,10 +25,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let font = parse(&data);
     
     let num_glyphs = font.num_glyphs();
+    if num_glyphs == 0 {
+        println!("no glyphs");
+        return Ok(());
+    }
     let mut bbox = font.bbox().unwrap_or(RectF::new(Vector2F::default(), Vector2F::new(1.0, 1.0)));
     for i in 0 .. num_glyphs {
-        let glyph = font.glyph(GlyphId(i)).unwrap();
-        bbox = bbox.union_rect(glyph.path.bounds());
+        if let Some(glyph) = font.glyph(GlyphId(i)) {
+            bbox = bbox.union_rect(glyph.path.bounds());
+        }
     }
     let scale = Vector2F::new(200., 200.);
     let bbox_ratio = bbox.size().x() / bbox.size().y();
@@ -52,15 +58,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         * Transform2F::from_scale(Vector2F::new(1.0, -1.0))
         * Transform2F::from_translation(-bbox.origin());
         
-        #[cfg(feature="svg")]
         if let Some(svg) = font.svg_glyph(GlyphId(gid)) {
-            svg.draw_to(&mut scene, transform);
+            draw_glyph(svg, &mut scene, transform);
             continue;
         }
-         
-        let mut outline = font.glyph(GlyphId(gid)).unwrap().path;
-        outline.transform(&transform);
-        scene.push_path(DrawPath::new(outline, paint));
+        if let Some(glyph) = font.glyph(GlyphId(gid)) {
+            let mut outline = glyph.path;
+            outline.transform(&transform);
+            scene.push_path(DrawPath::new(outline, paint));
+        }
     }
 
     let mut writer = BufWriter::new(File::create("font.svg").unwrap());

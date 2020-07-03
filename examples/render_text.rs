@@ -1,22 +1,39 @@
-use crate::{Font, GlyphId};
+use font::{Font, parse, GlyphId};
+use std::env;
+use std::fs::{self, File};
+use std::io::BufWriter;
+use std::error::Error;
+use pathfinder_export::{Export, FileFormat};
 use pathfinder_builder::{Transform2F, Vector2F, Outline};
 use pathfinder_renderer::{
     scene::{Scene, DrawPath},
     paint::Paint,
 };
 use pathfinder_color::ColorU;
+use font::SvgGlyph;
+use svg_draw::draw_glyph;
 
-#[cfg(feature="svg")]
-use crate::SvgGlyph;
+fn main() -> Result<(), Box<dyn Error>> {
+    env_logger::init();
 
-#[cfg(feature="svg")]
+    let args: Vec<String> = env::args().collect();
+    
+    //let mut surface = Svg::new(BufWriter::new(File::create("glyph.svg")?), 200.0, 200.0);
+    let file = args.get(1).expect("no filename given");
+    let text = args.get(2).expect("no text given");
+    
+    let data = fs::read(file).expect("can't read specified file");
+    let font = parse(&data);
+    line(&*font, 20., &text)
+        .export(&mut BufWriter::new(File::create("font.svg").unwrap()), FileFormat::SVG)
+        .unwrap();
+    
+    Ok(())
+}
+
 enum Glyph<'a> {
     Simple(Outline),
     Complex(&'a SvgGlyph)
-}
-#[cfg(not(feature="svg"))]
-enum Glyph {
-    Simple(Outline),
 }
 
 struct SuperFont {
@@ -27,24 +44,6 @@ struct Grapheme<'a> {
     gid: u32,
     advance: Vector2F
 }
-/*
-impl SuperFont {
-    pub fn new(fonts: Vec<Box<dyn Font>>) -> SuperFont {
-        SuperFont { fonts }
-    }
-    pub fn shape(&self, text: &str) {
-        let mut current_font = &self.fonts[0]:
-        let mut remaining = text;
-        let mut done = Vec::new();
-        loop {
-
-            // keep going
-            let mut chars = remaining.chars();
-            for c in chars {
-                if let Some(gid) = 
-            }
-        }
-}*/
 
 pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
     let mut last_gid = None;
@@ -80,7 +79,6 @@ pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
             let p = offset;
             offset = offset + glyph.metrics.advance;
 
-            #[cfg(feature="svg")]
             let glyph = match font.svg_glyph(gid) {
                 None => Glyph::Simple(glyph.path),
                 Some(svg) => Glyph::Complex(svg)
@@ -109,25 +107,15 @@ pub fn line(font: &dyn Font, font_size: f32, text: &str) -> Scene {
     for (glyph, p) in glyphs {
         let transform = tr * Transform2F::from_translation(p + origin);
 
-        #[cfg(feature="svg")]
-        {
-            match glyph {
-                Glyph::Simple(mut path) => {
-                    path.transform(&transform);
-                    let draw_path = DrawPath::new(path, paint);
-                    scene.push_draw_path(draw_path);
-                }
-                Glyph::Complex(glyph) => {
-                    glyph.draw_to(&mut scene, transform);
-                }
+        match glyph {
+            Glyph::Simple(mut path) => {
+                path.transform(&transform);
+                let draw_path = DrawPath::new(path, paint);
+                scene.push_draw_path(draw_path);
             }
-        }
-        #[cfg(not(feature="svg"))]
-        {
-            let mut path = glyph.path;
-            path.transform(&transform);
-            let draw_path = DrawPath::new(path, paint);
-            scene.push_draw_path(draw_path);
+            Glyph::Complex(glyph) => {
+                draw_glyph(glyph, &mut scene, transform);
+            }
         }
     }
     

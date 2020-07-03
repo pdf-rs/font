@@ -38,8 +38,8 @@ pub struct VMetrics {
 }
 #[derive(Copy, Clone, Default)]
 pub struct HMetrics {
-    pub lsb: Vector2F,
-    pub advance: Vector2F
+    pub lsb: f32,
+    pub advance: f32
 }
 pub trait Font: 'static {
     /// Return the "number of glyphs" in the font.
@@ -165,7 +165,6 @@ mod gsub;
 mod svg;
 
 pub mod math;
-pub mod layout;
 
 pub use truetype::TrueTypeFont;
 pub use cff::CffFont;
@@ -294,7 +293,7 @@ pub struct State {
     pub stack: Vec<Value>,
     pub path: PathBuilder,
     pub current: Vector2F,
-    pub lsb: Option<Vector2F>,
+    pub lsb: Option<f32>,
     pub char_width: Option<f32>,
     pub done: bool,
     pub stem_hints: u32,

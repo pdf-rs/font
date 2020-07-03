@@ -7,7 +7,7 @@ edition = "2018"
 [features]
 unstable = ["slotmap/unstable", "tuple/nightly"]
 tools = ["env_logger", "pathfinder_export"]
-svg = ["pathfinder_svg"]
+svg = ["svg_dom"]
 
 [dependencies]
 encoding = { git = "https://github.com/pdf-rs/encoding/" }
@@ -29,16 +29,8 @@ brotli-decompressor = "2.3.0"
 inflate = "0.4.5"
 walkdir = "2.2.9"
 env_logger = { version = "*", optional=true }
-pathfinder_svg = { git = "https://github.com/s3bk/pathfinder_svg/", optional=true }
+svg_dom = { git = "https://github.com/s3bk/pathfinder_svg", optional=true }
 
-[[bin]]
-name = "font2svg"
-required-features = ["tools"]
-
-[[bin]]
-name = "parse_fonts"
-required-features = ["tools"]
-
-[[bin]]
-name = "render_text"
-required-features = ["tools"]
+[dev-dependencies]
+svg_dom = { git = "https://github.com/s3bk/pathfinder_svg" }
+svg_draw = { git = "https://github.com/s3bk/pathfinder_svg" }

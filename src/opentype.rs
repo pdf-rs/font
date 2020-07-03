@@ -41,6 +41,7 @@ pub struct OpenTypeFont {
     svg:  Option<SvgTable>,
 
     font_matrix: Transform2F,
+    num_glyphs: u32,
 }
 impl OpenTypeFont {
     pub fn parse(data: &[u8]) -> Self {
@@ -53,29 +54,29 @@ impl OpenTypeFont {
     }
 
     pub fn from_hmtx_glyf_and_tables(hmtx: Option<Hmtx>, glyf: Option<Vec<Shape>>, tables: Tables<impl Deref<Target=[u8]>>) -> Self {
-        let (outlines, font_matrix, bbox) = match glyf {
-            Some(shapes) => {
-                let head = parse_head(tables.get(b"head").expect("no head")).get();
-                let bbox = head.bbox();
-                let outlines = (0 .. shapes.len()).filter_map(|idx| get_outline(&shapes, idx as u32)).collect();
-                let font_matrix = Transform2F::from_scale(Vector2F::splat(1.0 / head.units_per_em as f32));
-                (outlines, font_matrix, Some(bbox))
-            },
-            None => {
-                let cff = tables.get(b"CFF ").expect("neither glyf nor CFF tables found");
-                let slot = read_cff(cff).get().slot(0);
-                let bbox = slot.bbox();
-                let outlines = slot.outlines().map(|(outline, _, _)| outline).collect();
-                let font_matrix = slot.font_matrix();
-                (outlines, font_matrix, bbox)
-            }
-        };
+        let outlines: Vec<_>;
+        let font_matrix;
+        let bbox;
+        if let Some(cff) = tables.get(b"CFF ") {
+            let slot = read_cff(cff).get().slot(0);
+            bbox = slot.bbox();
+            outlines = slot.outlines().map(|(outline, _, _)| outline).collect();
+            font_matrix = slot.font_matrix();
+        } else {
+            let head = parse_head(tables.get(b"head").expect("no head")).get();
+            bbox = Some(head.bbox());
+            font_matrix = Transform2F::from_scale(Vector2F::splat(1.0 / head.units_per_em as f32));
+            outlines = glyf.map(|shapes| (0 .. shapes.len()).filter_map(|idx| get_outline(&shapes, idx as u32)).collect()).unwrap_or_default();
+        }
 
         #[cfg(feature="svg")]
         let svg = tables.get(b"SVG ").map(|data| parse_svg(data).unwrap().1);
         
+        let maxp = tables.get(b"maxp").map(|data| parse_maxp(data).get());
+        let num_glyphs = maxp.as_ref().map(|maxp| maxp.num_glyphs as u32).unwrap_or(outlines.len() as u32);
+
         let kern = if let Some(data) = tables.get(b"GPOS") {
-            let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
+            let maxp = maxp.as_ref().expect("no maxp");
             let gpos = parse_gpos(data, &maxp).get();
             gpos.kern
         } else if let Some(data) = tables.get(b"kern") {
@@ -105,7 +106,8 @@ impl OpenTypeFont {
             #[cfg(feature="svg")]
             svg,
 
-            font_matrix
+            font_matrix,
+            num_glyphs,
         }
     }
     pub fn from_tables<T>(tables: Tables<T>) -> Self where T: Deref<Target=[u8]> {
@@ -128,7 +130,7 @@ impl OpenTypeFont {
 }
 impl Font for OpenTypeFont {
     fn num_glyphs(&self) -> u32 {
-        self.outlines.len() as u32
+        self.num_glyphs
     }
     fn font_matrix(&self) -> Transform2F {
         self.font_matrix
@@ -295,6 +297,9 @@ impl CMap {
     pub fn get_codepoint(&self, cp: u32) -> Option<u32> {
         self.single_codepoint.get(&cp).cloned()
     }
+    pub fn get_pair(&self, base: u32, variant: u32) -> Option<u32> {
+        self.double_codepoint.get(&(base, variant)).cloned()
+    }
     pub fn items<'a>(&'a self) -> impl Iterator<Item=(u32, GlyphId)> + 'a {
         self.single_codepoint.iter().map(|(&cp, &gid)| (cp, GlyphId(gid)))
     }
@@ -316,6 +321,7 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
     
     let mut cmap = HashMap::new();
     let mut cmap2 = HashMap::new();
+    let mut cmap3 = Vec::new();
     for table in tables {
         let (i, format) = be_u16(table)?;
         debug!("cmap format {}", format);
@@ -418,8 +424,7 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                         let (i, num_unicode_value_ranges) = be_u32(i)?;
                         for (start_unicode_value, additional_count) in iterator(i, tuple((be_u24, be_u8))).take(num_unicode_value_ranges as usize) {
                             for cp in start_unicode_value ..= start_unicode_value + additional_count as u32 {
-                                // lets hope cmap is filled already…
-                                cmap2.insert((cp, var_selector), cmap[&cp]);
+                                cmap3.push((cp, var_selector));
                             }
                         }
                     }
@@ -427,7 +432,6 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                         let i = &table[non_default_uvs_offset as usize ..];
                         let (i, num_uvs_mappings) = be_u32(i)?;
                         for (unicode_value, glyph_id) in iterator(i, tuple((be_u24, be_u16))).take(num_uvs_mappings as usize) {
-                            // lets hope cmap is filled already…
                             if glyph_id != 0 {
                                 cmap2.insert((unicode_value, var_selector), glyph_id as u32);
                             }
@@ -438,6 +442,13 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
             n => unimplemented!("cmap format {}", n),
         }
     }
+
+    for (cp, var_selector) in cmap3 {
+        if let Some(&gid) = cmap.get(&cp) {
+            cmap2.insert((cp, var_selector), gid);
+        }
+    }
+
     Ok((&[], CMap {
         single_codepoint: cmap,
         double_codepoint: cmap2
@@ -499,8 +510,8 @@ impl Hmtx {
             (self.last_advance, self.lsbs.get(gid as usize - self.metrics.len()).cloned().unwrap_or(0))
         });
         HMetrics {
-            advance: Vector2F::new(advance as f32, 0.0),
-            lsb: Vector2F::new(lsb as f32, 0.0)
+            advance: advance as f32,
+            lsb: lsb as f32,
         }
     }
 }

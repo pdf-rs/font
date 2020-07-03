@@ -2,9 +2,7 @@ use crate::{R};
 use nom::{
     number::complete::{be_u16, be_u32},
 };
-use pathfinder_svg::{Svg, Item, DrawOptions, DrawContext};
-use pathfinder_geometry::{transform2d::Transform2F, vector::Vector2F};
-use pathfinder_renderer::scene::Scene;
+use svg_dom::{Svg, Item};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -12,14 +10,6 @@ use std::sync::Arc;
 pub struct SvgGlyph {
     pub svg: Arc<Svg>,
     pub item: Arc<Item>,
-}
-impl SvgGlyph {
-    pub fn draw_to(&self, scene: &mut Scene, transform: Transform2F) {
-        let ctx = DrawContext::new(&self.svg);
-        let mut options = DrawOptions::new(&ctx);
-        options.transform = transform * Transform2F::from_scale(Vector2F::new(1.0, -1.0));
-        self.item.compose_to(scene, &options);
-    }
 }
 
 #[derive(Clone)]
@@ -50,7 +40,7 @@ fn read_document_list(input: &[u8]) -> R<SvgTable> {
         let svg_data = &input[data_offset as usize .. data_offset as usize + data_len as usize];
         
         // std::fs::write(format!("/tmp/font/{}.svg", start_gid), svg_data);
-        let svg = match pathfinder_svg::Svg::from_data(svg_data) {
+        let svg = match Svg::from_data(svg_data) {
             Ok(svg) => Arc::new(svg),
             Err(e) => {
                 panic!("SVG error: {:?}", e)

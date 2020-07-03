@@ -171,7 +171,7 @@ impl<'a> CffSlot<'a> {
             })
     }
     // -> (outline, width, lsb)
-    pub fn outlines(&self) -> impl Iterator<Item=(Outline, f32, Vector2F)> + '_ {
+    pub fn outlines(&self) -> impl Iterator<Item=(Outline, f32, f32)> + '_ {
         let n = self.top_dict.get(&Operator::CharstringType).map(|v| v[0].to_int()).unwrap_or(2);
         let char_string_type = match n {
             1 => CharstringType::Type1,
@@ -298,7 +298,7 @@ impl<'a> CffSlot<'a> {
         let glyphs = self.outlines().map(|(outline, width, lsb)| {
             Glyph {
                 metrics: HMetrics {
-                    advance: Vector2F::new(width, 0.0),
+                    advance: width,
                     lsb
                 },
                 path: outline
