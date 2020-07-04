@@ -379,6 +379,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             21 => { // ⊦ dx dy rmoveto (21) ⊦
                 trace!("rmoveto");
                 maybe_width(s, |n| n == 2);
+                s.flush();
                 let p = s.current + v(s.stack[0], s.stack[1]);
                 s.contour.push_endpoint(p);
                 s.current = p;
@@ -388,6 +389,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             22 => { // ⊦ dx hmoveto (22) ⊦
                 trace!("hmoveto");
                 maybe_width(s, |n| n == 1);
+                s.flush();
                 let p = s.current + v(s.stack[0], 0.);
                 s.contour.push_endpoint(p);
                 s.current = p;

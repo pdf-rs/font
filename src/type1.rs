@@ -402,6 +402,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 if let Some(ref mut points) = s.flex_sequence {
                     points.push(p);
                 } else {
+                    s.flush();
                     s.contour.push_endpoint(p);
                 }
                 s.current = p;
@@ -411,6 +412,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 trace!("hmoveto");
                 let (dx, ) = s.args();
                 let p = s.current + v(dx, 0.);
+                s.flush();
                 s.contour.push_endpoint(p);
                 s.current = p;
                 s.stack.clear();
