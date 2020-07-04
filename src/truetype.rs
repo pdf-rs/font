@@ -206,7 +206,7 @@ pub fn get_outline(shapes: &[Shape], idx: u32) -> Option<Outline> {
                 if let Some(Shape::Simple(ref path)) = shapes.get(gid as usize) {
                     let mut path = path.clone();
                     path.transform(&tr);
-                    outline.merge(path);
+                    outline.push_outline(path);
                 }
             }
             Some(outline)
