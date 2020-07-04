@@ -10,13 +10,12 @@ use tuple::{TupleElements};
 use encoding::Encoding;
 use crate::gsub::Gsub;
 use crate::opentype::CMap;
-use pathfinder_content::outline::Outline;
 
 #[cfg(feature="svg")]
 pub use svg::SvgGlyph;
 
 use pathfinder_geometry::{rect::RectF, vector::Vector2F, transform2d::Transform2F};
-use pathfinder_builder::PathBuilder;
+use pathfinder_content::outline::{Outline, Contour};
 
 #[derive(Clone)]
 pub struct Glyph {
@@ -291,7 +290,8 @@ impl<T, U> Context<T, U> where T: TryIndex, U: TryIndex {
 
 pub struct State {
     pub stack: Vec<Value>,
-    pub path: PathBuilder,
+    pub outline: Outline,
+    pub contour: Contour,
     pub current: Vector2F,
     pub lsb: Option<f32>,
     pub char_width: Option<f32>,
@@ -307,7 +307,8 @@ impl State {
     pub fn new() -> State {
         State {
             stack: Vec::new(),
-            path: PathBuilder::new(),
+            outline: Outline::new(),
+            contour: Contour::new(),
             current: Vector2F::default(),
             lsb: None,
             char_width: None,
@@ -321,7 +322,8 @@ impl State {
     #[inline]
     pub fn clear(&mut self) {
         self.stack.clear();
-        self.path.clear();
+        self.outline.clear();
+        self.contour.clear();
         self.current = Vector2F::default();
         self.lsb = None;
         self.char_width = None;
@@ -331,9 +333,24 @@ impl State {
         self.first_stack_clearing_operator = true;
         self.flex_sequence = None;
     }
+
     #[inline]
-    pub fn into_path(self) -> Outline {
-        self.path.into_outline()
+    fn flush(&mut self) {
+        if !self.contour.is_empty() {
+            self.outline.push_contour(self.contour.clone());
+            self.contour.clear();
+        }
+    }
+    #[inline]
+    pub fn into_path(mut self) -> Outline {
+        self.flush();
+        self.outline
+    }
+    #[inline]
+    pub fn take_path(&mut self) -> Outline {
+        self.flush();
+        let outline = self.outline.clone();
+        outline
     }
     #[inline]
     pub fn push(&mut self, v: impl Into<Value>) {

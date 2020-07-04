@@ -11,7 +11,8 @@ use crate::{
     parsers::{iterator, varint_u32, varint_u16, parse, count_map},
     opentype::{Tables, parse_head, parse_hhea, parse_maxp, parse_hmtx, parse_hmtx_woff2_format1, parse_loca, OpenTypeFont},
 };
-use pathfinder_builder::{Outline, Vector2F};
+use pathfinder_content::outline::{Outline};
+use pathfinder_geometry::vector::Vector2F;
 use nom::{
     bytes::complete::{tag, take},
     number::complete::{be_u8, be_u16, be_i16, be_u32},

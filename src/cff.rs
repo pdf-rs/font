@@ -14,8 +14,8 @@ use nom::{
     Err::*,
 };
 use encoding::{Encoding};
-use pathfinder_builder::{Outline, Transform2F, RectF, Vector2F};
-use tuple::TupleElements;
+use pathfinder_content::outline::{Outline, Contour};
+use pathfinder_geometry::{vector::Vector2F, transform2d::Transform2F, rect::RectF};use tuple::TupleElements;
 
 #[derive(Clone)]
 pub struct CffFont {
@@ -218,7 +218,7 @@ impl<'a> CffSlot<'a> {
                 (Some(_), Some(_)) => panic!("BUG: both char_width and delta_width set")
             };
             let lsb = state.lsb.unwrap_or_default();
-            let path = state.path.take();
+            let path = state.take_path();
             state.clear();
             (path, width, lsb)
         })

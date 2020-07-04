@@ -1,5 +1,5 @@
 use crate::{State, v, Value, Context, TryIndex};
-use pathfinder_builder::{Outline};
+use pathfinder_content::outline::{Outline};
 use nom::{IResult,
     bytes::complete::{take},
     number::complete::{be_u8, be_i16, be_i32}
@@ -33,7 +33,7 @@ macro_rules! bezier {
             let c1 = $s.current + point!(iter, $a);
             let c2 = c1 + point!(iter, $b);
             let p = c2 + point!(iter, $c);
-            $s.path.cubic_curve_to(c1, c2, p);
+            $s.contour.push_cubic(c1, c2, p);
             $s.current = p;
         )*
         iter.as_slice()
@@ -44,7 +44,7 @@ macro_rules! lines {
         let mut iter = $slice.iter();
         $(
             let p = $s.current + point!(iter, $a);
-            $s.path.line_to(p);
+            $s.contour.push_endpoint(p);
             $s.current = p;
         )*
         iter.as_slice()
@@ -98,9 +98,11 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             4 => { // ⊦ dy vmoveto (4) ⊦
                 trace!("vmoveto");
+                s.flush();
+
                 maybe_width(s, |n| n == 1);
                 let p = s.current + v(0., s.stack[0]);
-                s.path.move_to(p);
+                s.contour.push_endpoint(p);
                 s.stack.clear();
                 s.current = p;
                 i
@@ -124,7 +126,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         v(0., d)
                     };
                     let p = s.current + dv;
-                    s.path.line_to(p);
+                    s.contour.push_endpoint(p);
                     s.current = p;
                 }
                 s.stack.clear();
@@ -140,7 +142,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         v(d, 0.)
                     };
                     let p = s.current + dv;
-                    s.path.line_to(p);
+                    s.contour.push_endpoint(p);
                     s.current = p;
                 }
                 s.stack.clear();
@@ -334,7 +336,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                             true => point!(iter, x),
                             false => point!(iter, y)
                         };
-                        s.path.cubic_curve_to(d4, d5, d6);
+                        s.contour.push_cubic(d4, d5, d6);
                         s.current = d6;
                         s.stack.clear();
                         i
@@ -346,7 +348,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             14 => { //– endchar (14) ⊦
                 trace!("endchar");
                 maybe_width(s, |n| n == 0);
-                s.path.close();
+                s.contour.close();
                 s.done = true;
                 i
             }
@@ -378,7 +380,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 trace!("rmoveto");
                 maybe_width(s, |n| n == 2);
                 let p = s.current + v(s.stack[0], s.stack[1]);
-                s.path.move_to(p);
+                s.contour.push_endpoint(p);
                 s.current = p;
                 s.stack.clear();
                 i
@@ -387,7 +389,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 trace!("hmoveto");
                 maybe_width(s, |n| n == 1);
                 let p = s.current + v(s.stack[0], 0.);
-                s.path.move_to(p);
+                s.contour.push_endpoint(p);
                 s.current = p;
                 s.stack.clear();
                 i

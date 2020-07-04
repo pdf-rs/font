@@ -9,8 +9,12 @@ use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, G
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
 use crate::parsers::parse;
-use pathfinder_builder::{Outline, Contour, Transform2F, RectF, Vector2F};
 use encoding::{glyphname_to_unicode};
+use pathfinder_geometry::{
+    transform2d::Transform2F,
+    vector::Vector2F,
+    rect::RectF
+};
 
 #[derive(Clone)]
 pub struct Type1Font {
@@ -110,22 +114,23 @@ impl Type1Font {
         
         let mut glyphs = IndexMap::with_capacity(char_strings.len());
         let mut unicode_map = HashMap::with_capacity(char_strings.len());
+        let mut state = State::new();
         for (name, item) in char_strings.string_entries() {
             let data = item.as_bytes().unwrap();
 
             let decoded = Decoder::charstring().decode(&data, len_iv);
             //debug!("{} decoded: {:?}", name, String::from_utf8_lossy(&decoded));
             
-            let mut state = State::new();
             charstring(&decoded, &context, &mut state).unwrap();
 
             let (index, _) = glyphs.insert_full(name.to_owned(), Glyph {
-                path: state.path.into_outline(),
                 metrics: HMetrics {
                     advance: state.char_width.unwrap(),
                     lsb: state.lsb.unwrap_or_default()
-                }
+                },
+                path: state.take_path(),
             });
+            state.clear();
 
             if let Some(unicode) = glyphname_to_unicode(name) {
                 unicode_map.insert(unicode, index as u32);
@@ -236,29 +241,31 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             4 => { // ⊦ dy vmoveto (4) ⊦
                 trace!("vmoveto");
+                s.flush();
+
                 let p = s.current + v(0., s.stack[0]);
-                s.path.move_to(p);
+                s.contour.push_endpoint(p);
                 s.stack.clear();
                 s.current = p;
             }
             5 => { // ⊦ dx dy rlineto (5) ⊦
                 trace!("rlineto");
                 let p = s.current + v(s.stack[0], s.stack[1]);
-                s.path.line_to(p);
+                s.contour.push_endpoint(p);
                 s.stack.clear();
                 s.current = p;
             }
             6 => { // ⊦ dx hlineto (6) ⊦
                 trace!("hlineto");
                 let p = s.current + v(s.stack[0], 0.);
-                s.path.line_to(p);
+                s.contour.push_endpoint(p);
                 s.stack.clear();
                 s.current = p;
             }
             7 => { // dy vlineto (7)
                 trace!("vlineto");
                 let p = s.current + v(0., s.stack[0],);
-                s.path.line_to(p);
+                s.contour.push_endpoint(p);
                 s.stack.clear();
                 s.current = p;
             }
@@ -267,13 +274,13 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let c1 = s.current + v(s.stack[0], s.stack[1]);
                 let c2 = c1 + v(s.stack[2], s.stack[3]);
                 let p = c2 + v(s.stack[4], s.stack[5]);
-                s.path.cubic_curve_to(c1, c2, p);
+                s.contour.push_cubic(c1, c2, p);
                 s.stack.clear();
                 s.current = p;
             }
             9 => { // –closepath (9) ⊦
                 trace!("closepath");
-                s.path.close();
+                s.contour.close();
                 s.stack.clear();
             }
             10 => { // subr# callsubr (10) –
@@ -346,8 +353,8 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                                 let (_flex_height, x, y) = s.pop_tuple();
                                 let (_ref, c0, c1, p2, c3, c4, p5) = TupleElements::from_iter(s.flex_sequence.take().unwrap().into_iter()).unwrap();
                                 //assert_eq!(p5, v(x, y));
-                                s.path.cubic_curve_to(c0, c1, p2);
-                                s.path.cubic_curve_to(c3, c4, p5);
+                                s.contour.push_cubic(c0, c1, p2);
+                                s.contour.push_cubic(c3, c4, p5);
                                 ps_stack.push(y);
                                 ps_stack.push(x);
                             }
@@ -395,7 +402,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 if let Some(ref mut points) = s.flex_sequence {
                     points.push(p);
                 } else {
-                    s.path.move_to(p);
+                    s.contour.push_endpoint(p);
                 }
                 s.current = p;
                 s.stack.clear();
@@ -404,7 +411,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 trace!("hmoveto");
                 let (dx, ) = s.args();
                 let p = s.current + v(dx, 0.);
-                s.path.move_to(p);
+                s.contour.push_endpoint(p);
                 s.current = p;
                 s.stack.clear();
             }
@@ -414,7 +421,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let c1 = s.current + v(0., dy1);
                 let c2 = c1 + v(dx2, dy2);
                 let p = c2 + v(dx3, 0.);
-                s.path.cubic_curve_to(c1, c2, p);
+                s.contour.push_cubic(c1, c2, p);
                 s.stack.clear();
                 s.current = p;
             }
@@ -424,7 +431,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let c1 = s.current + v(dx1, 0.);
                 let c2 = c1 + v(dx2, dy2);
                 let p = c2 + v(0., dy3);
-                s.path.cubic_curve_to(c1, c2, p);
+                s.contour.push_cubic(c1, c2, p);
                 s.stack.clear();
                 s.current = p;
             },

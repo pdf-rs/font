@@ -11,12 +11,11 @@ svg = ["svg_dom"]
 
 [dependencies]
 encoding = { git = "https://github.com/pdf-rs/encoding/" }
-pathfinder_geometry = { git = "https://github.com/s3bk/pathfinder/" }
-pathfinder_content = { git = "https://github.com/s3bk/pathfinder/" }
-pathfinder_color = { git = "https://github.com/s3bk/pathfinder/" }
-pathfinder_renderer = { git = "https://github.com/s3bk/pathfinder/" }
-pathfinder_builder = { git = "https://github.com/s3bk/pathfinder/" }
-pathfinder_export = { git = "https://github.com/s3bk/pathfinder/", optional=true }
+pathfinder_geometry = { git = "https://github.com/servo/pathfinder/" }
+pathfinder_content = { git = "https://github.com/servo/pathfinder/" }
+pathfinder_color = { git = "https://github.com/servo/pathfinder/" }
+pathfinder_renderer = { git = "https://github.com/servo/pathfinder/" }
+pathfinder_export = { git = "https://github.com/servo/pathfinder/", optional=true }
 tuple = { git = "https://github.com/s3bk/tuple/" }
 nom = "5.0.0"
 log = "0.4.8"
