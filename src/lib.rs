@@ -337,6 +337,7 @@ impl State {
     #[inline]
     fn flush(&mut self) {
         if !self.contour.is_empty() {
+            self.contour.close();
             self.outline.push_contour(self.contour.clone());
             self.contour.clear();
         }
