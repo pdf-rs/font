@@ -583,7 +583,7 @@ fn parse_kern_format0<'a>(i: &'a [u8], table: &mut KernTable) -> R<'a, ()> {
     }
     Ok((i, ()))
 }
-    
+
 fn parse_kern_format2<'a>(data: &'a [u8], table: &mut KernTable) -> R<'a, ()> {
     let (i, _row_width) = be_u16(data)?;
     let (i, left_class_table_off) = be_u16(i)?;
