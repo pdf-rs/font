@@ -24,65 +24,37 @@ impl GlyphList {
 }
 
 #[derive(Debug, Clone)]
-pub struct CompiledSubs {
-    // first glyph -> (remaining glyphs, replacement)
-    ligatures: HashMap<u16, Vec<(GlyphList, u16)>>,
-
-    // input -> output
-    single_substitutions: HashMap<u16, u16>,
-}
-impl CompiledSubs {
-    fn new() -> CompiledSubs {
-        CompiledSubs {
-            ligatures: HashMap::new(),
-            single_substitutions: HashMap::new()
-        }
-    }
-    fn add(&mut self, sub: &Substitution) {
-        match *sub {
-            Substitution::Single(ref list) => {
-                self.single_substitutions.extend(list.iter().cloned());
-            }
-            Substitution::Ligatures(ref list) => {
-                self.ligatures.extend(list.iter().cloned());
-            }
-        }
-    }
-    pub fn substitutions<'a>(&'a self, first: GlyphId) -> Option<impl Iterator<Item=(&'a GlyphList, GlyphId)> + 'a> {
-        self.ligatures.get(&(first.0 as u16)).map(|subs| subs.iter().map(|&(ref others, substutute)| {
-            (others, GlyphId(substutute as u32))
-        }))
-    }
-}
-#[derive(Debug, Clone)]
 pub struct Gsub {
     scripts: Vec<Script>,
     features: Vec<Feature>,
-    lookup: Vec<Substitution>,
-    all: Substitution,
+    lookup: Vec<Vec<Substitution>>,
 }
 impl Gsub {
-    pub fn substitutions<'a>(&'a self, first: GlyphId) -> Option<impl Iterator<Item=(&'a GlyphList, GlyphId)> + 'a> {
-
-
+    pub fn default_language(&self) -> Option<&LanguageSystem> {
+        self.scripts.get(0).and_then(|script| script.default_language.as_ref())
+    }
+    pub fn language(&self, name: &str) -> Option<&LanguageSystem> {
+        self.scripts.iter().flat_map(|s| s.languages.iter().filter(|(tag, _)| tag == name).map(|(_, lang)| lang)).next()
+    }
     pub fn scripts(&self) -> &[Script] {
         &self.scripts
     }
-    fn compile_lang(&self, lang: &LanguageSystem) -> CompiledSubs {
-        let mut compiled = CompiledSubs::new();
-        for &feature_idx in &lang.feature_list {
-            for &lookup_idx in &self.features[feature_idx].lookup_indices {
-                compiled.add(&self.lookup[lookup_idx]);
-            }
-        }
-        compiled
+    pub fn subs<'a, 'b: 'a>(&'b self, lang: &'a LanguageSystem, enabled: impl Fn(Tag) -> bool + 'a) -> impl Iterator<Item=&'b Substitution> + 'a {
+        lang.feature_list.iter()
+        .map(move |&FeatureIdx(idx)| &self.features[idx as usize])
+        .filter(move |feature| enabled(feature.tag))
+        .flat_map(move |feature| feature.lookup_indices.iter().flat_map(move |&lookup_idx| self.lookup[lookup_idx as usize].iter()))
+    }
+    pub fn lang_features<'a>(&'a self, lang: &'a LanguageSystem) -> impl Iterator<Item=Tag> + 'a {
+        lang.feature_list.iter()
+        .map(move |&FeatureIdx(idx)| self.features[idx as usize].tag)
     }
 }
 
 #[derive(Debug, Clone)]
-enum Substitution {
-    Single(Vec<(u16, u16)>),
-    Ligatures(Vec<(u16, Vec<(GlyphList, u16)> )>),
+pub enum Substitution {
+    Single(HashMap<u16, u16>),
+    Ligatures(HashMap<u16, Vec<(GlyphList, u16)>>),
 }
 
 pub fn parse_gsub(data: &[u8]) -> R<Gsub> {
@@ -126,23 +98,28 @@ pub fn parse_gsub(data: &[u8]) -> R<Gsub> {
     
     let mut lookup = Vec::new();
     
-    parse_lookup_list(&data[lookup_list_off as usize ..], |data, lookup_type, _lookup_flag| {
-        let sub = match lookup_type { 
-            // Single · Replace one glyph with one glyph
-            1 => lookup.push(parse_single_subst(data)?.1), 
+    parse_lookup_list(&data[lookup_list_off as usize ..], |lookup_idx, data, lookup_type, _lookup_flag| {
+        while lookup_idx >= lookup.len() {
+            lookup.push(Vec::new());
+        }
+        let mut push = |sub| lookup[lookup_idx].push(sub);
 
-            2 => {}, // Multiple · Replace one glyph with more than one glyph
-            3 => {}, // Alternate · Replace one glyph with one of many glyphs
+        match lookup_type { 
+            // Single · Replace one glyph with one glyph
+            1 => push(parse_single_subst(data)?.1), 
+
+            2 => debug!("font has Multiple substitutions"), // Multiple · Replace one glyph with more than one glyph
+            3 => debug!("font has Altername substitutions"), // Alternate · Replace one glyph with one of many glyphs
 
             // Ligature · Replace multiple glyphs with one glyph
-            4 => lookup.push(parse_ligatures(data)?.1),
+            4 => push(parse_ligatures(data)?.1),
             
-            5 => {}, // Context · Replace one or more glyphs in context
-            6 => {}, // Chaining Context · Replace one or more glyphs in chained context
-            7 => {}, // Extension Substitution · Extension mechanism for other substitutions (i.e. this excludes the Extension type substitution itself)
-            8 => {}, // Reverse chaining context single · Applied in reverse order, replace single glyph in chaining context
+            5 => debug!("font has Context substitutions"), // Context · Replace one or more glyphs in context
+            6 => debug!("font has Chaining Context substitutions"), // Chaining Context · Replace one or more glyphs in chained context
+            7 => debug!("font has Extension Substitution"), // Extension Substitution · Extension mechanism for other substitutions (i.e. this excludes the Extension type substitution itself)
+            8 => debug!("font has Reverse chaining context single substitutions"), // Reverse chaining context single · Applied in reverse order, replace single glyph in chaining context
             _ => {},
-        };
+        }
         Ok((data, ()))
     })?;
     
@@ -155,14 +132,14 @@ pub fn parse_gsub(data: &[u8]) -> R<Gsub> {
 
 fn parse_single_subst(data: &[u8]) -> R<Substitution> {
     let (i, format) = be_u16(data)?;
-    let mut subs = Vec::new();
+    let mut subs = HashMap::new();
     match format {
         1 => {
             let (i, coverage_offset) = be_u16(i)?;
             let (i, delta_gid) = be_u16(i)?;
             let (_, coverage) = coverage_table(&data[coverage_offset as usize ..])?;
             for gid in coverage {
-                subs.push((gid, gid.wrapping_add(delta_gid)));
+                subs.insert(gid, gid.wrapping_add(delta_gid));
             }
         },
         2 => {
@@ -171,7 +148,7 @@ fn parse_single_subst(data: &[u8]) -> R<Substitution> {
             let (_, coverage) = coverage_table(&data[coverage_offset as usize ..])?;
             let replacements = iterator_n(i, be_u16, glyph_count);
             for (gid, replacement_gid) in coverage.zip(replacements) {
-                subs.push((gid, replacement_gid));
+                subs.insert(gid, replacement_gid);
             }
         }
         _ => panic!("unsupported single substitution format {}", format)
@@ -187,12 +164,12 @@ fn parse_ligatures(data: &[u8]) -> R<Substitution> {
     let (i, coverage_offset) = be_u16(i)?;
     let (i, ligature_set_count) = be_u16(i)?;
     let (_, coverage) = coverage_table(&data[coverage_offset as usize ..])?;
-    let mut ligatures = Vec::with_capacity(ligature_set_count as usize);
+    let mut ligatures = HashMap::with_capacity(ligature_set_count as usize);
 
     for (first, offset) in coverage.zip(iterator_n(i, be_u16, ligature_set_count)) {
         let set_data = &data[offset as usize ..];
         let (i, ligature_count) = be_u16(set_data)?;
-        let mut entry = Vec::with_capacity(ligature_count as usize);
+        let entry = ligatures.entry(first).or_insert_with(|| Vec::with_capacity(ligature_count as usize));
 
         for set_offest in iterator_n(i, be_u16, ligature_count) {
             let data = &set_data[set_offest as usize ..];
@@ -202,7 +179,6 @@ fn parse_ligatures(data: &[u8]) -> R<Substitution> {
             
             entry.push((GlyphList(components), ligature_glyph));
         }
-        ligatures.push((first, entry));
     }
     Ok((i, Substitution::Ligatures(ligatures)))
 }
@@ -250,13 +226,13 @@ fn parse_script_table(data: &[u8]) -> R<Script> {
 struct FeatureIdx(u16);
 
 #[derive(Debug, Clone)]
-struct Script {
+pub struct Script {
     default_language: Option<LanguageSystem>,
     languages: Vec<(Tag, LanguageSystem)>
 }
 
 #[derive(Debug, Clone)]
-struct LanguageSystem {
+pub struct LanguageSystem {
     feature_list: Vec<FeatureIdx>,
     required_feature: Option<FeatureIdx>,
 }
@@ -298,13 +274,26 @@ fn parse_feature_table(i: &[u8]) -> R<impl Iterator<Item=u16> + '_> {
 }
 
 use std::fmt;
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq)]
 pub struct Tag(pub [u8; 4]);
 impl fmt::Debug for Tag {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match std::str::from_utf8(&self.0) {
             Ok(s) => f.write_str(s),
             Err(_) => write!(f, "{:?}", self.0)
+        }
+    }
+}
+/// Comparison against `&str`. The argument can be up to 4 bytes long.
+/// 
+/// The comparison behaves as if the argument was padded to a length of 4 bytes with spaces.
+impl PartialEq<str> for Tag {
+    fn eq(&self, other: &str) -> bool {
+        let n = other.len();
+        if n < 4 {
+            self.0[.. n] == *other.as_bytes() && self.0[n ..].iter().all(|&b| b == b' ')
+        } else {
+            self.0 == *other.as_bytes()
         }
     }
 }

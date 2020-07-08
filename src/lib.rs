@@ -158,7 +158,7 @@ mod parsers;
 mod eexec;
 mod woff;
 mod gpos;
-mod gsub;
+pub mod gsub;
 
 #[cfg(feature="svg")]
 mod svg;

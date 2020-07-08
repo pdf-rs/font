@@ -668,16 +668,16 @@ pub fn parse_skript_list(data: &[u8]) -> R<()> {
     Ok((i, ()))
 }
 
-pub fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(&[u8], u16, u16) -> R<()>) -> R<()> {
+pub fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(usize, &[u8], u16, u16) -> R<()>) -> R<()> {
     let (i, lookup_count) = be_u16(data)?;
-    for table_off in iterator_n(i, be_u16, lookup_count) {
+    for (lookup_idx, table_off) in iterator_n(i, be_u16, lookup_count).enumerate() {
         let table_data = &data[table_off as usize ..];
         let (i, lookup_type) = be_u16(table_data)?;
         let (i, lookup_flag) = be_u16(i)?;
         let (i, subtable_count) = be_u16(i)?;
         
         for subtable_off in iterator_n(i, be_u16, subtable_count) {
-            inner(&table_data[subtable_off as usize ..], lookup_type, lookup_flag)?;
+            inner(lookup_idx, &table_data[subtable_off as usize ..], lookup_type, lookup_flag)?;
         }
     }
     Ok((i, ()))

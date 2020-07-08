@@ -54,7 +54,7 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> R<'a, Gpos> {
     
     let mut gpos = Gpos::default();
     
-    parse_lookup_list(&data[lookup_list_off as usize ..], |data, lookup_type, _lookup_flag| {
+    parse_lookup_list(&data[lookup_list_off as usize ..], |lookup_idx, data, lookup_type, _lookup_flag| {
         debug!("lookup type {}", lookup_type);
         match lookup_type { 
             2 => parse_pair_adjustment(data, &mut gpos.kern, maxp.num_glyphs)?.1,
