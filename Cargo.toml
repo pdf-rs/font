@@ -6,7 +6,8 @@ edition = "2018"
 
 [features]
 unstable = ["slotmap/unstable", "tuple/nightly"]
-svg = ["svg_dom"]
+svg = ["svg_dom", "inflate"]
+woff = ["brotli-decompressor"]
 
 [dependencies]
 encoding = { git = "https://github.com/pdf-rs/encoding/" }
@@ -21,8 +22,8 @@ slotmap = { version = "0.4" }
 decorum = "0.3"
 itertools = "0.9"
 indexmap = "1.4"
-brotli-decompressor = "2.3"
-inflate = "0.4.5"
+brotli-decompressor = { version = "2.3", optional = true }
+inflate = { version = "0.4.5", optional = true }
 svg_dom = { git = "https://github.com/s3bk/pathfinder_svg", optional=true }
 
 [dev-dependencies]
@@ -32,3 +33,4 @@ pathfinder_renderer = { git = "https://github.com/servo/pathfinder/" }
 pathfinder_export = { git = "https://github.com/servo/pathfinder/" }
 walkdir = "2.3"
 env_logger = { version = "*" }
+memmap = "*"

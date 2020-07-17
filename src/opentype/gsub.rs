@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::convert::TryInto;
 use nom::{
     number::complete::{be_u16, be_u32},
     multi::count,
@@ -299,7 +300,5 @@ impl PartialEq<str> for Tag {
 }
 fn tag(i: &[u8]) -> R<Tag> {
     let (i, s) = take(4usize)(i)?;
-    let mut arr = [0; 4];
-    arr.copy_from_slice(s);
-    Ok((i, Tag(arr)))
+    Ok((i, Tag(s.try_into().unwrap())))
 }

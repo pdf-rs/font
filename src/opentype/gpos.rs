@@ -5,7 +5,7 @@ use nom::{
     sequence::{tuple},
 };
 use crate::{R};
-use crate::parsers::{iterator_n, parse};
+use crate::parsers::{*};
 use crate::opentype::{Maxp, parse_lookup_list, coverage_table};
 use itertools::{Itertools};
 
@@ -15,6 +15,7 @@ pub struct Gpos {
     pub kern: KernTable,
     pub mark_to_base: HashMap<(u16, u16), (i16, i16)>
 }
+
 
 #[derive(Default, Clone)]
 pub struct KernTable {
@@ -58,7 +59,7 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> R<'a, Gpos> {
         debug!("lookup type {}", lookup_type);
         match lookup_type { 
             2 => parse_pair_adjustment(data, &mut gpos.kern, maxp.num_glyphs)?.1,
-            4 => {}, //parse_mark_to_base_attachment(data, &mut gpos.mark_to_base)?.1,
+            4 => parse_mark_to_base_attachment(data, &mut gpos)?.1,
             _ => {}
         }
         Ok((data, ()))
@@ -100,13 +101,13 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, _num_glyphs: 
     let (i, format) = be_u16(data)?;
     match format {
         1 => {
-            let (i, coverage_off) = be_u16(i)?;
+            let (i, coverage_off) = offset(i)?;
             let (i, value_format_1) = be_u16(i)?;
             let (i, value_format_2) = be_u16(i)?;
             let (i, pair_set_count) = be_u16(i)?;
             let (i, _pair_set_offsets) = be_u16(i)?;
             
-            let mut coverage = coverage_table(&data[coverage_off as usize ..])?.1;
+            let mut coverage = coverage_table(coverage_off.of(data))?.1;
             for offset in iterator_n(i, be_u16, pair_set_count) {
                 let first_glyph = coverage.next().unwrap();
                 let i = &data[offset as usize ..];
@@ -142,4 +143,60 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, _num_glyphs: 
         n => panic!("unsupported pair adjustment format {}", n)
     }
     Ok((i, ()))
+}
+
+// (mark class, (x, y))
+fn parse_mark_array_table(data: &[u8]) -> R<impl Iterator<Item=(u16, (i16, i16))> + '_> {
+    let (i, mark_count) = be_u16(data)?;
+    let iter = iterator_n(i, move |i| {
+        let (i, mark_class) = be_u16(i)?;
+        let (i, mark_anchor_offset) = offset(i)?;
+        let (i, pos) = parse_anchor_table(mark_anchor_offset.of(data))?;
+        Ok((i, (mark_class, pos)))
+    }, mark_count);
+    Ok((i, iter))
+}
+fn parse_anchor_table(i: &[u8]) -> R<(i16, i16)> {
+    let (i, _format) = be_u16(i)?;
+    let (i, x) = be_i16(i)?;
+    let (i, y) = be_i16(i)?;
+    Ok((i, (x, y)))
+}
+
+fn parse_mark_to_base_attachment<'a>(data: &'a [u8], gpos: &mut Gpos) -> R<'a, ()> {
+    let (i, format) = be_u16(data)?;
+    assert_eq!(format, 1);
+    let (i, mark_coverage_offset) = offset(i)?;
+    let (i, base_coverage_offset) = offset(i)?;
+    let (i, mark_class_count) = be_u16(i)?;
+    let (i, mark_array_offset) = offset(i)?;
+    let (i, base_array_offset) = offset(i)?;
+
+    let mark_coverage = coverage_table(mark_coverage_offset.of(data))?.1;
+    let base_coverage: Vec<_> = coverage_table(base_coverage_offset.of(data))?.1.collect();
+
+    let base_array: Vec<_> = parse_base_array(base_array_offset.of(data), mark_class_count)?.1.flat_map(|arr| arr.iter()).collect();
+
+    for (mark_gid, (mark_class, mark_anchor)) in mark_coverage.zip(parse_mark_array_table(mark_array_offset.of(data))?.1) {
+        for (base_nr, &base_gid) in base_coverage.iter().enumerate() {
+            let base_anchor = base_array[base_nr * mark_class_count as usize + mark_class as usize];
+            gpos.mark_to_base.insert((base_gid, mark_gid), (base_anchor.0 - mark_anchor.0, base_anchor.1 - mark_anchor.1));
+        }
+    }
+
+    Ok((i, ()))
+}
+
+fn parse_base_array<'a>(data: &'a [u8], mark_class_count: u16) -> R<'a, impl Iterator<Item=ArrayMap<'a, Offset, impl Fn(Offset) -> (i16, i16) + 'a>>> {
+    let (i, base_count) = be_u16(data)?;
+    let p = array_map::<Offset, _, _>(mark_class_count, move |off: Offset| parse_anchor_table(off.of(data)).unwrap().1);
+    let iter = iterator_n(i, p, base_count);
+    Ok((i, iter))
+}
+
+fn anchor_table(i: &[u8]) -> R<(i16, i16)> {
+    let (i, _format) = be_u16(i)?;
+    let (i, x) = be_i16(i)?;
+    let (i, y) = be_i16(i)?;
+    Ok((i, (x, y)))
 }

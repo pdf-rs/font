@@ -355,3 +355,102 @@ pub fn count_map<'a, K, V>(parser: impl Fn(&'a [u8]) -> R<'a, (K, V)>, count: us
         Ok((i, map))
     }
 }
+pub fn offset(i: &[u8]) -> R<Offset> {
+    Offset::parse(i)
+}
+pub struct Offset(pub u16);
+impl Offset {
+    pub fn of<'a>(&self, data: &'a [u8]) -> &'a [u8] {
+        &data[self.0 as usize ..]
+    }
+}
+impl Parser for Offset {
+    type Output = Self;
+    fn parse(i: &[u8]) -> R<Self::Output> {
+        let (i, offset) = be_u16(i)?;
+        Ok((i, Offset(offset)))
+    }
+}
+impl FixedSize for Offset {
+    const SIZE: usize = 2;
+}
+pub fn array_iter<'a, P: Parser + FixedSize>(input: &'a [u8], count: usize) -> R<impl Iterator<Item=P::Output> + ExactSizeIterator + 'a> {
+    let (ours, remaining) = input.split_at(P::SIZE * count);
+    let iter = ours.chunks(P::SIZE).map(|chunk| P::parse(chunk).unwrap().1);
+    Ok((remaining, iter))
+}
+pub fn array<P: Parser + FixedSize, N: Into<usize>>(count: N) -> impl Fn(&[u8]) -> R<Array<P>> {
+    let len = count.into();
+    move |input| {
+        let (data, remaining) = input.split_at(P::SIZE * len);
+        Ok((remaining, Array {
+            data,
+            len,
+            _m: PhantomData
+        }))
+    }
+}
+pub fn array_map<P: Parser + FixedSize, N: Into<usize>, F: Copy>(count: N, f: F) -> impl Fn(&[u8]) -> R<ArrayMap<P, F>> {
+    let array = array(count);
+    move |input| {
+        let (i, arr) = array(input)?;
+        Ok((i, arr.map(f)))
+    }
+}
+
+#[derive(Clone)]
+pub struct Array<'a, P> {
+    data: &'a [u8],
+    len: usize,
+    _m: PhantomData<P>,
+}
+impl<'a, P: Parser + FixedSize> Array<'a, P> {
+    pub fn iter(self) -> impl Iterator<Item=P::Output> + ExactSizeIterator + 'a {
+        self.data.chunks(P::SIZE).map(|chunk| P::parse(chunk).unwrap().1)
+    }
+    pub fn map<F>(self, f: F) -> ArrayMap<'a, P, F> {
+        ArrayMap {
+            array: self,
+            map: f
+        }
+    }
+}
+impl<'a, P: Parser + FixedSize> KnownSize for Array<'a, P> {
+    fn size(&self) -> usize {
+        self.len * P::SIZE
+    }
+}
+pub struct ArrayMap<'a, P, F> {
+    array: Array<'a, P>,
+    map: F,
+}
+impl<'a, P, F, T> ArrayMap<'a, P, F>
+    where P: Parser + FixedSize + 'a, T: 'a, F: 'a + Fn(P::Output) -> T
+{
+    pub fn iter(self) -> impl Iterator<Item=T> + ExactSizeIterator + 'a {
+        let map = self.map;
+        self.array.iter().map(move |v| map(v))
+    }
+}
+impl<'a, P: Parser + FixedSize, F> KnownSize for ArrayMap<'a, P, F> {
+    fn size(&self) -> usize {
+        self.array.size()
+    }
+}
+
+
+pub trait Parser {
+    type Output;
+    fn parse(data: &[u8])-> R<Self::Output>;
+}
+pub trait FixedSize {
+    const SIZE: usize;
+}
+pub trait KnownSize {
+    fn size(&self) -> usize;
+}
+impl<T: FixedSize> KnownSize for T {
+    fn size(&self) -> usize {
+        Self::SIZE
+    }
+}

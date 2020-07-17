@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use crate::R;
 use crate::opentype::coverage_table;
+use crate::parsers::{Parser, FixedSize, array_iter};
 
 use nom::number::complete::{be_i16, be_u16};
 pub mod assembly;
@@ -11,13 +12,6 @@ pub fn parse_math(data: &[u8]) -> R<MathHeader> {
     MathHeader::parse(data)
 }
 
-pub trait Parser {
-    type Output;
-    fn parse(data: &[u8])-> R<Self::Output>;
-}
-pub trait FixedSize {
-    const SIZE: usize;
-}
 
 macro_rules! parser {
     ($name:ident : $fun:ident -> $out:ty) => (
@@ -89,11 +83,6 @@ macro_rules! table {
     );
 }
 
-fn array_iter<'a, P: Parser + FixedSize>(input: &'a [u8], count: usize) -> R<impl Iterator<Item=P::Output> + ExactSizeIterator + 'a> {
-    let (ours, remaining) = input.split_at(P::SIZE * count);
-    let iter = ours.chunks(P::SIZE).map(|chunk| P::parse(chunk).unwrap().1);
-    Ok((remaining, iter))
-}
 
 
 #[derive(Default, Clone, Debug)]
