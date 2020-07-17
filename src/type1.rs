@@ -5,7 +5,7 @@ use nom::{IResult,
 use tuple::{TupleElements};
 use itertools::Itertools;
 use indexmap::IndexMap;
-use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId};
+use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId, Name};
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
 use crate::parsers::parse;
@@ -23,8 +23,7 @@ pub struct Type1Font {
     unicode_map: HashMap<&'static str, u32>,
     font_matrix: Transform2F,
     bbox: Option<RectF>,
-    postscript_name: Option<String>,
-    full_name: Option<String>
+    name: Name,
 }
 impl Font for Type1Font {
     fn num_glyphs(&self) -> u32 {
@@ -52,11 +51,8 @@ impl Font for Type1Font {
     fn bbox(&self) -> Option<RectF> {
         self.bbox
     }
-    fn full_name(&self) -> Option<&str> {
-        self.full_name.as_ref().map(|s| s.as_str())
-    }
-    fn postscript_name(&self) -> Option<&str> {
-        self.postscript_name.as_ref().map(|s| s.as_str())
+    fn name(&self) -> &Name {
+        &self.name
     }
 }
 
@@ -94,6 +90,11 @@ impl Type1Font {
         let full_name = font_dict.get("FontInfo").and_then(|i|
             i.as_dict().unwrap().get("FullName").map(|i| i.as_str().unwrap().into())
         );
+        let name = Name {
+            full_name,
+            postscript_name,
+            .. Name::default()
+        };
         
         let char_strings = font_dict.get("CharStrings").expect("no /CharStrings").as_dict().unwrap();
         
@@ -173,8 +174,7 @@ impl Type1Font {
             codepoints,
             unicode_map,
             bbox,
-            postscript_name,
-            full_name
+            name,
         }
     }
 }

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::iter::once;
 use std::borrow::Cow;
-use crate::{Font, Glyph, Value, Context, State, type1, type2, IResultExt, R, VMetrics, HMetrics, GlyphId};
+use crate::{Font, Glyph, Value, Context, State, type1, type2, IResultExt, R, VMetrics, HMetrics, GlyphId, Name};
 use nom::{
     number::complete::{be_u8, be_u16, be_i16, be_u24, be_u32, be_i32},
     bytes::complete::{take},
@@ -25,7 +25,8 @@ pub struct CffFont {
     name_map: HashMap<String, u16>,
     encoding: Option<Encoding>,
     bbox: Option<RectF>,
-    vmetrics: Option<VMetrics>
+    vmetrics: Option<VMetrics>,
+    name: Name,
 }
 
 impl CffFont {
@@ -66,6 +67,9 @@ impl Font for CffFont {
     }
     fn vmetrics(&self) -> Option<VMetrics> {
         self.vmetrics
+    }
+    fn name(&self) -> &Name {
+        &self.name
     }
 }
 
@@ -312,7 +316,8 @@ impl<'a> CffSlot<'a> {
             name_map,
             encoding,
             bbox: self.bbox(),
-            vmetrics: None
+            vmetrics: None,
+            name: Name::default(),
         }
     }
 }

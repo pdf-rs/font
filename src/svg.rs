@@ -5,11 +5,17 @@ use nom::{
 use svg_dom::{Svg, Item};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::fmt;
 
 #[derive(Clone)]
 pub struct SvgGlyph {
     pub svg: Arc<Svg>,
     pub item: Arc<Item>,
+}
+impl fmt::Debug for SvgGlyph {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "SVG")
+    }
 }
 
 #[derive(Clone)]

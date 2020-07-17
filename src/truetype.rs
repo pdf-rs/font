@@ -1,6 +1,6 @@
 use std::iter;
 use std::ops::Deref;
-use crate::{Font, Glyph, R, IResultExt, GlyphId};
+use crate::{Font, Glyph, R, IResultExt, GlyphId, Name};
 use crate::parsers::{iterator, parse};
 use encoding::Encoding;
 use nom::{
@@ -10,8 +10,13 @@ use nom::{
 };
 use pathfinder_content::outline::{Outline, Contour};
 use pathfinder_geometry::{vector::Vector2F, transform2d::Transform2F, rect::RectF};
-use crate::opentype::{parse_tables, parse_head, parse_maxp, parse_loca, parse_cmap, parse_hhea, parse_hmtx, parse_kern, Hmtx, Tables, CMap};
-use crate::gpos::KernTable;
+use crate::opentype::{
+    parse_tables, parse_head, parse_maxp, parse_loca,
+    parse_hhea, parse_hmtx, parse_name, Hmtx, Tables,
+    cmap::{CMap, parse_cmap},
+    kern::{parse_kern},
+    gpos::KernTable,
+};
 use pathfinder_geometry::{transform2d::Matrix2x2F};
 use itertools::Itertools;
 
@@ -30,6 +35,7 @@ pub struct TrueTypeFont {
     units_per_em: u16,
     bbox: RectF,
     kern: KernTable,
+    name: Name
 }
 
 impl TrueTypeFont {
@@ -51,6 +57,7 @@ impl TrueTypeFont {
     pub fn from_shapes_and_metrics(tables: Tables<impl Deref<Target=[u8]>>, shapes: Vec<Shape>, hmtx: Hmtx) -> TrueTypeFont {
         let head = parse_head(tables.get(b"head").expect("no head")).get();
         let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
+        let name = tables.get(b"name").map(|data| parse_name(data).get()).unwrap_or_default();
         
         TrueTypeFont {
             shapes,
@@ -58,7 +65,8 @@ impl TrueTypeFont {
             hmtx,
             units_per_em: head.units_per_em,
             bbox: head.bbox(),
-            kern: tables.get(b"kern").map(|data| parse_kern(data).get()).unwrap_or_default()
+            kern: tables.get(b"kern").map(|data| parse_kern(data).get()).unwrap_or_default(),
+            name
         }
     }
     fn get_path(&self, idx: u32) -> Option<Outline> {
@@ -103,8 +111,8 @@ impl Font for TrueTypeFont {
     fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
         self.kern.get(left.0 as u16, right.0 as u16).unwrap_or(0) as f32
     }
-    fn get_cmap(&self) -> Option<&CMap> {
-        self.cmap.as_ref()
+    fn name(&self) -> &Name {
+        &self.name
     }
 }
 

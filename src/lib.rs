@@ -8,8 +8,6 @@ use std::any::TypeId;
 use nom::{IResult, Err::*, error::VerboseError};
 use tuple::{TupleElements};
 use encoding::Encoding;
-use crate::gsub::Gsub;
-use crate::opentype::CMap;
 
 #[cfg(feature="svg")]
 pub use svg::SvgGlyph;
@@ -40,6 +38,15 @@ pub struct HMetrics {
     pub lsb: f32,
     pub advance: f32
 }
+
+#[derive(Default, Debug, Clone)]
+pub struct Name {
+    pub family: Option<String>,
+    pub subfamily: Option<String>,
+    pub postscript_name: Option<String>,
+    pub full_name: Option<String>,
+}
+
 pub trait Font: 'static {
     /// Return the "number of glyphs" in the font.
     ///
@@ -108,27 +115,12 @@ pub trait Font: 'static {
     fn vmetrics(&self) -> Option<VMetrics> {
         None
     }
-
-    fn math(&self) -> Option<&MathHeader> {
-        None
-    }
     
     /// Kerning distance for the given glyph pair
     fn kerning(&self, _left: GlyphId, _right: GlyphId) -> f32 {
         0.0
     }
-    fn full_name(&self) -> Option<&str> {
-        None
-    }
-    fn postscript_name(&self) -> Option<&str> {
-        None
-    }
-    fn get_gsub(&self) -> Option<&Gsub> {
-        None
-    }
-    fn get_cmap(&self) -> Option<&CMap> {
-        None
-    }
+    fn name(&self) -> &Name;
 
     #[doc(hidden)]
     // this function must return the type id of the impl
@@ -153,23 +145,20 @@ mod cff;
 mod type1;
 mod type2;
 mod postscript;
-mod opentype;
+pub mod opentype;
 mod parsers;
 mod eexec;
+
+#[cfg(feature="woff")]
 mod woff;
-mod gpos;
-mod gsub;
 
 #[cfg(feature="svg")]
 mod svg;
-
-pub mod math;
 
 pub use truetype::TrueTypeFont;
 pub use cff::CffFont;
 pub use type1::Type1Font;
 pub use opentype::{OpenTypeFont};
-pub use math::MathHeader;
 
 pub type R<'a, T> = IResult<&'a [u8], T, VerboseError<&'a [u8]>>;
 
@@ -408,6 +397,17 @@ impl<T> IResultExt for IResult<&[u8], T, VerboseError<&[u8]>> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum FontType {
+    OpenType,
+    TrueTypeCollection,
+    Type1,
+    TrueType,
+    Woff,
+    Woff2,
+    Cff,
+}
+
 pub fn parse(data: &[u8]) -> Box<dyn Font + Send + Sync + 'static> {
     let magic: &[u8; 4] = data[0 .. 4].try_into().unwrap();
     info!("font magic: {:?} ({:?})", magic, String::from_utf8_lossy(&*magic));
@@ -417,10 +417,32 @@ pub fn parse(data: &[u8]) -> Box<dyn Font + Send + Sync + 'static> {
         b"ttcf" | b"typ1" => unimplemented!(), // Box::new(TrueTypeFont::parse(data, 0)) as _,
         b"true" => Box::new(TrueTypeFont::parse(data)) as _,
         b"%!PS" => Box::new(Type1Font::parse_postscript(data)) as _,
+
+        #[cfg(feature="woff")]
         b"wOFF" => Box::new(woff::parse_woff(data).get()) as _,
+
+        #[cfg(feature="woff")]
         b"wOF2" => Box::new(woff::parse_woff2(data).get()) as _,
+        
         &[1, _, _, _] => Box::new(CffFont::parse(data, 0)) as _,
         &[37, 33, _, _] => Box::new(Type1Font::parse_pfa(data)) as _,
         magic => panic!("unknown magic {:?}", magic)
+    }
+}
+
+use std::ops::RangeInclusive;
+#[derive(Debug, Clone)]
+pub struct FontInfo {
+    pub name: Name,
+    pub typ: FontType,
+    pub codepoints: Vec<RangeInclusive<u32>>,
+}
+
+pub fn font_info(data: &[u8]) -> Option<FontInfo> {
+    let magic: &[u8; 4] = data[0 .. 4].try_into().unwrap();
+    info!("font magic: {:?} ({:?})", magic, String::from_utf8_lossy(&*magic));
+    match magic {
+        b"OTTO" | [0,1,0,0] => Some(OpenTypeFont::info(data)),
+        _ => None
     }
 }
