@@ -70,7 +70,7 @@ pub fn parse_gsub(data: &[u8]) -> R<GSub> {
     
     let (_, script_list) = parse_script_list(&data[script_list_off as usize ..])?;
     let (_, feature_list) = parse_feature_list(&data[feature_list_off as usize ..])?;
-
+/*
     let print_lang = |lang: &LanguageSystem| {
         if let Some(required) = lang.required_feature {
             println!("    required {:?}", feature_list[required.0 as usize].tag);
@@ -90,7 +90,7 @@ pub fn parse_gsub(data: &[u8]) -> R<GSub> {
             print_lang(lang);
         }
     }
-
+*/
     let (i, _feature_variations_offset) = match minor_version {
         0 => (i, 0),
         1 => be_u32(i)?,
