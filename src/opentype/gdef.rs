@@ -7,7 +7,7 @@ use nom::{
 };
 use std::collections::HashMap;
 
-fn parse_gdef(data: &[u8]) -> R<HashMap<u16, u16>> {
+pub fn parse_gdef(data: &[u8]) -> R<GDef> {
     let (i, major) = be_u16(data)?;
     let (i, minor) = be_u16(i)?;
 
@@ -22,5 +22,31 @@ fn parse_gdef(data: &[u8]) -> R<HashMap<u16, u16>> {
     let mut mark_classes = HashMap::new();
     parse_class_def(mark_attach_class_def_offset.of(data), &mut mark_classes)?;
 
-    Ok((i, mark_classes))
+    Ok((i, GDef { mark_classes }))
+}
+
+#[derive(Clone)]
+pub struct GDef {
+    mark_classes: HashMap<u16, u16>
+}
+impl GDef {
+    pub fn mark_class(&self, gid: u16) -> Option<MarkClass> {
+        Some(match *self.mark_classes.get(&gid)? {
+            0 => MarkClass::Unassigned,
+            1 => MarkClass::Base,
+            2 => MarkClass::Ligature,
+            3 => MarkClass::Mark,
+            4 => MarkClass::Component,
+            _ => return None
+        })
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum MarkClass {
+    Unassigned,
+    Base,
+    Ligature,
+    Mark,
+    Component
 }

@@ -4,16 +4,27 @@ use nom::{
     number::complete::{be_i16, be_u16, be_u32},
     sequence::{tuple},
 };
-use crate::{R};
+use crate::{R, GlyphId};
 use crate::parsers::{*};
 use crate::opentype::{Maxp, parse_lookup_list, coverage_table};
 use itertools::{Itertools};
 
 
 #[derive(Default, Clone)]
-pub struct Gpos {
+pub struct GPos {
     pub kern: KernTable,
     pub mark_to_base: HashMap<(u16, u16), (i16, i16)>
+}
+impl GPos {
+    pub fn from_kern(kern: KernTable) -> GPos {
+        GPos {
+            kern,
+            mark_to_base: HashMap::new()
+        }
+    }
+    pub fn get_mark_to_base(&self, base: GlyphId, mark: GlyphId) -> Option<(i16, i16)> {
+        self.mark_to_base.get(&(base.0 as u16, mark.0 as u16)).cloned()
+    }
 }
 
 
@@ -37,7 +48,7 @@ impl KernTable {
 }
 
 // figure out how to replace with a dedicated sparse 2d map
-pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> R<'a, Gpos> {
+pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> R<'a, GPos> {
     debug!("parse GPOS");
     let (i, major_version) = be_u16(data)?;
     assert_eq!(major_version, 1);
@@ -53,7 +64,7 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> R<'a, Gpos> {
         v => panic!("unsupported GPOS version 1.{}", v)
     };
     
-    let mut gpos = Gpos::default();
+    let mut gpos = GPos::default();
     
     parse_lookup_list(&data[lookup_list_off as usize ..], |lookup_idx, data, lookup_type, _lookup_flag| {
         debug!("lookup type {}", lookup_type);
@@ -151,7 +162,7 @@ fn parse_mark_array_table(data: &[u8]) -> R<impl Iterator<Item=(u16, (i16, i16))
     let iter = iterator_n(i, move |i| {
         let (i, mark_class) = be_u16(i)?;
         let (i, mark_anchor_offset) = offset(i)?;
-        let (i, pos) = parse_anchor_table(mark_anchor_offset.of(data))?;
+        let (_, pos) = parse_anchor_table(mark_anchor_offset.of(data))?;
         Ok((i, (mark_class, pos)))
     }, mark_count);
     Ok((i, iter))
@@ -163,7 +174,7 @@ fn parse_anchor_table(i: &[u8]) -> R<(i16, i16)> {
     Ok((i, (x, y)))
 }
 
-fn parse_mark_to_base_attachment<'a>(data: &'a [u8], gpos: &mut Gpos) -> R<'a, ()> {
+fn parse_mark_to_base_attachment<'a>(data: &'a [u8], gpos: &mut GPos) -> R<'a, ()> {
     let (i, format) = be_u16(data)?;
     assert_eq!(format, 1);
     let (i, mark_coverage_offset) = offset(i)?;
@@ -178,6 +189,7 @@ fn parse_mark_to_base_attachment<'a>(data: &'a [u8], gpos: &mut Gpos) -> R<'a, (
     let base_array: Vec<_> = parse_base_array(base_array_offset.of(data), mark_class_count)?.1.flat_map(|arr| arr.iter()).collect();
 
     for (mark_gid, (mark_class, mark_anchor)) in mark_coverage.zip(parse_mark_array_table(mark_array_offset.of(data))?.1) {
+        assert!(mark_class < mark_class_count);
         for (base_nr, &base_gid) in base_coverage.iter().enumerate() {
             let base_anchor = base_array[base_nr * mark_class_count as usize + mark_class as usize];
             gpos.mark_to_base.insert((base_gid, mark_gid), (base_anchor.0 - mark_anchor.0, base_anchor.1 - mark_anchor.1));

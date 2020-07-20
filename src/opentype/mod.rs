@@ -30,20 +30,22 @@ pub mod math;
 pub mod gdef;
 
 use math::{parse_math, MathHeader};
-use gpos::{parse_gpos, KernTable};
-use gsub::{Gsub, parse_gsub};
+use gpos::{parse_gpos, KernTable, GPos};
+use gsub::{GSub, parse_gsub};
 use cmap::{CMap, parse_cmap};
+use gdef::{GDef, parse_gdef};
 use kern::parse_kern;
 
 #[derive(Clone)]
 pub struct OpenTypeFont {
     outlines: Vec<Outline>,
-    kern: KernTable,
+    pub gpos: Option<GPos>,
     pub cmap: Option<CMap>,
     hmtx: Option<Hmtx>,
     bbox: Option<RectF>,
-    pub gsub: Option<Gsub>,
+    pub gsub: Option<GSub>,
     pub math: Option<MathHeader>,
+    pub gdef: Option<GDef>,
     vmetrics: Option<VMetrics>,
 
     #[cfg(feature="svg")]
@@ -95,33 +97,32 @@ impl OpenTypeFont {
         let maxp = tables.get(b"maxp").map(|data| parse_maxp(data).get());
         let num_glyphs = maxp.as_ref().map(|maxp| maxp.num_glyphs as u32).unwrap_or(outlines.len() as u32);
 
-        let kern = if let Some(data) = tables.get(b"GPOS") {
+        let gpos = if let Some(data) = tables.get(b"GPOS") {
             let maxp = maxp.as_ref().expect("no maxp");
-            let gpos = parse_gpos(data, &maxp).get();
-            gpos.kern
+            Some(parse_gpos(data, &maxp).get())
         } else if let Some(data) = tables.get(b"kern") {
-            parse_kern(data).get()
+            Some(GPos::from_kern(parse_kern(data).get()))
         } else {
-            Default::default()
+            None
         };
         
         let gsub = tables.get(b"GSUB").map(|data| parse_gsub(data).get());
         
-        info!("{} glyph pair kern entries and {} class pair kern entries", kern.glyph_pairs.len(), kern.class_pairs.len());
-
         let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
         let math = tables.get(b"MATH").map(|data| parse_math(data).get());
         let vmetrics = tables.get(b"hhea").map(|data| parse_hhea(data).get().into());
         let name = tables.get(b"name").map(|data| parse_name(data).get()).unwrap_or_default();
+        let gdef = tables.get(b"gdef").map(|data| parse_gdef(data).get());
 
         OpenTypeFont {
             outlines,
-            kern,
+            gpos,
             cmap,
             hmtx,
             bbox,
             gsub,
             math,
+            gdef,
             vmetrics,
 
             #[cfg(feature="svg")]
@@ -189,10 +190,10 @@ impl Font for OpenTypeFont {
         self.bbox
     }
     fn vmetrics(&self) -> Option<VMetrics> {
-        None
+        self.vmetrics
     }
     fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
-        self.kern.get(left.0 as u16, right.0 as u16).unwrap_or(0) as f32
+        self.gpos.as_ref().and_then(|gpos| gpos.kern.get(left.0 as u16, right.0 as u16).map(|k| k as f32)).unwrap_or(0.0)
     }
     fn name(&self) -> &Name {
         &self.name

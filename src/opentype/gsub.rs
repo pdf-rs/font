@@ -25,12 +25,12 @@ impl GlyphList {
 }
 
 #[derive(Debug, Clone)]
-pub struct Gsub {
+pub struct GSub {
     scripts: Vec<Script>,
     features: Vec<Feature>,
     lookup: Vec<Vec<Substitution>>,
 }
-impl Gsub {
+impl GSub {
     pub fn default_language(&self) -> Option<&LanguageSystem> {
         self.scripts.get(0).and_then(|script| script.default_language.as_ref())
     }
@@ -58,7 +58,7 @@ pub enum Substitution {
     Ligatures(HashMap<u16, Vec<(GlyphList, u16)>>),
 }
 
-pub fn parse_gsub(data: &[u8]) -> R<Gsub> {
+pub fn parse_gsub(data: &[u8]) -> R<GSub> {
     debug!("parse GSUB");
     let (i, major_version) = be_u16(data)?;
     assert_eq!(major_version, 1);
@@ -124,7 +124,7 @@ pub fn parse_gsub(data: &[u8]) -> R<Gsub> {
         Ok((data, ()))
     })?;
     
-    Ok((i, Gsub {
+    Ok((i, GSub {
         lookup,
         scripts: script_list,
         features: feature_list,
