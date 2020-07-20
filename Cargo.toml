@@ -24,11 +24,11 @@ itertools = "0.9"
 indexmap = "1.4"
 brotli-decompressor = { version = "2.3", optional = true }
 inflate = { version = "0.4.5", optional = true }
-svg_dom = { git = "https://github.com/s3bk/pathfinder_svg", optional=true }
+svg_dom = { git = "https://github.com/s3bk/svg", optional=true }
 
 [dev-dependencies]
-svg_dom = { git = "https://github.com/s3bk/pathfinder_svg" }
-svg_draw = { git = "https://github.com/s3bk/pathfinder_svg" }
+svg_dom = { git = "https://github.com/s3bk/svg" }
+svg_draw = { git = "https://github.com/s3bk/svg" }
 pathfinder_renderer = { git = "https://github.com/servo/pathfinder/" }
 pathfinder_export = { git = "https://github.com/servo/pathfinder/" }
 walkdir = "2.3"
