@@ -10,7 +10,7 @@ svg = ["svg_dom", "inflate"]
 woff = ["brotli-decompressor"]
 
 [dependencies]
-encoding = { git = "https://github.com/pdf-rs/encoding/" }
+pdf_encoding = "0.1.0"
 pathfinder_geometry = { git = "https://github.com/servo/pathfinder/" }
 pathfinder_content = { git = "https://github.com/servo/pathfinder/" }
 pathfinder_color = { git = "https://github.com/servo/pathfinder/" }
@@ -34,3 +34,11 @@ pathfinder_export = { git = "https://github.com/servo/pathfinder/" }
 walkdir = "2.3"
 env_logger = { version = "*" }
 memmap = "*"
+
+[patch."https://github.com/s3bk/svg"]
+svg_dom = { path = "../svg/dom" }
+svg_draw = { path = "../svg/draw" }
+svg_text = { path = "../svg/text" }
+
+[patch."https://github.com/pdf-rs/font"]
+font = { path = "." }

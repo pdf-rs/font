@@ -9,7 +9,7 @@ use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, G
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
 use crate::parsers::parse;
-use encoding::{glyphname_to_unicode};
+use pdf_encoding::{glyphname_to_unicode};
 use pathfinder_geometry::{
     transform2d::Transform2F,
     vector::Vector2F,

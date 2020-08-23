@@ -6,8 +6,8 @@ use std::ops::{Deref, RangeInclusive};
 use crate::{Font, R, IResultExt, VMetrics, HMetrics, Glyph, GlyphId, Name, FontInfo, FontType};
 use crate::truetype::{Shape, parse_shapes, get_outline};
 use crate::cff::{read_cff};
-use encoding::Encoding;
-use crate::parsers::{iterator, iterator_n, parse};
+use pdf_encoding::Encoding;
+use crate::parsers::{*};
 use nom::{
     number::complete::{be_u8, be_i16, be_u16, be_i64, be_i32, be_u32, be_u24},
     multi::{count, many0},
@@ -28,6 +28,7 @@ pub mod gsub;
 pub mod kern;
 pub mod math;
 pub mod gdef;
+pub mod base;
 
 use math::{parse_math, MathHeader};
 use gpos::{parse_gpos, KernTable, GPos};
@@ -35,6 +36,7 @@ use gsub::{GSub, parse_gsub};
 use cmap::{CMap, parse_cmap};
 use gdef::{GDef, parse_gdef};
 use kern::parse_kern;
+use base::parse_base;
 
 #[derive(Clone)]
 pub struct OpenTypeFont {
@@ -113,6 +115,7 @@ impl OpenTypeFont {
         let vmetrics = tables.get(b"hhea").map(|data| parse_hhea(data).get().into());
         let name = tables.get(b"name").map(|data| parse_name(data).get()).unwrap_or_default();
         let gdef = tables.get(b"gdef").map(|data| parse_gdef(data).get());
+        tables.get(b"BASE").map(|data| parse_base(data).get());
 
         OpenTypeFont {
             outlines,
@@ -549,4 +552,42 @@ fn utf16_be(data: &[u8]) -> Result<String, std::string::FromUtf16Error> {
         }
     }).collect();
     String::from_utf16(&wide)
+}
+
+use std::fmt;
+#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+pub struct Tag(pub [u8; 4]);
+impl fmt::Debug for Tag {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match std::str::from_utf8(&self.0) {
+            Ok(s) => f.write_str(s),
+            Err(_) => write!(f, "{:?}", self.0)
+        }
+    }
+}
+impl Parser for Tag {
+    type Output = Self;
+    fn parse(i: &[u8]) -> R<Self::Output> {
+        tag(i)
+    }
+}
+impl FixedSize for Tag {
+    const SIZE: usize = 4;
+}
+/// Comparison against `&str`. The argument can be up to 4 bytes long.
+/// 
+/// The comparison behaves as if the argument was padded to a length of 4 bytes with spaces.
+impl PartialEq<str> for Tag {
+    fn eq(&self, other: &str) -> bool {
+        let n = other.len();
+        if n < 4 {
+            self.0[.. n] == *other.as_bytes() && self.0[n ..].iter().all(|&b| b == b' ')
+        } else {
+            self.0 == *other.as_bytes()
+        }
+    }
+}
+fn tag(i: &[u8]) -> R<Tag> {
+    let (i, s) = take(4usize)(i)?;
+    Ok((i, Tag(s.try_into().unwrap())))
 }

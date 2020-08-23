@@ -7,7 +7,7 @@ use std::convert::TryInto;
 use std::any::TypeId;
 use nom::{IResult, Err::*, error::VerboseError};
 use tuple::{TupleElements};
-use encoding::Encoding;
+use pdf_encoding::Encoding;
 
 #[cfg(feature="svg")]
 pub use svg::SvgGlyph;

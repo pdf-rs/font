@@ -8,7 +8,7 @@ use nom::{
 };
 use crate::{R, GlyphId};
 use crate::parsers::{iterator_n};
-use crate::opentype::{parse_lookup_list, coverage_table};
+use crate::opentype::{parse_lookup_list, coverage_table, tag, Tag};
 
 #[derive(Debug, Clone)]
 pub struct GlyphList(Vec<u16>);
@@ -34,8 +34,8 @@ impl GSub {
     pub fn default_language(&self) -> Option<&LanguageSystem> {
         self.scripts.get(0).and_then(|script| script.default_language.as_ref())
     }
-    pub fn language(&self, name: &str) -> Option<&LanguageSystem> {
-        self.scripts.iter().flat_map(|s| s.languages.iter().filter(|(tag, _)| tag == name).map(|(_, lang)| lang)).next()
+    pub fn language(&self, lang_tag: Tag) -> Option<&LanguageSystem> {
+        self.scripts.iter().flat_map(|s| s.languages.iter().filter(|&&(tag, _)| tag == lang_tag).map(|(_, lang)| lang)).next()
     }
     pub fn scripts(&self) -> &[Script] {
         &self.scripts
@@ -272,33 +272,4 @@ fn parse_feature_table(i: &[u8]) -> R<impl Iterator<Item=u16> + '_> {
     let (i, _feature_params) = be_u16(i)?;
     let (i, lookup_index_count) = be_u16(i)?;
     Ok((i, iterator_n(i, be_u16, lookup_index_count)))
-}
-
-use std::fmt;
-#[derive(Copy, Clone, Hash, PartialEq, Eq)]
-pub struct Tag(pub [u8; 4]);
-impl fmt::Debug for Tag {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match std::str::from_utf8(&self.0) {
-            Ok(s) => f.write_str(s),
-            Err(_) => write!(f, "{:?}", self.0)
-        }
-    }
-}
-/// Comparison against `&str`. The argument can be up to 4 bytes long.
-/// 
-/// The comparison behaves as if the argument was padded to a length of 4 bytes with spaces.
-impl PartialEq<str> for Tag {
-    fn eq(&self, other: &str) -> bool {
-        let n = other.len();
-        if n < 4 {
-            self.0[.. n] == *other.as_bytes() && self.0[n ..].iter().all(|&b| b == b' ')
-        } else {
-            self.0 == *other.as_bytes()
-        }
-    }
-}
-fn tag(i: &[u8]) -> R<Tag> {
-    let (i, s) = take(4usize)(i)?;
-    Ok((i, Tag(s.try_into().unwrap())))
 }

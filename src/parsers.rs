@@ -251,6 +251,14 @@ pub struct ParserIterator<'a, T, F> {
     input: &'a [u8],
     _m: PhantomData<T>
 }
+impl<'a, T, F: Clone> Clone for ParserIterator<'a, T, F> {
+    fn clone(&self) -> Self {
+        ParserIterator {
+            parser: self.parser.clone(),
+            .. *self
+        }
+    }
+}
 pub fn iterator<'a, T, F>(input: &'a [u8], parser: F) -> ParserIterator<'a, T, F> where
     F: Fn(&'a [u8]) -> R<'a, T>
 {
@@ -405,7 +413,7 @@ pub struct Array<'a, P> {
     _m: PhantomData<P>,
 }
 impl<'a, P: Parser + FixedSize> Array<'a, P> {
-    pub fn iter(self) -> impl Iterator<Item=P::Output> + ExactSizeIterator + 'a {
+    pub fn iter(&self) -> impl Iterator<Item=P::Output> + ExactSizeIterator + 'a {
         self.data.chunks(P::SIZE).map(|chunk| P::parse(chunk).unwrap().1)
     }
     pub fn map<F>(self, f: F) -> ArrayMap<'a, P, F> {

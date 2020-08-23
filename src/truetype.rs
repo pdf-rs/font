@@ -2,7 +2,7 @@ use std::iter;
 use std::ops::Deref;
 use crate::{Font, Glyph, R, IResultExt, GlyphId, Name};
 use crate::parsers::{iterator, parse};
-use encoding::Encoding;
+use pdf_encoding::Encoding;
 use nom::{
     number::complete::{be_u8, be_i8, be_i16, be_u16},
     bytes::complete::take,
@@ -138,7 +138,7 @@ pub fn parse_shapes(loca: &[u32], data: &[u8]) -> Vec<Shape> {
     let mut shapes = Vec::with_capacity(loca.len() - 1);
     for (i, (start, end)) in loca.iter().cloned().tuple_windows().enumerate() {
         let slice = &data[start as usize .. end as usize];
-        debug!("gid {} : data[{} .. {}]", i, start, end);
+        //debug!("gid {} : data[{} .. {}]", i, start, end);
         let shape = parse_glyph_shape(slice).get();
         shapes.push(shape);
     }
@@ -154,7 +154,7 @@ fn parse_glyph_shape(data: &[u8]) -> R<Shape> {
     let (i, number_of_contours) = be_i16(data)?;
     
     let (i, _) = take(8usize)(i)?;
-    debug!("n_contours: {}", number_of_contours);
+    //debug!("n_contours: {}", number_of_contours);
     match number_of_contours {
         0 => Ok((i, Shape::Empty)),
         n if n >= 0 => glyph_shape_positive_contours(i, number_of_contours as usize),
