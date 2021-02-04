@@ -980,8 +980,8 @@ impl Vm {
 
             Operator::Abs => {
                 let out = match self.pop() {
-                    Item::Real(r) => Item::Real(r.abs()),
-                    Item::Int(i32::MIN_VAL) => Item::Real(-R32::from(i32::MIN_VAL as f32)),
+                    Item::Real(r) => Item::Real(R32::from(r.into_inner().abs())),
+                    Item::Int(i32::MIN) => Item::Real(-R32::from(i32::MIN as f32)),
                     Item::Int(i) => Item::Int(i.abs()),
                     arg => panic!("abs: unsupported arg {:?})", self.display(arg))
                 };
@@ -1009,7 +1009,7 @@ impl Vm {
                     },
                     (Item::Real(a), Item::Real(b)) => Item::Real(a - b),
                     (Item::Int(a), Item::Real(b)) => Item::Real(R32::from(a as f32) - b),
-                    (Item::Real(b), Item::Int(a)) => Item::Real(a - R32::from(b)),
+                    (Item::Real(a), Item::Int(b)) => Item::Real(a - R32::from(b as f32)),
                     (arg1, arg2) => panic!("sub: unsupported args {:?} {:?})", self.display(arg1), self.display(arg2))
                 };
                 self.push(out);
