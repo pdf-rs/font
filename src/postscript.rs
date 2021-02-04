@@ -277,6 +277,8 @@ macro_rules! operators {
 }
 
 operators!{
+    "abs"           => Abs,
+    "add"           => Add,
     "array"         => Array,
     "begin"         => Begin,
     "currentdict"   => CurrentDict,
@@ -307,6 +309,7 @@ operators!{
     "length"        => Length,
     "maxlength"     => MaxLength,
     "mark"          => Mark,
+    "mul"           => Mul,
     "noaccess"      => NoAccess,
     "not"           => Not,
     "pop"           => Pop,
@@ -314,6 +317,7 @@ operators!{
     "readonly"      => ReadOnly,
     "readstring"    => ReadString,
     "string"        => String,
+    "sub"           => Sub,
     "true"          => True,
     "]"             => EndArray;
     
@@ -972,6 +976,57 @@ impl Vm {
                     },
                     arg => panic!("eexec: unsupported arg {:?})", self.display(arg))
                 }
+            }
+
+            Operator::Abs => {
+                let out = match self.pop() {
+                    Item::Real(r) => Item::Real(r.abs()),
+                    Item::Int(i32::MIN_VAL) => Item::Real(-R32::from(i32::MIN_VAL as f32)),
+                    Item::Int(i) => Item::Int(i.abs()),
+                    arg => panic!("abs: unsupported arg {:?})", self.display(arg))
+                };
+                self.push(out);
+            }
+            Operator::Add => {
+                let out = match self.pop_tuple() {
+                    (Item::Int(a), Item::Int(b)) => match a.checked_add(b) {
+                        Some(c) => Item::Int(c),
+                        None => Item::Real(R32::from(a as f32) + R32::from(b as f32))
+                    },
+                    (Item::Real(a), Item::Real(b)) => Item::Real(a + b),
+                    (Item::Int(a), Item::Real(b)) |
+                    (Item::Real(b), Item::Int(a)) =>
+                        Item::Real(R32::from(a as f32) + b),
+                    (arg1, arg2) => panic!("add: unsupported args {:?} {:?})", self.display(arg1), self.display(arg2))
+                };
+                self.push(out);
+            }
+            Operator::Sub => {
+                let out = match self.pop_tuple() {
+                    (Item::Int(a), Item::Int(b)) => match a.checked_sub(b) {
+                        Some(c) => Item::Int(c),
+                        None => Item::Real(R32::from(a as f32) - R32::from(b as f32))
+                    },
+                    (Item::Real(a), Item::Real(b)) => Item::Real(a - b),
+                    (Item::Int(a), Item::Real(b)) => Item::Real(R32::from(a as f32) - b),
+                    (Item::Real(b), Item::Int(a)) => Item::Real(a - R32::from(b)),
+                    (arg1, arg2) => panic!("sub: unsupported args {:?} {:?})", self.display(arg1), self.display(arg2))
+                };
+                self.push(out);
+            }
+            Operator::Mul => {
+                let out = match self.pop_tuple() {
+                    (Item::Int(a), Item::Int(b)) => match a.checked_mul(b) {
+                        Some(c) => Item::Int(c),
+                        None => Item::Real(R32::from(a as f32) * R32::from(b as f32))
+                    },
+                    (Item::Real(a), Item::Real(b)) => Item::Real(a * b),
+                    (Item::Int(a), Item::Real(b)) |
+                    (Item::Real(b), Item::Int(a)) =>
+                        Item::Real(R32::from(a as f32) * b),
+                    (arg1, arg2) => panic!("mul: unsupported args {:?} {:?})", self.display(arg1), self.display(arg2))
+                };
+                self.push(out);
             }
         }
     }
