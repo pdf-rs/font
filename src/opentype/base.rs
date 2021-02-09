@@ -1,6 +1,5 @@
 use nom::{
-    bytes::complete::{take},
-    number::complete::{be_i16, be_u16, be_u32},
+    number::complete::{be_i16, be_u16},
     sequence::{tuple},
 };
 use crate::{R};
@@ -9,16 +8,13 @@ use crate::opentype::{tag, Tag};
 
 pub fn parse_base(data: &[u8]) -> R<()> {
     let (i, major) = be_u16(data)?;
-    let (i, minor) = be_u16(data)?;
+    let (i, minor) = be_u16(i)?;
 
     assert_eq!(major, 1);
     let (i, horiz_offset) = offset(i)?;
     let (i, vertical_offset) = offset(i)?;
 
-    println!("horizontal");
     let (_, ()) = parse_axis_table(horiz_offset.of(data))?;
-
-    println!("vertical");
     let (_, ()) = parse_axis_table(vertical_offset.of(data))?;
 
     Ok((i, ()))
