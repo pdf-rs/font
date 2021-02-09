@@ -15,6 +15,7 @@ pub fn parse_math(data: &[u8]) -> R<MathHeader> {
 
 macro_rules! parser {
     ($name:ident : $fun:ident -> $out:ty) => (
+        #[allow(non_camel_case_types)]
         pub struct $name;
         impl Parser for $name {
             type Output = $out;

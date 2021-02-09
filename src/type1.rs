@@ -5,7 +5,7 @@ use nom::{IResult,
 use tuple::{TupleElements};
 use itertools::Itertools;
 use indexmap::IndexMap;
-use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId, Name};
+use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId, Name, Value};
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
 use crate::parsers::parse;
@@ -357,6 +357,11 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                                 s.contour.push_cubic(c3, c4, p5);
                                 ps_stack.push(y);
                                 ps_stack.push(x);
+                            }
+                            3 => {
+                                assert_eq!(n, 1);
+                                ps_stack.push(s.pop());
+                                ps_stack.push(Value::Int(3));
                             }
                             _ => {
                                 let m = s.stack.len();

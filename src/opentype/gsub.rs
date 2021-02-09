@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::convert::TryInto;
 use nom::{
     number::complete::{be_u16, be_u32},
     multi::count,

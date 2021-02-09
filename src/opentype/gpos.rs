@@ -118,7 +118,7 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, _num_glyphs: 
             let (i, pair_set_count) = be_u16(i)?;
             let (i, _pair_set_offsets) = be_u16(i)?;
             
-            let mut coverage = coverage_table(coverage_off.of(data))?.1;
+            let mut coverage = coverage_table(coverage_off.of(data).unwrap())?.1;
             for offset in iterator_n(i, be_u16, pair_set_count) {
                 let first_glyph = coverage.next().unwrap();
                 let i = &data[offset as usize ..];
@@ -162,7 +162,7 @@ fn parse_mark_array_table(data: &[u8]) -> R<impl Iterator<Item=(u16, (i16, i16))
     let iter = iterator_n(i, move |i| {
         let (i, mark_class) = be_u16(i)?;
         let (i, mark_anchor_offset) = offset(i)?;
-        let (_, pos) = parse_anchor_table(mark_anchor_offset.of(data))?;
+        let (_, pos) = parse_anchor_table(mark_anchor_offset.of(data).unwrap())?;
         Ok((i, (mark_class, pos)))
     }, mark_count);
     Ok((i, iter))
@@ -183,12 +183,12 @@ fn parse_mark_to_base_attachment<'a>(data: &'a [u8], gpos: &mut GPos) -> R<'a, (
     let (i, mark_array_offset) = offset(i)?;
     let (i, base_array_offset) = offset(i)?;
 
-    let mark_coverage = coverage_table(mark_coverage_offset.of(data))?.1;
-    let base_coverage: Vec<_> = coverage_table(base_coverage_offset.of(data))?.1.collect();
+    let mark_coverage = coverage_table(mark_coverage_offset.of(data).unwrap())?.1;
+    let base_coverage: Vec<_> = coverage_table(base_coverage_offset.of(data).unwrap())?.1.collect();
 
-    let base_array: Vec<_> = parse_base_array(base_array_offset.of(data), mark_class_count)?.1.flat_map(|arr| arr.iter()).collect();
+    let base_array: Vec<_> = parse_base_array(base_array_offset.of(data).unwrap(), mark_class_count)?.1.flat_map(|arr| arr.iter()).collect();
 
-    for (mark_gid, (mark_class, mark_anchor)) in mark_coverage.zip(parse_mark_array_table(mark_array_offset.of(data))?.1) {
+    for (mark_gid, (mark_class, mark_anchor)) in mark_coverage.zip(parse_mark_array_table(mark_array_offset.of(data).unwrap())?.1) {
         assert!(mark_class < mark_class_count);
         for (base_nr, &base_gid) in base_coverage.iter().enumerate() {
             let base_anchor = base_array[base_nr * mark_class_count as usize + mark_class as usize];
@@ -201,7 +201,7 @@ fn parse_mark_to_base_attachment<'a>(data: &'a [u8], gpos: &mut GPos) -> R<'a, (
 
 fn parse_base_array<'a>(data: &'a [u8], mark_class_count: u16) -> R<'a, impl Iterator<Item=ArrayMap<'a, Offset, impl Fn(Offset) -> (i16, i16) + 'a>>> {
     let (i, base_count) = be_u16(data)?;
-    let p = array_map::<Offset, _, _>(mark_class_count, move |off: Offset| parse_anchor_table(off.of(data)).unwrap().1);
+    let p = array_map::<Offset, _, _>(mark_class_count, move |off: Offset| parse_anchor_table(off.of(data).unwrap()).unwrap().1);
     let iter = iterator_n(i, p, base_count);
     Ok((i, iter))
 }

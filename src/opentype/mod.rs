@@ -2,20 +2,20 @@
 
 use std::convert::TryInto;
 use std::collections::HashMap;
-use std::ops::{Deref, RangeInclusive};
+use std::ops::{Deref};
 use crate::{Font, R, IResultExt, VMetrics, HMetrics, Glyph, GlyphId, Name, FontInfo, FontType};
 use crate::truetype::{Shape, parse_shapes, get_outline};
 use crate::cff::{read_cff};
 use pdf_encoding::Encoding;
 use crate::parsers::{*};
 use nom::{
-    number::complete::{be_u8, be_i16, be_u16, be_i64, be_i32, be_u32, be_u24},
+    number::complete::{be_u8, be_i16, be_u16, be_i64, be_i32, be_u32},
     multi::{count, many0},
     combinator::map,
     bytes::complete::take,
     sequence::tuple,
 };
-use pathfinder_content::outline::{Outline, Contour};
+use pathfinder_content::outline::{Outline};
 use pathfinder_geometry::{vector::Vector2F, transform2d::Transform2F, rect::RectF};
 use itertools::{Either};
 
@@ -31,7 +31,7 @@ pub mod gdef;
 pub mod base;
 
 use math::{parse_math, MathHeader};
-use gpos::{parse_gpos, KernTable, GPos};
+use gpos::{parse_gpos, GPos};
 use gsub::{GSub, parse_gsub};
 use cmap::{CMap, parse_cmap};
 use gdef::{GDef, parse_gdef};

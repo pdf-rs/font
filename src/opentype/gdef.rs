@@ -1,9 +1,7 @@
-use crate::{GlyphId, R, parsers::*};
+use crate::{R, parsers::*};
 use super::parse_class_def;
 use nom::{
-    number::complete::{be_u8, be_u16, be_u32, be_u24},
-    bytes::complete::take,
-    sequence::tuple,
+    number::complete::{be_u16},
 };
 use std::collections::HashMap;
 
@@ -20,7 +18,7 @@ pub fn parse_gdef(data: &[u8]) -> R<GDef> {
     let (i, mark_attach_class_def_offset) = offset(i)?;
 
     let mut mark_classes = HashMap::new();
-    parse_class_def(mark_attach_class_def_offset.of(data), &mut mark_classes)?;
+    parse_class_def(mark_attach_class_def_offset.of(data).unwrap(), &mut mark_classes)?;
 
     Ok((i, GDef { mark_classes }))
 }

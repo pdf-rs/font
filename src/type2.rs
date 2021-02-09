@@ -1,5 +1,4 @@
 use crate::{State, v, Value, Context, TryIndex};
-use pathfinder_content::outline::{Outline};
 use nom::{IResult,
     bytes::complete::{take},
     number::complete::{be_u8, be_i16, be_i32}

@@ -368,8 +368,13 @@ pub fn offset(i: &[u8]) -> R<Offset> {
 }
 pub struct Offset(pub u16);
 impl Offset {
-    pub fn of<'a>(&self, data: &'a [u8]) -> &'a [u8] {
-        &data[self.0 as usize ..]
+    pub fn of<'a>(&self, data: &'a [u8]) -> Option<&'a [u8]> {
+        let off = self.0 as usize;
+        if off != 0 && off <= data.len() {
+            Some(&data[off ..])
+        } else {
+            None
+        }
     }
 }
 impl Parser for Offset {

@@ -14,7 +14,7 @@ use nom::{
     Err::*,
 };
 use pdf_encoding::{Encoding};
-use pathfinder_content::outline::{Outline, Contour};
+use pathfinder_content::outline::{Outline};
 use pathfinder_geometry::{vector::Vector2F, transform2d::Transform2F, rect::RectF};use tuple::TupleElements;
 
 #[derive(Clone)]
