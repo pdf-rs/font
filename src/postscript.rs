@@ -341,7 +341,7 @@ impl<'a> Input<'a> {
         first
     }
     fn advance(&mut self, n: usize) {
-        self.data = &self.data[n ..];
+        self.data = self.data.get(n ..).unwrap_or(&[]);
     }
     // true if buf.len() bytes were read
     // false if EOF (buf will be truncated)

@@ -187,7 +187,7 @@ impl Font for OpenTypeFont {
         None
     }
     fn encoding(&self) -> Option<Encoding> {
-        None
+        Some(Encoding::Unicode)
     }
     fn bbox(&self) -> Option<RectF> {
         self.bbox
