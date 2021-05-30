@@ -245,6 +245,16 @@ impl TryIndex for Vec<Vec<u8>> {
         self.get(idx).map(|v| &**v)
     }
 }
+impl TryIndex for Vec<Option<Vec<u8>>> {
+    #[inline]
+    fn try_index(&self, idx: usize) -> Option<&[u8]> {
+        if let Some(w) = self.get(idx) {
+            w.as_ref().map(|v| &**v)
+        } else {
+            None
+        }
+    }
+}
 impl<'a> TryIndex for Vec<&'a [u8]> {
     #[inline]
     fn try_index(&self, idx: usize) -> Option<&[u8]> {
