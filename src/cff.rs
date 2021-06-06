@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::iter::once;
 use std::borrow::Cow;
+use std::rc::Rc;
 use crate::{Font, Glyph, Value, Context, State, type1, type2, IResultExt, R, VMetrics, HMetrics, GlyphId, Name};
 use nom::{
     number::complete::{be_u8, be_u16, be_i16, be_u24, be_u32, be_i32},
@@ -116,9 +117,9 @@ pub struct Cff<'a> {
 pub struct CffSlot<'a> {
     cff: Cff<'a>,
     top_dict: Dict,
-    private_dict: Dict,
+    private_dict: Vec<Rc<Dict>>,
     char_strings: Index<'a>,
-    subrs: Index<'a>,
+    subrs: Vec<Rc<Index<'a>>>,
     num_glyphs: usize
 }
     
@@ -128,26 +129,48 @@ impl<'a> Cff<'a> {
         let top_dict = dict(data).unwrap().1;
         info!("top dict: {:?}", top_dict);
         
-        let private_dict_entry = top_dict.get(&Operator::Private)
-            .expect("no private dict entry");
-        
-        let private_dict_size = private_dict_entry[0].to_int() as usize;
-        let private_dict_offset = private_dict_entry[1].to_int() as usize;
-        let private_dict_data = &self.data[private_dict_offset .. private_dict_offset + private_dict_size];
-        let private_dict = dict(private_dict_data).get();
-        info!("private dict: {:?}", private_dict);
-        
         let offset = top_dict[&Operator::CharStrings][0].to_int() as usize;
         let char_strings = index(self.data.get(offset ..).unwrap()).get();
-        
-        let subrs = private_dict.get(&Operator::Subrs).map(|arr| {
-            let private_subroutines_offset = arr[0].to_int() as usize;
-            index(&self.data[(private_dict_offset + private_subroutines_offset) as usize ..]).get()
-        }).unwrap_or_default();
         
         // num glyphs includes glyph 0 (.notdef)
         let num_glyphs = char_strings.len() as usize;
         
+        // retrieve Font Dicts if it exists.
+        let mut private_dict_list = vec![];
+        let mut subrs_list = vec![];
+        if let Some(fdarray_entry) = top_dict.get(&Operator::FDArray) {
+            let fdarray_offset = fdarray_entry[0].to_int() as usize;
+            let fdarray_data_list = index(&self.data[fdarray_offset ..]).unwrap().1;
+            for fdarray_data in &fdarray_data_list {
+                let fdarray_dict = dict(&fdarray_data).unwrap().1;
+                let private_dict_entry = fdarray_dict.get(&Operator::Private).unwrap();
+                let (private_dict, subrs) = self.private_dict_and_subrs(&private_dict_entry);
+                private_dict_list.push(Rc::new(private_dict));
+                subrs_list.push(Rc::new(subrs));
+            }
+        }
+        let mut private_dict = vec![];
+        let mut subrs = vec![];
+        if let Some(fdselect_entry) = top_dict.get(&Operator::FDSelect) {
+            let fdselect_offset = fdselect_entry[0].to_int() as usize;
+            let (_, fd_indices) = fd_select(&self.data[fdselect_offset ..], num_glyphs).unwrap();
+            for fd_idx in fd_indices {
+                private_dict.push(Rc::clone(&private_dict_list[fd_idx]));
+                subrs.push(Rc::clone(&subrs_list[fd_idx]));
+            }
+        } else {
+            let private_dict_entry = top_dict.get(&Operator::Private)
+                .expect("no private dict entry");
+
+            let (private_dict_global, subrs_global) = self.private_dict_and_subrs(&private_dict_entry);
+            let private_dict_global = Rc::new(private_dict_global);
+            let subrs_global = Rc::new(subrs_global);
+            for i in 0..num_glyphs {
+                private_dict.push(Rc::clone(&private_dict_global));
+                subrs.push(Rc::clone(&subrs_global));
+            }
+        }
+
         CffSlot {
             cff: self,
             top_dict,
@@ -157,7 +180,54 @@ impl<'a> Cff<'a> {
             num_glyphs
         }
     }
+
+    fn private_dict_and_subrs(&self, private_dict_entry: &[Value]) -> (Dict, Index<'a>) {
+        let private_dict_size = private_dict_entry[0].to_int() as usize;
+        let private_dict_offset = private_dict_entry[1].to_int() as usize;
+        let private_dict_data = &self.data[private_dict_offset .. private_dict_offset + private_dict_size];
+        let private_dict = dict(private_dict_data).get();
+        info!("private dict: {:?}", private_dict);
+
+        let subrs = private_dict.get(&Operator::Subrs).map(|arr| {
+            let private_subroutines_offset = arr[0].to_int() as usize;
+            index(&self.data[(private_dict_offset + private_subroutines_offset) as usize ..]).get()
+        }).unwrap_or_default();
+
+        (private_dict, subrs)
+    }
 }
+
+fn fd_select(data: &[u8], num_glyphs: usize) -> R<Vec<usize>> {
+    let (data, fmt) = be_u8(data)?;
+    match fmt {
+        0 => count(map(be_u8, |i| i as usize), num_glyphs)(data),
+        3 => {
+            let (data, nranges) = map(be_u16, |i| i as usize)(data)?;
+            let (data, range3) = count(range3_record, nranges)(data)?;
+            let (data, sentinel) = map(be_u16, |i| i as usize)(data)?;
+            let mut indexes = vec![0; sentinel];
+            let mut stop = sentinel;
+            if range3[0].0 != 0 {
+                panic!("the first range must have a first GID of 0")
+            }
+            for (first, fd) in range3.into_iter().rev() {
+                for i in first..stop {
+                    indexes[i] = fd;
+                }
+                stop = first;
+            }
+            Ok((data, indexes))
+        }
+        _ => panic!("invalid FDSelect format: {}", fmt),
+    }
+}
+
+fn range3_record(data: &[u8]) -> R<(usize, usize)> {
+    let (data, first) = map(be_u16, |f| f as usize)(data)?;
+    let (data, fd) = map(be_u8, |f| f as usize)(data)?;
+    Ok((data, (first, fd)))
+}
+
 impl<'a> CffSlot<'a> {
     pub fn font_matrix(&self) -> Transform2F {
         self.top_dict.get(&Operator::FontMatrix)
@@ -183,28 +253,29 @@ impl<'a> CffSlot<'a> {
             _ => panic!("invalid charstring type")
         };
         
-        let subr_bias = match char_string_type {
-            CharstringType::Type2 => bias(self.subrs.len()),
-            CharstringType::Type1 => 0
-        };
         let global_subr_bias = match char_string_type {
             CharstringType::Type2 => bias(self.cff.subroutines.len() as usize),
             CharstringType::Type1 => 0
         };
 
-        let context = Context {
-            subr_bias,
-            subrs: self.subrs.as_slice(),
-            global_subrs: self.cff.subroutines.as_slice(),
-            global_subr_bias
-        };
-        
-        let default_width = self.private_dict.get(&Operator::DefaultWidthX).map(|a| a[0].to_float()).unwrap_or(0.);
-        let nominal_width = self.private_dict.get(&Operator::NominalWidthX).map(|a| a[0].to_float()).unwrap_or(0.);
-        
         // build glyphs
         let mut state = State::new();
         self.char_strings.iter().enumerate().map(move |(id, data)| {
+            let subr_bias = match char_string_type {
+                CharstringType::Type2 => bias(self.subrs[id].len()),
+                CharstringType::Type1 => 0
+            };
+
+            let context = Context {
+                subr_bias,
+                subrs: self.subrs[id].as_slice(),
+                global_subrs: self.cff.subroutines.as_slice(),
+                global_subr_bias
+            };
+
+            let default_width = self.private_dict[id].get(&Operator::DefaultWidthX).map(|a| a[0].to_float()).unwrap_or(0.);
+            let nominal_width = self.private_dict[id].get(&Operator::NominalWidthX).map(|a| a[0].to_float()).unwrap_or(0.);
+
             trace!("charstring for glyph {}", id);
             match char_string_type {
                 CharstringType::Type1 => {
@@ -477,6 +548,8 @@ enum Operator {
     CIDCount,
     UIDBase,
     FDArray,
+    FDSelect,
+    FontName,
     
     BlueValues,
     OtherBlues,
@@ -547,6 +620,8 @@ fn operator(input: &[u8]) -> R<Operator> {
                 34 => (i, CIDCount),
                 35 => (i, UIDBase),
                 36 => (i, FDArray),
+                37 => (i, FDSelect),
+                38 => (i, FontName),
                 _ => return Err(nom::Err::Failure(make_error(input, ErrorKind::TooLarge)))
             }
         }
