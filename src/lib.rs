@@ -47,6 +47,11 @@ pub struct Name {
     pub full_name: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct Info {
+    pub weight: Option<u16>,
+}
+
 pub trait Font: 'static {
     /// Return the "number of glyphs" in the font.
     ///
@@ -121,6 +126,8 @@ pub trait Font: 'static {
         0.0
     }
     fn name(&self) -> &Name;
+
+    fn info(&self) -> &Info;
 
     #[doc(hidden)]
     // this function must return the type id of the impl

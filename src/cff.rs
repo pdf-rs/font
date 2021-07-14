@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::iter::once;
 use std::borrow::Cow;
-use crate::{Font, Glyph, Value, Context, State, type1, type2, IResultExt, R, VMetrics, HMetrics, GlyphId, Name};
+use crate::{Font, Glyph, Value, Context, State, type1, type2, IResultExt, R, VMetrics, HMetrics, GlyphId, Name, Info};
 use nom::{
     number::complete::{be_u8, be_u16, be_i16, be_u24, be_u32, be_i32},
     bytes::complete::{take},
@@ -27,6 +27,7 @@ pub struct CffFont {
     bbox: Option<RectF>,
     vmetrics: Option<VMetrics>,
     name: Name,
+    info: Info,
 }
 
 impl CffFont {
@@ -70,6 +71,9 @@ impl Font for CffFont {
     }
     fn name(&self) -> &Name {
         &self.name
+    }
+    fn info(&self) -> &Info {
+        &self.info
     }
 }
 
@@ -201,7 +205,7 @@ impl<'a> CffSlot<'a> {
         
         let default_width = self.private_dict.get(&Operator::DefaultWidthX).map(|a| a[0].to_float()).unwrap_or(0.);
         let nominal_width = self.private_dict.get(&Operator::NominalWidthX).map(|a| a[0].to_float()).unwrap_or(0.);
-        
+
         // build glyphs
         let mut state = State::new();
         self.char_strings.iter().enumerate().map(move |(id, data)| {
@@ -225,6 +229,17 @@ impl<'a> CffSlot<'a> {
             let path = state.take_path();
             state.clear();
             (path, width, lsb)
+        })
+    }
+    pub fn weight(&self) -> Option<u16> {
+        self.private_dict.get(&Operator::Weight).and_then(|a| match a[0].to_int() {
+            386 => Some(300), // Light
+            388 => Some(400), // Regular
+            387 => Some(500), // Medium
+            390 => Some(600), // Semibold
+            384 => Some(700), // Bold
+            383 => Some(900), // Black
+            _ => None
         })
     }
     fn parse_font(&self) -> CffFont {
@@ -318,6 +333,9 @@ impl<'a> CffSlot<'a> {
             bbox: self.bbox(),
             vmetrics: None,
             name: Name::default(),
+            info: Info {
+                weight: self.weight(),
+            },
         }
     }
 }
