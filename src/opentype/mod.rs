@@ -3,7 +3,7 @@
 use std::convert::TryInto;
 use std::collections::HashMap;
 use std::ops::{Deref};
-use crate::{Font, R, IResultExt, VMetrics, HMetrics, Glyph, GlyphId, Name, FontInfo, FontType};
+use crate::{Font, R, IResultExt, VMetrics, HMetrics, Glyph, GlyphId, Name, FontInfo, FontType, Info};
 use crate::truetype::{Shape, parse_shapes, get_outline};
 use crate::cff::{read_cff};
 use pdf_encoding::Encoding;
@@ -29,6 +29,7 @@ pub mod kern;
 pub mod math;
 pub mod gdef;
 pub mod base;
+pub mod os2;
 
 use math::{parse_math, MathHeader};
 use gpos::{parse_gpos, GPos};
@@ -55,7 +56,8 @@ pub struct OpenTypeFont {
 
     font_matrix: Transform2F,
     num_glyphs: u32,
-    name: Name
+    name: Name,
+    info: Info,
 }
 impl OpenTypeFont {
     pub fn parse(data: &[u8]) -> Self {
@@ -117,6 +119,8 @@ impl OpenTypeFont {
         let gdef = tables.get(b"gdef").map(|data| parse_gdef(data).get());
         tables.get(b"BASE").map(|data| parse_base(data).get());
 
+        let weight = tables.get(b"OS2 ").map(|data| os2::parse_os2(data).get().weight);
+
         OpenTypeFont {
             outlines,
             gpos,
@@ -133,7 +137,10 @@ impl OpenTypeFont {
 
             font_matrix,
             num_glyphs,
-            name
+            name,
+            info: Info {
+                weight,
+            },
         }
     }
     pub fn from_tables<T>(tables: Tables<T>) -> Self where T: Deref<Target=[u8]> {
@@ -201,6 +208,9 @@ impl Font for OpenTypeFont {
     fn name(&self) -> &Name {
         &self.name
     }
+    fn info(&self) -> &Info {
+        &self.info
+    }
 }
 
 pub struct Tables<T> {
@@ -249,6 +259,7 @@ pub struct Head {
     pub x_max: i16,
     pub y_min: i16,
     pub y_max: i16,
+    pub mac_style: u16,
 }
 impl Head {
     pub fn bbox(&self) -> RectF {
@@ -278,7 +289,7 @@ pub fn parse_head(i: &[u8]) -> R<Head> {
     let (i, x_max) = be_i16(i)?;
     let (i, y_max) = be_i16(i)?;
     
-    let (i, _mac_style) = be_u16(i)?;
+    let (i, mac_style) = be_u16(i)?;
     
     let (i, _lowest_rec_ppem) = be_u16(i)?;
     
@@ -290,7 +301,8 @@ pub fn parse_head(i: &[u8]) -> R<Head> {
     Ok((i, Head {
         units_per_em,
         index_to_loc_format,
-        x_min, x_max, y_min, y_max
+        x_min, x_max, y_min, y_max,
+        mac_style,
     }))
 }
 pub struct Maxp {

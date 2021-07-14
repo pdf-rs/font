@@ -1,6 +1,6 @@
 use std::iter;
 use std::ops::Deref;
-use crate::{Font, Glyph, R, IResultExt, GlyphId, Name};
+use crate::{Font, Glyph, R, IResultExt, GlyphId, Name, Info};
 use crate::parsers::{iterator, parse};
 use pdf_encoding::Encoding;
 use nom::{
@@ -16,6 +16,7 @@ use crate::opentype::{
     cmap::{CMap, parse_cmap},
     kern::{parse_kern},
     gpos::KernTable,
+    os2::parse_os2,
 };
 use pathfinder_geometry::{transform2d::Matrix2x2F};
 use itertools::Itertools;
@@ -35,7 +36,8 @@ pub struct TrueTypeFont {
     units_per_em: u16,
     bbox: RectF,
     kern: KernTable,
-    name: Name
+    name: Name,
+    info: Info,
 }
 
 impl TrueTypeFont {
@@ -58,7 +60,8 @@ impl TrueTypeFont {
         let head = parse_head(tables.get(b"head").expect("no head")).get();
         let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
         let name = tables.get(b"name").map(|data| parse_name(data).get()).unwrap_or_default();
-        
+        let weight = tables.get(b"OS2 ").map(|data| parse_os2(data).get().weight);
+
         TrueTypeFont {
             shapes,
             cmap,
@@ -66,7 +69,10 @@ impl TrueTypeFont {
             units_per_em: head.units_per_em,
             bbox: head.bbox(),
             kern: tables.get(b"kern").map(|data| parse_kern(data).get()).unwrap_or_default(),
-            name
+            name,
+            info: Info {
+                weight,
+            },
         }
     }
     fn get_path(&self, idx: u32) -> Option<Outline> {
@@ -113,6 +119,9 @@ impl Font for TrueTypeFont {
     }
     fn name(&self) -> &Name {
         &self.name
+    }
+    fn info(&self) -> &Info {
+        &self.info
     }
 }
 

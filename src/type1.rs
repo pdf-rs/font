@@ -5,7 +5,7 @@ use nom::{IResult,
 use tuple::{TupleElements};
 use itertools::Itertools;
 use indexmap::IndexMap;
-use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId, Name, Value};
+use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId, Name, Value, Info};
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
 use crate::parsers::parse;
@@ -24,6 +24,7 @@ pub struct Type1Font {
     font_matrix: Transform2F,
     bbox: Option<RectF>,
     name: Name,
+    info: Info,
 }
 impl Font for Type1Font {
     fn num_glyphs(&self) -> u32 {
@@ -54,6 +55,9 @@ impl Font for Type1Font {
     fn name(&self) -> &Name {
         &self.name
     }
+    fn info(&self) -> &Info {
+        &self.info
+    }
 }
 
 impl Type1Font {
@@ -80,6 +84,7 @@ impl Type1Font {
             .as_dict().unwrap();
         let len_iv = private_dict.get("lenIV")
             .map(|i| i.as_int().unwrap()).unwrap_or(4) as usize;
+        let font_info = font_dict.get("FontInfo").and_then(|i| i.as_dict());
         
         debug!("FontDict keys: {:?}", font_dict.iter().map(|(k, _)| k).format(", "));
         debug!("Private keys: {:?}", private_dict.iter().map(|(k, _)| k).format(", "));
@@ -95,7 +100,16 @@ impl Type1Font {
             postscript_name,
             .. Name::default()
         };
-        
+        let weight = font_info.and_then(|d| d.get("Weight")).and_then(|i| i.as_str()).and_then(|s| match s {
+            "Light" => Some(300),
+            "Regular" => Some(400),
+            "Medium" => Some(500),
+            "Semibold" => Some(600),
+            "Bold" => Some(700),
+            "Black" => Some(900),
+            _ => None
+        });
+
         let char_strings = font_dict.get("CharStrings").expect("no /CharStrings").as_dict().unwrap();
         
         let subrs: Vec<Vec<u8>> = private_dict.get("Subrs").map(|subrs|
@@ -175,6 +189,9 @@ impl Type1Font {
             unicode_map,
             bbox,
             name,
+            info: Info {
+                weight,
+            }
         }
     }
 }
