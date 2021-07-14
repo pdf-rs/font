@@ -119,7 +119,7 @@ impl OpenTypeFont {
         let gdef = tables.get(b"gdef").map(|data| parse_gdef(data).get());
         tables.get(b"BASE").map(|data| parse_base(data).get());
 
-        let weight = tables.get(b"OS2 ").map(|data| os2::parse_os2(data).get().weight);
+        let weight = tables.get(b"OS/2").map(|data| os2::parse_os2(data).get().weight);
 
         OpenTypeFont {
             outlines,

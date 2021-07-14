@@ -60,7 +60,7 @@ impl TrueTypeFont {
         let head = parse_head(tables.get(b"head").expect("no head")).get();
         let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
         let name = tables.get(b"name").map(|data| parse_name(data).get()).unwrap_or_default();
-        let weight = tables.get(b"OS2 ").map(|data| parse_os2(data).get().weight);
+        let weight = tables.get(b"OS/2").map(|data| parse_os2(data).get().weight);
 
         TrueTypeFont {
             shapes,
