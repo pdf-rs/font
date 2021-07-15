@@ -1,13 +1,7 @@
-use std::collections::HashMap;
 use nom::{
     number::complete::{be_u16, be_i16},
-    multi::count,
-    bytes::complete::take,
-    sequence::tuple,
 };
-use crate::{R, GlyphId};
-use crate::parsers::{iterator_n};
-use crate::opentype::{parse_lookup_list, coverage_table, tag, Tag};
+use crate::{R};
 
 pub struct Os2 {
     pub weight: u16
