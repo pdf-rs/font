@@ -133,6 +133,22 @@ impl<'a> Cff<'a> {
         let top_dict = dict(data).unwrap().1;
         info!("top dict: {:?}", top_dict);
         
+<<<<<<< HEAD
+=======
+        let private_dict;
+        let private_dict_offset;
+        if let Some(private_dict_entry) = top_dict.get(&Operator::Private) {
+            let private_dict_size = private_dict_entry[0].to_int() as usize;
+            private_dict_offset = private_dict_entry[1].to_int() as usize;
+            let private_dict_data = &self.data[private_dict_offset .. private_dict_offset + private_dict_size];
+            private_dict = dict(private_dict_data).get();
+            info!("private dict: {:?}", private_dict);
+        } else {
+            private_dict = HashMap::default();
+            private_dict_offset = 0;
+        }
+        
+>>>>>>> add two OPs and tolerate a missing Private Dict
         let offset = top_dict[&Operator::CharStrings][0].to_int() as usize;
         let char_strings = index(self.data.get(offset ..).unwrap()).get();
         
@@ -643,7 +659,14 @@ fn operator(input: &[u8]) -> R<Operator> {
                 36 => (i, FDArray),
                 37 => (i, FDSelect),
                 38 => (i, FontName),
+<<<<<<< HEAD
                 _ => return Err(nom::Err::Failure(make_error(input, ErrorKind::TooLarge)))
+=======
+                n => {
+                    warn!("unknown OP 12 {}", n);
+                    return Err(nom::Err::Failure(make_error(input, ErrorKind::TooLarge)));
+                }
+>>>>>>> add two OPs and tolerate a missing Private Dict
             }
         }
         13 => (i, UniqueID),
@@ -655,7 +678,10 @@ fn operator(input: &[u8]) -> R<Operator> {
         19 => (i, Subrs),
         20 => (i, DefaultWidthX),
         21 => (i, NominalWidthX),
-        _ => return Err(nom::Err::Failure(make_error(input, ErrorKind::TooLarge)))
+        n => {
+            warn!("unknown OP {}", n);
+            return Err(nom::Err::Failure(make_error(input, ErrorKind::TooLarge)));
+        }
     };
     Ok((i, v))
 }
