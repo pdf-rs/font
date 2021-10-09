@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
-use crate::{GlyphId, R, parsers::*};
+use crate::{GlyphId, R, parsers::*, FontError};
 use nom::{
     number::complete::{be_u8, be_u16, be_u32, be_u24},
     bytes::complete::take,
@@ -68,7 +68,7 @@ impl CMap {
     }
 }
 
-pub fn parse_cmap(input: &[u8]) -> R<CMap> {
+pub fn parse_cmap(input: &[u8]) -> Result<CMap, FontError> {
     let (i, _version) = be_u16(input)?;
     let (i, num_tables) = be_u16(i)?;
     
@@ -138,7 +138,7 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                             if index as usize > glyph_data.len() - 2 {
                                 break;
                             }
-                            let (_, gid) = be_u16(&glyph_data[index as usize ..])?;
+                            let (_, gid) = be_u16(slice!(glyph_data, index as usize ..))?;
                             let gid = gid.wrapping_add(delta);
                             if gid != 0 {
                                 trace!("codepoint {} -> gid {}", c, gid);
@@ -178,12 +178,12 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
             }
             14 => {
                 let (i, length) = be_u32(i)?;
-                let i = &i[.. length as usize - 6];
+                let i = slice!(i, .. length as usize - 6);
                 
                 let (i, num_var_selector_records) = be_u32(i)?;
                 for (var_selector, default_uvs_offset, non_default_uvs_offset) in iterator(i, tuple((be_u24, be_u32, be_u32))).take(num_var_selector_records as usize) {
                     if default_uvs_offset != 0 {
-                        let i = &table[default_uvs_offset as usize ..];
+                        let i = slice!(table, default_uvs_offset as usize ..);
                         let (i, num_unicode_value_ranges) = be_u32(i)?;
                         for (start_unicode_value, additional_count) in iterator(i, tuple((be_u24, be_u8))).take(num_unicode_value_ranges as usize) {
                             for cp in start_unicode_value ..= start_unicode_value + additional_count as u32 {
@@ -192,7 +192,7 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                         }
                     }
                     if non_default_uvs_offset != 0 {
-                        let i = &table[non_default_uvs_offset as usize ..];
+                        let i = slice!(table, non_default_uvs_offset as usize ..);
                         let (i, num_uvs_mappings) = be_u32(i)?;
                         for (unicode_value, glyph_id) in iterator(i, tuple((be_u24, be_u16))).take(num_uvs_mappings as usize) {
                             if glyph_id != 0 {
@@ -202,7 +202,7 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
                     }
                 }
             }
-            n => unimplemented!("cmap format {}", n),
+            n => error!("cmap format {}", n),
         }
     }
 
@@ -212,8 +212,8 @@ pub fn parse_cmap(input: &[u8]) -> R<CMap> {
         }
     }
 
-    Ok((&[], CMap {
+    Ok(CMap {
         single_codepoint: cmap,
         double_codepoint: cmap2
-    }))
+    })
 }

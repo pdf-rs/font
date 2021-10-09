@@ -1,16 +1,16 @@
-use crate::{R, parsers::*};
+use crate::{R, parsers::*, FontError};
 use super::parse_class_def;
 use nom::{
     number::complete::{be_u16},
 };
 use std::collections::HashMap;
 
-pub fn parse_gdef(data: &[u8]) -> R<GDef> {
+pub fn parse_gdef(data: &[u8]) -> Result<GDef, FontError> {
     let (i, major) = be_u16(data)?;
     let (i, minor) = be_u16(i)?;
 
-    assert_eq!(major, 1);
-    assert!(matches!(minor, 1 ..= 3));
+    require_eq!(major, 1);
+    require!(matches!(minor, 1 ..= 3));
 
     let (i, glyph_class_offset) = offset(i)?;
     let (i, attach_offset) = offset(i)?;
@@ -20,7 +20,7 @@ pub fn parse_gdef(data: &[u8]) -> R<GDef> {
     let mut mark_classes = HashMap::new();
     parse_class_def(mark_attach_class_def_offset.of(data).unwrap(), &mut mark_classes)?;
 
-    Ok((i, GDef { mark_classes }))
+    Ok(GDef { mark_classes })
 }
 
 #[derive(Clone)]

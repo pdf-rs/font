@@ -6,7 +6,7 @@ use inflate::inflate_bytes_zlib;
 use brotli_decompressor::{Decompressor};
 
 use crate::{
-    R, IResultExt,
+    R, IResultExt, FontError, ParseResult,
     truetype::{Shape, contour, compound, parse_shapes},
     parsers::{iterator, varint_u32, varint_u16, parse, count_map},
     opentype::{Tables, parse_head, parse_hhea, parse_maxp, parse_hmtx, parse_hmtx_woff2_format1, parse_loca, OpenTypeFont},
@@ -23,7 +23,7 @@ use nom::{
 };
 
 
-pub fn parse_woff(data: &[u8]) -> R<OpenTypeFont> {
+pub fn parse_woff(data: &[u8]) -> Result<OpenTypeFont, FontError> {
     let (i, _) = tag(b"wOFF")(data)?;
     let (i, flavor) = take(4usize)(i)?;
     let (i, _length) = be_u32(i)?;
@@ -49,20 +49,18 @@ pub fn parse_woff(data: &[u8]) -> R<OpenTypeFont> {
         debug!("{}", String::from_utf8_lossy(&entry.tag));
         let data = if entry.comp_length < entry.orig_length {
             let compressed_data = parse(&mut i, take((entry.comp_length as usize + 3) & !3))?;
-            let orig_data = inflate_bytes_zlib(&compressed_data[.. entry.comp_length as usize]).expect("can't decompress data");
-            assert_eq!(orig_data.len(), entry.orig_length as usize);
+            let orig_data = inflate_bytes_zlib(slice!(compressed_data, .. entry.comp_length as usize)).expect("can't decompress data");
+            require_eq!(orig_data.len(), entry.orig_length as usize);
             Cow::Owned(orig_data)
         } else {
             let chunk = parse(&mut i, take((entry.orig_length as usize + 3) & !3))?;
-            Cow::Borrowed(&chunk[.. entry.orig_length as usize])
+            Cow::Borrowed(slice!(chunk, .. entry.orig_length as usize))
         };
         tables.insert(entry.tag, data);
     }
     
     let tables = Tables { entries: tables };
-    let font = OpenTypeFont::from_tables(tables);
-    
-    Ok((i, font))
+    OpenTypeFont::from_tables(tables)
 }
 
 #[derive(Debug)]
@@ -84,7 +82,7 @@ fn woff_dir_entry(i: &[u8]) -> R<WoffDirEntry> {
     }))
 }
     
-pub fn parse_woff2(i: &[u8]) -> R<OpenTypeFont> {
+pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
     let (i, _) = tag(b"wOF2")(i)?;
     let (i, flavor) = take(4usize)(i)?;
     let (i, _length) = be_u32(i)?;
@@ -103,10 +101,10 @@ pub fn parse_woff2(i: &[u8]) -> R<OpenTypeFont> {
     let (i, entry_tables) = count_map(woff2_table_entry, num_tables as usize)(i)?;
     
     if flavor == b"ttcf" {
-        unimplemented!()
+        error!("FontCollections are not implemented yet");
     }
     
-    let mut decompressor = Decompressor::new(Cursor::new(&i[ .. total_compressed_size as usize]), 1024);
+    let mut decompressor = Decompressor::new(Cursor::new(slice!(i,  .. total_compressed_size as usize)), 1024);
     let mut entries = HashMap::new();
     for (&tag, entry) in &entry_tables {
         debug!("tag: {:?} ({:?}) {:?}", tag, std::str::from_utf8(&tag), entry);
@@ -114,36 +112,35 @@ pub fn parse_woff2(i: &[u8]) -> R<OpenTypeFont> {
         decompressor.read_exact(&mut buf).expect("decode failed");
         entries.insert(tag, buf);
     }
-    assert_eq!(decompressor.bytes().count(), 0);
+    require_eq!(decompressor.bytes().count(), 0);
     
     let tables = Tables { entries };
     
     let hmtx = tables.get(b"hmtx").map(|hmtx_data| {
-        let head = parse_head(tables.get(b"head").expect("no head")).get();
-        let hhea = parse_hhea(tables.get(b"hhea").expect("no hhea")).get();
-        let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
+        let head = parse_head(tables.get(b"head").expect("no head"))?;
+        let hhea = parse_hhea(tables.get(b"hhea").expect("no hhea"))?;
+        let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp"))?;
         match entry_tables[b"hmtx"].flags {
             0 => parse_hmtx(&hmtx_data, &hhea, &maxp).get(),
             1 => parse_hmtx_woff2_format1(&hmtx_data, &head, &hhea, &maxp).get(),
-            f => panic!("invalid flag for hmtx: {}", f)
+            f => error!("invalid flag for hmtx: {}", f)
         }
-    });
+    }).transpose()?;
     
     let glyf = tables.get(b"glyf").map(|glyf_data| {
         match entry_tables[b"glyf"].flags {
             0 => parse_glyf_t0(&glyf_data).get(),
             3 => {
-                let head = parse_head(tables.get(b"head").expect("no head")).get();
-                let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
-                let loca = parse_loca(tables.get(b"loca").expect("no loca"), &head, &maxp).get();
+                let head = parse_head(tables.get(b"head").expect("no head"))?;
+                let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp"))?;
+                let loca = parse_loca(tables.get(b"loca").expect("no loca"), &head, &maxp)?;
                 parse_shapes(&loca, glyf_data)
             }
-            f => panic!("invalid flag for glyf: {}", f)
+            f => error!("invalid flag for glyf: {}", f)
         }
-    });
-    let font = OpenTypeFont::from_hmtx_glyf_and_tables(hmtx, glyf, tables);
-    
-    Ok((i, font))
+    }).transpose()?;
+
+    OpenTypeFont::from_hmtx_glyf_and_tables(hmtx, glyf, tables)
 }
 
 fn parse_glyf_t0(i: &[u8]) -> R<Vec<Shape>> {
@@ -208,7 +205,7 @@ fn parse_glyf_t0(i: &[u8]) -> R<Vec<Shape>> {
                         outline.push_contour(contour);
                     }
                     // don't care about it… but it needs to be removed from the stream
-                    assert_eq!(counter, n_points);
+                    require_eq!(counter, n_points);
                 }
                 glyphs.push(Shape::Simple(outline));
                 let _num_instructions = parse(&mut glyph_stream, varint_u16)?;
@@ -227,7 +224,7 @@ struct Entry {
     orig_length: u32
 }
 
-fn woff2_table_entry(i: &[u8]) -> R<([u8; 4], Entry)> {
+fn woff2_table_entry(i: &[u8]) -> ParseResult<([u8; 4], Entry)> {
     let (i, b0) = be_u8(i)?;
     let table_type = b0 & 63;
     let flags = b0 >> 6;

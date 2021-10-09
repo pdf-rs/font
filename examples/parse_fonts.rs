@@ -25,15 +25,18 @@ fn main() {
     
     for _ in 0 .. loops {
         for entry in &files {
-            eprintln!("parsing {:100}", entry.path().to_str().unwrap());
+            eprint!("parsing {:100} .. ", entry.path().to_str().unwrap());
             let data = fs::read(entry.path()).expect("can't read file");
             
             match catch_unwind(|| parse(&data)) {
-                Ok(font) => {
-                    eprintln!("    OK");
+                Ok(Ok(font)) => {
+                    eprintln!("OK");
+                }
+                Ok(Err(e)) => {
+                    eprintln!("returned Err({:?})", e);
                 }
                 Err(e) => {
-                    eprintln!("    FAIL");
+                    eprintln!("FAIL");
                 }
             }
         }

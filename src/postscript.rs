@@ -5,8 +5,9 @@ use std::borrow::{Cow};
 use tuple::{TupleElements, Map};
 use decorum::R32;
 use indexmap::set::IndexSet;
-use crate::R;
+use crate::{R, FontError};
 use crate::parsers::{token, Token, comment, space, hex_string};
+
 
 #[cfg(feature="unstable")]
 use slotmap::SlotMap;
@@ -74,6 +75,18 @@ impl<'a> RefDict<'a> {
         self.vm.literals.get_full(key.as_bytes())
             .and_then(|(index, _)| self.dict.get(&Item::Literal(LitKey(index))))
             .map(|&item| RefItem::new(self.vm, item))
+    }
+    pub fn get_int(&self, key: &str) -> Option<i32> {
+        self.get(key).and_then(|i| i.as_int())
+    }
+    pub fn get_str(&self, key: &str) -> Option<&'a str> {
+        self.get(key).and_then(|i| i.as_str())
+    }
+    pub fn get_dict(&self, key: &str) -> Option<RefDict<'a>> {
+        self.get(key).and_then(|i| i.as_dict())
+    }
+    pub fn get_array(&self, key: &str) -> Option<RefArray<'a>> {
+        self.get(key).and_then(|i| i.as_array())
     }
     pub fn len(&self) -> usize {
         self.dict.len()
@@ -358,7 +371,7 @@ impl<'a> Input<'a> {
             false
         }
     }
-    fn try_parse<T>(&mut self, parser: impl Fn(&'a [u8]) -> R<'a, T>) -> Option<T> {
+    fn try_parse<T, E>(&mut self, parser: impl Fn(&'a [u8]) -> Result<(&[u8], T), E>) -> Option<T> {
         match parser(self.data) {
             Ok((i, t)) => {
                 let n = self.data.len() - i.len();
@@ -560,54 +573,60 @@ impl Vm {
             }
         }
     }
-    pub fn exec_token(&mut self, token: Token, input: &mut Input) {
+    pub fn exec_token(&mut self, token: Token, input: &mut Input) -> Result<(), FontError> {
         let item = self.transform_token(token);
         debug!("exec_token {:?}", self.display(item));
         match item {
-            Item::Operator(op) => self.exec_operator(op, input),
+            Item::Operator(op) => self.exec_operator(op, input)?,
             Item::Name(key) => {
                 let item = match self.resolve(Item::Literal(key)) {
                     Some(item) => item,
-                    None => panic!("unimplemented token {:?}", String::from_utf8_lossy(self.get_lit(key)))
+                    None => error!("unimplemented token {:?}", String::from_utf8_lossy(self.get_lit(key)))
                 };
-                self.exec_expand(item, input)
+                self.exec_expand(item, input)?;
             }
             item => self.push(item)
         }
+        Ok(())
     }
     
-    fn exec_expand(&mut self, item: Item, input: &mut Input) {
+    fn exec_expand(&mut self, item: Item, input: &mut Input) -> Result<(), FontError> {
         debug!("exec_expand {:?}", self.display(item));
         match item {
-            Item::Operator(op) => self.exec_operator(op, input),
+            Item::Operator(op) => {
+                self.exec_operator(op, input)?;
+            }
             Item::Name(key) => {
-                let item = self.resolve(Item::Literal(key)).expect("undefined");
-                self.exec(item, input)
+                let item = expect!(self.resolve(Item::Literal(key)), "undefined");
+                self.exec(item, input)?;
             }
             Item::Array(key) => {
                 // check that the array is executable
-                if !self.arrays.get(key).expect("no item for key").1.execute {
-                    return self.push(item);
-                }
-                
-                let mut pos = 0;
-                loop {
-                    match self.arrays.get(key).expect("no item for key") {
-                        (ref items, Mode { execute: true, .. }) => {
-                            match items.get(pos) {
-                                Some(&item) => self.exec(item, input),
-                                None => break
-                            }
-                        },
-                        _ => panic!("exec: array is not executable")
+                if !expect!(self.arrays.get(key), "no item for key").1.execute {
+                    self.push(item);
+                } else {
+                    let mut pos = 0;
+                    loop {
+                        match self.arrays.get(key).expect("no item for key") {
+                            (ref items, Mode { execute: true, .. }) => {
+                                match items.get(pos) {
+                                    Some(&item) => self.exec(item, input)?,
+                                    None => break
+                                }
+                            },
+                            _ => error!("exec: array is not executable")
+                        }
+                        pos += 1;
                     }
-                    pos += 1;
                 }
             }
-            item => self.push(item)
+            item => {
+                self.push(item);
+            }
         }
+        Ok(())
     }
-    fn exec(&mut self, item: Item, input: &mut Input) {
+    fn exec(&mut self, item: Item, input: &mut Input) -> Result<(), FontError> {
         debug!("exec {:?}", self.display(item));
         /*
         loop {
@@ -623,17 +642,18 @@ impl Vm {
         }
         */
         match item {
-            Item::Operator(op) => self.exec_operator(op, input),
+            Item::Operator(op) => self.exec_operator(op, input)?,
             Item::Name(key) => {
                 let item = self.resolve(Item::Literal(key)).expect("undefined");
-                self.exec_expand(item, input)
+                self.exec_expand(item, input)?;
             }
             item => self.push(item)
         }
+        Ok(())
     }
     
     #[deny(unreachable_patterns)]
-    fn exec_operator(&mut self, op: Operator, input: &mut Input) {
+    fn exec_operator(&mut self, op: Operator, input: &mut Input) -> Result<(), FontError> {
         match op {
             Operator::Array => {
                 match self.pop() {
@@ -641,13 +661,13 @@ impl Vm {
                         let key = self.make_array(vec![Item::Null; i as usize], Mode::all());
                         self.push(Item::Array(key));
                     }
-                    i => panic!("array: invalid count: {:?}", self.display(i))
+                    i => error!("array: invalid count: {:?}", self.display(i))
                 }
             }
             Operator::Begin => {
                 match self.pop() {
                     Item::Dict(dict) => self.push_dict(dict),
-                    item => panic!("begin: unespected item {:?}", self.display(item))
+                    item => error!("begin: unespected item {:?}", self.display(item))
                 }
             }
             Operator::CurrentDict => {
@@ -664,7 +684,7 @@ impl Vm {
                         self.fonts.insert(font_name, dict_key);
                         self.push(Item::Dict(dict_key));
                     }
-                    args => panic!("definefont: invalid args {:?}", self.display_tuple(args))
+                    args => error!("definefont: invalid args {:?}", self.display_tuple(args))
                 }
             }
             Operator::InternalDict => {
@@ -673,16 +693,16 @@ impl Vm {
                         let dict = Item::Dict(self.internal_dict);
                         self.push(dict);
                     }
-                    i => panic!("internaldict: invalid argument: {:?}", self.display(i))
+                    i => error!("internaldict: invalid argument: {:?}", self.display(i))
                 }
             }
             Operator::For => {
                 match self.pop_tuple() {
                     (Item::Int(initial), Item::Int(increment), Item::Int(limit), Item::Array(procedure)) => {
                         match increment {
-                            i if i > 0 => assert!(limit > initial),
-                            i if i < 0 => assert!(limit < initial),
-                            _ => panic!("zero increment")
+                            i if i > 0 => require!(limit > initial),
+                            i if i < 0 => require!(limit < initial),
+                            _ => error!("zero increment")
                         }
                         // proc would be allowed to modify the procedure array…
                         let proc_array = self.get_array(procedure).clone();
@@ -695,7 +715,7 @@ impl Vm {
                             val += increment;
                         }
                     },
-                    args => panic!("for: invalid args {:?}", self.display_tuple(args))
+                    args => error!("for: invalid args {:?}", self.display_tuple(args))
                 }
             }
             Operator::If => {
@@ -705,7 +725,7 @@ impl Vm {
                             self.exec_array(proc, input);
                         }
                     }
-                    args => panic!("if: invalid args {:?}", self.display_tuple(args))
+                    args => error!("if: invalid args {:?}", self.display_tuple(args))
                 }
             }
             Operator::IfElse => {
@@ -719,7 +739,7 @@ impl Vm {
                         
                         self.exec_array(proc, input);
                     }
-                    args => panic!("ifelse: invalid args {:?}", self.display_tuple(args))
+                    args => error!("ifelse: invalid args {:?}", self.display_tuple(args))
                 }
             }
             Operator::Exec => {
@@ -745,7 +765,7 @@ impl Vm {
                         let dict = self.make_dict(Dictionary::with_capacity(n as usize), Mode::all());
                         self.push(Item::Dict(dict));
                     }
-                    arg => panic!("dict: unsupported {:?}", self.display(arg))
+                    arg => error!("dict: unsupported {:?}", self.display(arg))
                 }
             }
             Operator::Known => {
@@ -755,7 +775,7 @@ impl Vm {
                         let known = dict.contains_key(&key);
                         self.push(Item::Bool(known))
                     },
-                    args => panic!("known: invalid args {:?}", self.display_tuple(args))
+                    args => error!("known: invalid args {:?}", self.display_tuple(args))
                 }
             }
             Operator::String => {
@@ -764,7 +784,7 @@ impl Vm {
                         let string = self.make_string(vec![0; n as usize]);
                         self.push(Item::String(string));
                     },
-                    len => panic!("string: unsupported {:?}", self.display(len))
+                    len => error!("string: unsupported {:?}", self.display(len))
                 }
             },
             Operator::ReadString => {
@@ -777,7 +797,7 @@ impl Vm {
                         self.push(Item::String(key));
                         self.push(Item::Bool(flag));
                     },
-                    args => panic!("readstring: invalid arguments {:?}", self.display_tuple(args))
+                    args => error!("readstring: invalid arguments {:?}", self.display_tuple(args))
                 }
             }
             Operator::Dup => {
@@ -813,10 +833,10 @@ impl Vm {
                             }
                             (Item::String(a), Item::String(b)) => {
                                 let a = self.get_string(a).to_owned();
-                                self.get_string_mut(b)[.. a.len()].copy_from_slice(&a);
+                                expect!(self.get_string_mut(b).get_mut(.. a.len()), "out of bounds").copy_from_slice(&a);
                                 self.push(last);
                             }
-                            args => panic!("copy: invalid arguments {:?}", self.display_tuple(args))
+                            args => error!("copy: invalid arguments {:?}", self.display_tuple(args))
                         }
                     }
                 }
@@ -836,7 +856,7 @@ impl Vm {
                 match self.pop() {
                     Item::Bool(b) => self.push(Item::Bool(!b)),
                     Item::Int(i) => self.push(Item::Int(!i)),
-                    arg => panic!("not: invalid argument {:?}", self.display(arg))
+                    arg => error!("not: invalid argument {:?}", self.display(arg))
                 }
             }
             Operator::Index => match self.pop() {
@@ -845,7 +865,7 @@ impl Vm {
                     let item = self.stack.get(n - idx as usize - 1).expect("out of bounds").clone();
                     self.push(item);
                 },
-                arg => panic!("index: invalid argument {:?}", self.display(arg))
+                arg => error!("index: invalid argument {:?}", self.display(arg))
             }
             Operator::Get => match self.pop_tuple() {
                 (Item::Array(key), Item::Int(index)) if index >= 0 => {
@@ -860,19 +880,19 @@ impl Vm {
                     let &item = self.get_dict(dict_key).get(&key).expect("no such entry");
                     self.push(item);
                 }
-                args => panic!("get: invalid arguments {:?}", self.display_tuple(args))
+                args => error!("get: invalid arguments {:?}", self.display_tuple(args))
             }
             Operator::Put => {
                 let (a, b, c) = self.pop_tuple();
                 let a = self.resolve(a).unwrap_or(a);
                 match (a, b, c) {
                     (Item::Array(array), Item::Int(idx), any) => {
-                        *self.get_array_mut(array).get_mut(idx as usize).expect("out of bounds") = any;
+                        *expect!(self.get_array_mut(array).get_mut(idx as usize), "out of bounds") = any;
                     }
                     (Item::Dict(dict), key, any) => {
                         self.get_dict_mut(dict).insert(key, any);
                     }
-                    args => panic!("put: unsupported args {:?})", self.display_tuple(args))
+                    args => error!("put: unsupported args {:?})", self.display_tuple(args))
                 }
             }
             Operator::Count => {
@@ -885,7 +905,7 @@ impl Vm {
                     Item::Dict(key) => self.get_dict(key).len(),
                     Item::String(key) => self.get_string(key).len(),
                     Item::Name(lit) => self.get_lit(lit).len(),
-                    arg => panic!("length: invalid argument {:?}", self.display(arg))
+                    arg => error!("length: invalid argument {:?}", self.display(arg))
                 };
                 self.push(Item::Int(len as i32));
             }
@@ -895,7 +915,7 @@ impl Vm {
                         let cap = self.get_dict(key).capacity();
                         self.push(Item::Int(cap as i32));
                     }
-                    arg => panic!("maxlength: invalid argument {:?}", self.display(arg))
+                    arg => error!("maxlength: invalid argument {:?}", self.display(arg))
                 }
             }
             Operator::ReadOnly => {
@@ -904,7 +924,7 @@ impl Vm {
                     Item::Array(key) => self.arrays[key].1.read_only(),
                     Item::Dict(key) => self.dicts[key].1.read_only(),
                     Item::String(key) => self.strings[key].1.read_only(),
-                    i => panic!("can't make {:?} readonly", self.display(i))
+                    i => error!("can't make {:?} readonly", self.display(i))
                 }
                 self.push(item);
             },
@@ -914,7 +934,7 @@ impl Vm {
                     Item::Array(key) => self.arrays[key].1.execute_only(),
                     Item::Dict(key) => self.dicts[key].1.execute_only(),
                     Item::String(key) => self.strings[key].1.execute_only(),
-                    i => panic!("can't make {:?} executeonly", self.display(i))
+                    i => error!("can't make {:?} executeonly", self.display(i))
                 }
                 self.push(item);
             },
@@ -924,23 +944,25 @@ impl Vm {
                     Item::Array(key) => self.arrays[key].1.noaccess(),
                     Item::Dict(key) => self.dicts[key].1.noaccess(),
                     Item::String(key) => self.strings[key].1.noaccess(),
-                    i => panic!("can't make {:?} executeonly", self.display(i))
+                    i => error!("can't make {:?} executeonly", self.display(i))
                 }
                 self.push(item);
             }
             Operator::EndArray => {
-                let start = self.stack.iter()
-                    .rposition(|item| *item == Item::Mark)
-                    .expect("unmatched ]");
+                let start = expect!(
+                    self.stack.iter().rposition(|item| *item == Item::Mark),
+                    "unmatched ]"
+                );
                 let array = self.stack.drain(start ..).skip(1).collect(); // skip the Mark
                 let key = self.make_array(array, Mode::all());
                 self.push(Item::Array(key));
             },
             Operator::Mark => self.push(Item::Mark),
             Operator::ClearToMark => {
-                let start = self.stack.iter()
-                    .rposition(|item| *item == Item::Mark)
-                    .expect("unmatched mark");
+                let start = expect!(
+                    self.stack.iter().rposition(|item| *item == Item::Mark),
+                    "unmatched mark"
+                );
                 self.stack.drain(start ..);
             }
             Operator::CurrentFile => self.push(Item::File),
@@ -949,7 +971,7 @@ impl Vm {
                     Item::File => {
                         input.open = false;
                     },
-                    arg => panic!("closefile: invalid arg {:?})", self.display(arg))
+                    arg => error!("closefile: invalid arg {:?})", self.display(arg))
                 }
             }
             Operator::Eexec => {
@@ -960,11 +982,11 @@ impl Vm {
                             Some(mut data) if data.len() > 4 => {
                                 Decoder::file().decode_inline(&mut data);
                                 debug!("data: {}", String::from_utf8_lossy(&data));
-                                self.parse_and_exec(&data[4..]);
+                                self.parse_and_exec(slice!(data, 4..));
                             }
                             _ => {
                                 let decoded = Decoder::file().decode(input.data, 4);
-                                let skip = self.parse_and_exec(&decoded) + 4;
+                                let skip = self.parse_and_exec(&decoded)? + 4;
                                 input.advance(skip);
                             }
                         };
@@ -974,7 +996,7 @@ impl Vm {
                         // let mut input = Input::new(self.get_string(key));
                         // self.parse_and_exec(&mut input);
                     },
-                    arg => panic!("eexec: unsupported arg {:?})", self.display(arg))
+                    arg => error!("eexec: unsupported arg {:?})", self.display(arg))
                 }
             }
 
@@ -983,7 +1005,7 @@ impl Vm {
                     Item::Real(r) => Item::Real(R32::from(r.into_inner().abs())),
                     Item::Int(i32::MIN) => Item::Real(-R32::from(i32::MIN as f32)),
                     Item::Int(i) => Item::Int(i.abs()),
-                    arg => panic!("abs: unsupported arg {:?})", self.display(arg))
+                    arg => error!("abs: unsupported arg {:?})", self.display(arg))
                 };
                 self.push(out);
             }
@@ -997,7 +1019,7 @@ impl Vm {
                     (Item::Int(a), Item::Real(b)) |
                     (Item::Real(b), Item::Int(a)) =>
                         Item::Real(R32::from(a as f32) + b),
-                    (arg1, arg2) => panic!("add: unsupported args {:?} {:?})", self.display(arg1), self.display(arg2))
+                    (arg1, arg2) => error!("add: unsupported args {:?} {:?})", self.display(arg1), self.display(arg2))
                 };
                 self.push(out);
             }
@@ -1010,7 +1032,7 @@ impl Vm {
                     (Item::Real(a), Item::Real(b)) => Item::Real(a - b),
                     (Item::Int(a), Item::Real(b)) => Item::Real(R32::from(a as f32) - b),
                     (Item::Real(a), Item::Int(b)) => Item::Real(a - R32::from(b as f32)),
-                    (arg1, arg2) => panic!("sub: unsupported args {:?} {:?})", self.display(arg1), self.display(arg2))
+                    (arg1, arg2) => error!("sub: unsupported args {:?} {:?})", self.display(arg1), self.display(arg2))
                 };
                 self.push(out);
             }
@@ -1024,11 +1046,12 @@ impl Vm {
                     (Item::Int(a), Item::Real(b)) |
                     (Item::Real(b), Item::Int(a)) =>
                         Item::Real(R32::from(a as f32) * b),
-                    (arg1, arg2) => panic!("mul: unsupported args {:?} {:?})", self.display(arg1), self.display(arg2))
+                    (arg1, arg2) => error!("mul: unsupported args {:?} {:?})", self.display(arg1), self.display(arg2))
                 };
                 self.push(out);
             }
         }
+        Ok(())
     }
     pub fn display(&self, item: Item) -> RefItem {
         RefItem::new(self, item)
@@ -1044,29 +1067,28 @@ impl Vm {
             println!("stack[{}]: {:?}", i, self.display(item));
         }
     }
-    pub fn step(&mut self, input: &mut Input) {
+    pub fn step(&mut self, input: &mut Input) -> Result<(), FontError> {
         input.parse(space);
         if let Some(_) = input.try_parse(comment) {
-            return;
+            return Ok(());
         }
         if input.len() == 0 {
-            return;
+            return Ok(());
         }
         let tk = input.parse(token);
         
         debug!("token: {:?}", tk);
-        self.exec_token(tk, input);
+        self.exec_token(tk, input)
     }
     // returns the number of bytes processed
-    pub fn parse_and_exec(&mut self, data: &[u8]) -> usize {
+    pub fn parse_and_exec(&mut self, data: &[u8]) -> Result<usize, FontError> {
         let input_size = data.len();
         let mut input = Input::new(data);
         // skip leading whitespace
         
         while input.len() > 0 && input.open {
-            self.step(&mut input);
+            self.step(&mut input)?;
         }
-        input_size - input.len()
+        Ok(input_size - input.len())
     }
 }
-

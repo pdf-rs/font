@@ -2,52 +2,57 @@ use nom::{
     number::complete::{be_i16, be_u16},
     sequence::{tuple},
 };
-use crate::{R};
+use crate::{R, FontError};
 use crate::parsers::{*};
 use crate::opentype::{tag, Tag};
 
-pub fn parse_base(data: &[u8]) -> R<()> {
+parser!(int16 : be_i16 -> i16);
+parser!(uint16 : be_u16 -> u16);
+
+
+pub fn parse_base(data: &[u8]) -> Result<(), FontError> {
     let (i, major) = be_u16(data)?;
     let (i, minor) = be_u16(i)?;
 
-    assert_eq!(major, 1);
+    require_eq!(major, 1);
     let (i, horiz_offset) = offset(i)?;
     let (i, vertical_offset) = offset(i)?;
 
     if let Some(horiz) = horiz_offset.of(data) {
-        let (_, ()) = parse_axis_table(horiz)?;
+        let _ = parse_axis_table(horiz)?;
     }
     if let Some(vert) = vertical_offset.of(data) {
-        let (_, ()) = parse_axis_table(vert)?;
+        let _ = parse_axis_table(vert)?;
     }
 
-    Ok((i, ()))
+    Ok(())
 }
-fn parse_axis_table(data: &[u8]) -> R<()> {
-    let (i, base_tag_list_offset) = offset(data)?;
-    let (i, base_script_list_offset) = offset(i)?;
+fn parse_axis_table(data: &[u8]) -> Result<(), FontError> {
+    let (i, base_tag_list_offset) = be_u16(data)?;
+    let (i, base_script_list_offset) = be_u16(i)?;
 
-    let (_, base_tag_list) = parse_base_tag_list(base_tag_list_offset.of(data).unwrap())?;
-    let (_, ()) = parse_base_script_list(base_script_list_offset.of(data).unwrap(), base_tag_list)?;
+    let base_tag_list = parse_base_tag_list(offset!(data, base_tag_list_offset))?;
+    let _ = parse_base_script_list(offset!(data, base_script_list_offset), base_tag_list)?;
 
-    Ok((i, ()))
+    Ok(())
 }
 
-fn parse_base_tag_list(data: &[u8]) -> R<Array<Tag>> {
+fn parse_base_tag_list(data: &[u8]) -> Result<impl Array<Item=Tag> + '_, FontError> {
     let (i, base_tag_count) = be_u16(data)?;
     let (i, array) = array::<Tag, _>(base_tag_count)(i)?;
-    Ok((i, array))
+    Ok(array)
 }
 
-fn parse_base_script_list<'a>(data: &'a [u8], tags: Array<Tag>) -> R<'a, ()> {
+fn parse_base_script_list<'a>(data: &'a [u8], tags: impl Array<Item=Tag>) -> Result<(), FontError> {
+    let mut tags = tags.into_iter();
     let (i, base_script_count) = be_u16(data)?;
     for (script_tag, offset) in iterator_n(i, tuple((tag, offset)), base_script_count) {
         let (_, (default_baseline_idx, baselines)) = parse_base_script_table(offset.of(data).unwrap())?;
-        for (base_tag, base_pos) in tags.iter().zip(baselines) {
-            println!("{:?} @ {}", base_tag, base_pos);
+        for (base_pos, base_tag) in baselines.zip(tags.by_ref()) {
+            println!("{:?} @ {}", base_tag?, base_pos);
         }
     }
-    Ok((i, ()))
+    Ok(())
 }
 fn parse_base_script_table(data: &[u8]) -> R<(u16, impl Iterator<Item=i16> + '_)> {
     let (i, base_values_offset) = offset(data)?;

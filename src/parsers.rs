@@ -9,11 +9,11 @@ use nom::{
     character::complete::{one_of, digit0, digit1},
     branch::alt,
     multi::many0,
-    error::{make_error, ErrorKind},
+    error::{make_error, ErrorKind, VerboseError, ParseError},
     Err::Failure
 };
 use decorum::R32;
-use crate::{R};
+use crate::{R, FontError, ParseResult};
 use indexmap::IndexMap;
 
 fn special_char(b: u8) -> bool {
@@ -286,10 +286,10 @@ pub fn iterator_n<'a, T, F>(input: &'a [u8], parser: F, n: impl Into<usize>) -> 
 }
 
 #[inline(always)]
-pub fn varint_u32(i: &[u8]) -> R<u32> {
+pub fn varint_u32(i: &[u8]) -> ParseResult<u32> {
     let (mut i, b0) = be_u8(i)?;
     let mut acc = match b0 {
-        0x80 => return Err(Failure(make_error(i, ErrorKind::Verify))),
+        0x80 => error!("0x80 not allowed"),
         b if b < 0x80 => {
             return Ok((i, b as u32))
         }
@@ -298,9 +298,7 @@ pub fn varint_u32(i: &[u8]) -> R<u32> {
     for _ in 1 .. 5 {
         let b = parse(&mut i, be_u8)?;
         
-        if acc & 0xFE_00_00_00 != 0 {
-            return Err(Failure(make_error(i, ErrorKind::Verify)));
-        }
+        require_eq!(acc & 0xFE_00_00_00, 0);
         
         acc = acc << 7 | (b & 0x7F) as u32;
         if b & 0x80 == 0 {
@@ -313,15 +311,15 @@ pub fn varint_u32(i: &[u8]) -> R<u32> {
 #[inline(always)]
 pub fn varint_u16(i: &[u8]) -> R<u16> {
     let (i, b0) = be_u8(i)?;
-    match b0 {
-        253 => be_u16(i),
-        254 => map(be_u8, |n| n as u16 + 2*253)(i),
-        255 => map(be_u8, |n| n as u16 + 253)(i),
-        n => Ok((i, n as u16))
-    }
+    Ok(match b0 {
+        253 => be_u16(i)?,
+        254 => map(be_u8, |n| n as u16 + 2*253)(i)?,
+        255 => map(be_u8, |n| n as u16 + 253)(i)?,
+        n => (i, n as u16)
+    })
 }
 
-pub fn hex_string(input: &[u8]) -> R<Vec<u8>> {
+pub fn hex_string(input: &[u8]) -> ParseResult<Vec<u8>> {
     let mut data = Vec::new();
     let mut odd = None;
     let mut add_digit = |digit: u8| {
@@ -338,7 +336,7 @@ pub fn hex_string(input: &[u8]) -> R<Vec<u8>> {
             b @ b'0' ..= b'9' => add_digit(b - b'0'),
             b @ b'A' ..= b'F' => add_digit(b - b'A' + 10),
             b' ' | b'\n' | b'\t' => {},
-            _ => return Ok((&input[idx ..], data))
+            _ => return Ok((slice!(input, idx ..), data))
         }
     }
     Ok((input, data))
@@ -351,7 +349,7 @@ pub fn parse<'a, T, E>(input: &mut &'a [u8], parser: impl Fn(&'a [u8]) -> Result
     Ok(t)
 }
 
-pub fn count_map<'a, K, V>(parser: impl Fn(&'a [u8]) -> R<'a, (K, V)>, count: usize) -> impl Fn(&'a [u8]) -> R<'a, IndexMap<K, V>>
+pub fn count_map<'a, K, V>(parser: impl Fn(&[u8]) -> ParseResult<(K, V)>, count: usize) -> impl Fn(&[u8]) -> ParseResult<IndexMap<K, V>>
     where K: Hash + Eq
 {
     move |mut i: &[u8]| {
@@ -364,7 +362,8 @@ pub fn count_map<'a, K, V>(parser: impl Fn(&'a [u8]) -> R<'a, (K, V)>, count: us
     }
 }
 pub fn offset(i: &[u8]) -> R<Offset> {
-    Offset::parse(i)
+    let (i, offset) = be_u16(i)?;
+    Ok((i, Offset(offset)))
 }
 pub struct Offset(pub u16);
 impl Offset {
@@ -377,9 +376,9 @@ impl Offset {
         }
     }
 }
-impl Parser for Offset {
+impl NomParser for Offset {
     type Output = Self;
-    fn parse(i: &[u8]) -> R<Self::Output> {
+    fn parse2(i: &[u8]) -> ParseResult<Self::Output> {
         let (i, offset) = be_u16(i)?;
         Ok((i, Offset(offset)))
     }
@@ -387,74 +386,136 @@ impl Parser for Offset {
 impl FixedSize for Offset {
     const SIZE: usize = 2;
 }
-pub fn array_iter<'a, P: Parser + FixedSize>(input: &'a [u8], count: usize) -> R<impl Iterator<Item=P::Output> + ExactSizeIterator + 'a> {
+pub fn array_iter<'a, P: Parser + FixedSize>(input: &'a [u8], count: usize)
+-> ParseResult<'a, impl Iterator<Item=Result<P::Output, FontError>> + ExactSizeIterator + 'a> {
     let (ours, remaining) = input.split_at(P::SIZE * count);
-    let iter = ours.chunks(P::SIZE).map(|chunk| P::parse(chunk).unwrap().1);
+    let iter = ours.chunks(P::SIZE).map(|chunk| P::parse(chunk));
     Ok((remaining, iter))
 }
-pub fn array<P: Parser + FixedSize, N: Into<usize>>(count: N) -> impl Fn(&[u8]) -> R<Array<P>> {
+pub fn array<P: Parser + FixedSize, N: Into<usize>>(count: N) -> impl Fn(&[u8]) -> R<ArrayBase<P>> {
     let len = count.into();
     move |input| {
-        let (data, remaining) = input.split_at(P::SIZE * len);
-        Ok((remaining, Array {
+        let n = P::SIZE * len;
+        if input.len() < n {
+            return Err(nom::Err::Failure(VerboseError::from_error_kind(input, ErrorKind::Complete)));
+        }
+        let (data, remaining) = input.split_at(n);
+        Ok((remaining, ArrayBase {
             data,
             len,
             _m: PhantomData
         }))
     }
 }
-pub fn array_map<P: Parser + FixedSize, N: Into<usize>, F: Copy>(count: N, f: F) -> impl Fn(&[u8]) -> R<ArrayMap<P, F>> {
-    let array = array(count);
-    move |input| {
-        let (i, arr) = array(input)?;
-        Ok((i, arr.map(f)))
+
+pub trait Array: Sized {
+    type Item;
+    type Iter: Iterator<Item=Result<Self::Item, FontError>> + ExactSizeIterator;
+
+    fn len(&self) -> usize;
+    fn get(&self, idx: usize) -> Result<Self::Item, FontError>;
+    fn into_iter(self) -> Self::Iter;
+    fn map<F>(self, f: F) -> ArrayMap<Self, F> {
+        ArrayMap { base: self, map: f }
     }
 }
 
 #[derive(Clone)]
-pub struct Array<'a, P> {
+pub struct ArrayBase<'a, P> {
     data: &'a [u8],
     len: usize,
     _m: PhantomData<P>,
 }
-impl<'a, P: Parser + FixedSize> Array<'a, P> {
-    pub fn iter(&self) -> impl Iterator<Item=P::Output> + ExactSizeIterator + 'a {
-        self.data.chunks(P::SIZE).map(|chunk| P::parse(chunk).unwrap().1)
-    }
-    pub fn map<F>(self, f: F) -> ArrayMap<'a, P, F> {
-        ArrayMap {
-            array: self,
-            map: f
+pub struct ArrayBaseIter<'a, P: Parser> {
+    data: &'a [u8],
+    _m: PhantomData<P>,
+}
+impl<'a, P: Parser + FixedSize> Iterator for ArrayBaseIter<'a, P> {
+    type Item = Result<P::Output, FontError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.data.len() < P::SIZE {
+            return None;
         }
+        let (this, remaining) = self.data.split_at(P::SIZE);
+        self.data = remaining;
+        Some(P::parse(this))
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.data.len() / P::SIZE;
+        (n, Some(n))
     }
 }
-impl<'a, P: Parser + FixedSize> KnownSize for Array<'a, P> {
+impl<'a, P: Parser + FixedSize> ExactSizeIterator for ArrayBaseIter<'a, P> {}
+
+impl<'a, P: Parser + FixedSize> Array for ArrayBase<'a, P> {
+    type Item = P::Output;
+    type Iter = ArrayBaseIter<'a, P>; //impl Iterator<Item=Result<Self::Item, FontError>> + ExactSizeIterator;
+
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn get(&self, idx: usize) -> Result<Self::Item, FontError> {
+        let off = P::SIZE * idx;
+        P::parse(slice!(self.data, off .. off + P::SIZE))
+    }
+    fn into_iter(self) -> Self::Iter {
+        ArrayBaseIter { data: self.data, _m: PhantomData }
+        //self.data.chunks_exact(P::SIZE).map(|chunk| P::parse(chunk))
+    }
+}
+impl<'a, P: Parser + FixedSize> KnownSize for ArrayBase<'a, P> {
     fn size(&self) -> usize {
         self.len * P::SIZE
     }
 }
-pub struct ArrayMap<'a, P, F> {
-    array: Array<'a, P>,
+pub struct ArrayMap<A, F> {
+    base: A,
     map: F,
 }
-impl<'a, P, F, T> ArrayMap<'a, P, F>
-    where P: Parser + FixedSize + 'a, T: 'a, F: 'a + Fn(P::Output) -> T
+impl<A: Array, F, T> Array for ArrayMap<A, F> where F: Fn(A::Item) -> Result<T, FontError>
 {
-    pub fn iter(self) -> impl Iterator<Item=T> + ExactSizeIterator + 'a {
-        let map = self.map;
-        self.array.iter().map(move |v| map(v))
+    type Item = T;
+    type Iter = ArrayMapIter<A, F>;
+
+    fn len(&self) -> usize {
+        self.base.len()
+    }
+
+    fn get(&self, idx: usize) -> Result<Self::Item, FontError> {
+        self.base.get(idx).and_then(|v| (self.map)(v))
+    }
+    fn into_iter(self) -> Self::Iter {
+        ArrayMapIter { base: self.base.into_iter(), map: self.map }
     }
 }
-impl<'a, P: Parser + FixedSize, F> KnownSize for ArrayMap<'a, P, F> {
+impl<A: FixedSize, F> KnownSize for ArrayMap<A, F> {
     fn size(&self) -> usize {
-        self.array.size()
+        self.base.size()
     }
 }
+pub struct ArrayMapIter<A: Array, F> {
+    base: A::Iter,
+    map: F,
+}
+impl<A: Array, F, T> Iterator for ArrayMapIter<A, F> where F: Fn(A::Item) -> Result<T, FontError> {
+    type Item = Result<T, FontError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.base.next().map(|r| r.and_then(|v| (self.map)(v)))
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.base.size_hint()
+    }
+}
+impl<A: Array, F, T> ExactSizeIterator for ArrayMapIter<A, F> where F: Fn(A::Item) -> Result<T, FontError> {}
 
 
 pub trait Parser {
     type Output;
-    fn parse(data: &[u8])-> R<Self::Output>;
+    fn parse(data: &[u8]) -> Result<Self::Output, FontError>;
+}
+pub trait NomParser {
+    type Output;
+    fn parse2(i: &[u8]) -> ParseResult<Self::Output>;
 }
 pub trait FixedSize {
     const SIZE: usize;
@@ -465,5 +526,11 @@ pub trait KnownSize {
 impl<T: FixedSize> KnownSize for T {
     fn size(&self) -> usize {
         Self::SIZE
+    }
+}
+impl<P: NomParser> Parser for P {
+    type Output = <P as NomParser>::Output;
+    fn parse(data: &[u8]) -> Result<Self::Output, FontError> {
+        P::parse2(data).map(|(_, v)| v)
     }
 }

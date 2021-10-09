@@ -1,4 +1,4 @@
-use crate::{State, v, Value, Context, TryIndex};
+use crate::{State, v, Value, Context, TryIndex, FontError};
 use nom::{IResult,
     bytes::complete::{take},
     number::complete::{be_u8, be_i16, be_i32}
@@ -73,13 +73,13 @@ fn maybe_width(state: &mut State, cond: impl Fn(usize) -> bool) {
         }
     }
 }
-pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State) -> IResult<&'a [u8], ()>
+pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State) -> Result<(), FontError>
     where T: TryIndex + 'a, U: TryIndex + 'a
 {
     while input.len() > 0 && !s.done {
         let (i, b0) = be_u8(input)?;
         let i = match b0 {
-            0 => panic!("reserved"),
+            0 => error!("reserved"),
             1 => { // ⊦ y dy hstem (1) ⊦
                 trace!("hstem");
                 maybe_width(s, |n| n == 2);
@@ -87,7 +87,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 s.stack.clear();
                 i
             }
-            2 => panic!("reserved"),
+            2 => error!("reserved"),
             3 => { // ⊦ x dx vstem (3) ⊦
                 trace!("vstem");
                 maybe_width(s, |n| n == 2);
@@ -97,6 +97,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             4 => { // ⊦ dy vmoveto (4) ⊦
                 trace!("vmoveto");
+                require!(s.stack.len() >= 1);
                 s.flush();
 
                 maybe_width(s, |n| n == 1);
@@ -159,15 +160,15 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             9 => panic!("reserved"),
             10 => { // subr# callsubr (10) –
                 trace!("callsubr");
-                let subr_nr = s.pop().to_int();
+                let subr_nr = s.pop()?.to_int()?;
                 
-                let subr = ctx.subr(subr_nr);
-                let (_, _) = charstring(subr, ctx, s)?;
+                let subr = ctx.subr(subr_nr)?;
+                charstring(subr, ctx, s)?;
                 i
             }
             11 => { // – return (11) –
                 trace!("return");
-                return Ok((i, ()));
+                return Ok(());
             }
             12 => {
                 let (i, b1) = be_u8(i)?;
@@ -176,14 +177,14 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         s.stack.clear();
                         i
                     }
-                    1 | 2 => panic!("reserved: 12 {}", b1),
-                    3 => unimplemented!("and"),
-                    4 => unimplemented!("or"),
-                    5 => unimplemented!("not"),
-                    6 | 7 | 8 => panic!("reserved"),
+                    1 | 2 => error!("reserved: 12 {}", b1),
+                    3 => error!("unimplemented: and"),
+                    4 => error!("unimplemented: or"),
+                    5 => error!("unimplemented: not"),
+                    6 | 7 | 8 => error!("reserved"),
                     9 => { // num abs (12 9) num2
                         trace!("abs");
-                        match s.pop() {
+                        match s.pop()? {
                             Value::Int(i) => s.push(i.abs()),
                             Value::Float(f) => s.push(f.abs())
                         }
@@ -191,7 +192,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     }
                     10 => { // num1 num2 add (12 10) sum
                         trace!("add");
-                        match (s.pop(), s.pop()) {
+                        match (s.pop()?, s.pop()?) {
                             (Value::Int(num2), Value::Int(num1)) => s.push(num1 + num2),
                             (num2, num1) => s.push(num2.to_float() + num1.to_float())
                         }
@@ -199,7 +200,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     }
                     11 => { // num1 num2 sub (12 11) difference
                         trace!("sub");
-                        match (s.pop(), s.pop()) {
+                        match (s.pop()?, s.pop()?) {
                             (Value::Int(num2), Value::Int(num1)) => s.push(num1 - num2),
                             (num2, num1) => s.push(num2.to_float() - num1.to_float())
                         }
@@ -207,31 +208,31 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     }
                     12 => { // num1 num2 div (12 12) quotient
                         trace!("div");
-                        let num2 = s.pop().to_float();
-                        let num1 = s.pop().to_float();
+                        let num2 = s.pop()?.to_float();
+                        let num1 = s.pop()?.to_float();
                         s.push(num1 / num2);
                         i
                     }
-                    13 => panic!("reserved"),
+                    13 => error!("reserved"),
                     14 => { // num neg (12 14) num2
                         trace!("neg");
-                        match s.pop() {
+                        match s.pop()? {
                             Value::Int(i) => s.push(-i),
                             Value::Float(f) => s.push(-f)
                         }
                         i
                     }
-                    15 => unimplemented!("eq"),
-                    16 | 17 => panic!("reserved"),
+                    15 => error!("unimplemented: eq"),
+                    16 | 17 => error!("reserved"),
                     18 => { // num drop (12 18)
                         trace!("drop");
-                        s.pop();
+                        s.pop()?;
                         i
                     }
-                    19 => panic!("reserved"),
-                    20 => unimplemented!("put"),
-                    21 => unimplemented!("get"),
-                    22 => unimplemented!("ifelse"),
+                    19 => error!("reserved"),
+                    20 => error!("unimplemented: put"),
+                    21 => error!("unimplemented: get"),
+                    22 => error!("unimplemented: ifelse"),
                     23 => { // random (12 23) num2
                         trace!("random");
                         use rand::{thread_rng, Rng};
@@ -243,36 +244,37 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     }
                     24 => { // num1 num2 mul (12 24) product
                         trace!("mul");
-                        let num2 = s.pop().to_float();
-                        let num1 = s.pop().to_float();
+                        let num2 = s.pop()?.to_float();
+                        let num1 = s.pop()?.to_float();
                         s.push(num1 * num2);
                         i
                     }
-                    25 => panic!("reserved"),
+                    25 => error!("reserved"),
                     26 => { // num sqrt (12 26) num2
                         trace!("sqrt");
-                        let num1 = s.pop().to_float();
+                        let num1 = s.pop()?.to_float();
                         s.push(num1.sqrt());
                         i
                     }
                     27 => { // any dup (12 27) any any
                         trace!("dup");
-                        let any = s.pop();
+                        let any = s.pop()?;
                         s.push(any);
                         s.push(any);
                         i
                     }
                     28 => { // num1 num2 exch (12 28) num2 num1
                         trace!("exch");
-                        let num2 = s.pop();
-                        let num1 = s.pop();
+                        let num2 = s.pop()?;
+                        let num1 = s.pop()?;
                         s.push(num2);
                         s.push(num1);
                         i
                     }
                     29 => { // numX ... num0 i index (12 29) numX ... num0 numi
                         trace!("index");
-                        let j = s.pop().to_int().max(0) as usize;
+                        let j = s.pop()?.to_usize()?.max(0);
+                        require!(j < s.stack.len());
                         let idx = s.stack.len() - j - 1;
                         let val = s.stack[idx];
                         s.push(val);
@@ -280,18 +282,23 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     }
                     30 => { // num(N–1) ... num0 N J roll (12 30) num((J–1) mod N) ... num0 num(N–1) ... num(J mod N)
                         trace!("roll");
-                        let j = s.pop().to_int();
-                        let n = s.pop().to_uint() as usize;
+                        let j = s.pop()?.to_int()?;
+                        let n = s.pop()?.to_usize()?;
                         let len = s.stack.len();
+                        require!(n < len);
                         let slice = &mut s.stack[len - n - 1 .. len - 1];
                         if j > 0 {
-                            slice.rotate_left(j as usize);
+                            let j = j as usize;
+                            require!(j < n);
+                            slice.rotate_left(j);
                         } else if j < 0 {
-                            slice.rotate_right((-j) as usize);
+                            let j = (-j) as usize;
+                            require!(j < n);
+                            slice.rotate_right(j);
                         }
                         i
                     }
-                    31 | 32 | 33 => panic!("reserved"),
+                    31 | 32 | 33 => error!("reserved"),
                     34 => { // |- dx1 dx2 dy2 dx3 dx4 dx5 dx6 hflex (12 34) |-
                         trace!("hflex");
                         let slice = s.stack.as_slice();
@@ -340,10 +347,10 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         s.stack.clear();
                         i
                     }
-                    38 ..= 255 => panic!("reserved")
+                    38 ..= 255 => error!("reserved")
                 }
             }
-            13 => panic!("reserved"),
+            13 => error!("reserved"),
             14 => { //– endchar (14) ⊦
                 trace!("endchar");
                 maybe_width(s, |n| n == 0);
@@ -351,7 +358,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 s.done = true;
                 i
             }
-            15 | 16 | 17 => panic!("reserved"),
+            15 | 16 | 17 => error!("reserved"),
             18 => { // |- y dy {dya dyb}* hstemhm (18) |-
                 trace!("hstemhm");
                 maybe_width(s, |n| n % 2 == 0);
@@ -377,6 +384,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             21 => { // ⊦ dx dy rmoveto (21) ⊦
                 trace!("rmoveto");
+                require!(s.stack.len() >= 2);
                 maybe_width(s, |n| n == 2);
                 s.flush();
                 let p = s.current + v(s.stack[0], s.stack[1]);
@@ -387,6 +395,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             22 => { // ⊦ dx hmoveto (22) ⊦
                 trace!("hmoveto");
+                require!(s.stack.len() >= 1);
                 maybe_width(s, |n| n == 1);
                 s.flush();
                 let p = s.current + v(s.stack[0], 0.);
@@ -449,11 +458,11 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 i
             }
             29 => { // globalsubr# callgsubr (29) –
-                let subr_nr = s.pop().to_int();
+                let subr_nr = s.pop()?.to_int()?;
                 trace!("globalsubr#{}", subr_nr as i32 + ctx.global_subr_bias);
                 
-                let subr = ctx.global_subr(subr_nr);
-                let (_, _) = charstring(subr, ctx, s)?;
+                let subr = ctx.global_subr(subr_nr)?;
+                charstring(subr, ctx, s)?;
                 i
             }
             30 => { // |- dy1 dx2 dy2 dx3 {dxa dxb dyb dyc dyd dxe dye dxf}* dyf? vhcurveto (30) |-
@@ -501,5 +510,5 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
         input = i;
     };
     
-    Ok((input, ()))
+    Ok(())
 }
