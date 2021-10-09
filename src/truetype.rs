@@ -1,6 +1,6 @@
 use std::iter;
 use std::ops::Deref;
-use crate::{Font, Glyph, R, IResultExt, GlyphId, Name, Info};
+use crate::{Font, Glyph, R, IResultExt, GlyphId, Name, Info, FontError};
 use crate::parsers::{iterator, parse};
 use pdf_encoding::Encoding;
 use nom::{
@@ -41,39 +41,39 @@ pub struct TrueTypeFont {
 }
 
 impl TrueTypeFont {
-    pub fn parse(data: &[u8]) -> Self {
-        let tables = parse_tables(data).get();
+    pub fn parse(data: &[u8]) -> Result<Self, FontError> {
+        let tables = parse_tables(data)?;
         TrueTypeFont::parse_glyf(tables)
     }
-    pub fn parse_glyf(tables: Tables<impl Deref<Target=[u8]>>) -> Self {
-        let head = parse_head(tables.get(b"head").expect("no head")).get();
-        let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
-        let loca = parse_loca(tables.get(b"loca").expect("no loca"), &head, &maxp).get();
-        let hhea = parse_hhea(tables.get(b"hhea").expect("no hhea")).get();
-        let hmtx = parse_hmtx(tables.get(b"hmtx").expect("no hmtx"), &hhea, &maxp).get();
+    pub fn parse_glyf(tables: Tables<impl Deref<Target=[u8]>>) -> Result<Self, FontError> {
+        let head = parse_head(expect!(tables.get(b"head"), "no head"))?;
+        let maxp = parse_maxp(expect!(tables.get(b"maxp"), "no maxp"))?;
+        let loca = parse_loca(expect!(tables.get(b"loca"), "no loca"), &head, &maxp)?;
+        let hhea = parse_hhea(expect!(tables.get(b"hhea"), "no hhea"))?;
+        let hmtx = parse_hmtx(expect!(tables.get(b"hmtx"), "no hmtx"), &hhea, &maxp).get()?;
         
-        let shapes = parse_shapes(&loca, tables.get(b"glyf").unwrap());
+        let shapes = parse_shapes(&loca, expect!(tables.get(b"glyf"), "no glyf"))?;
         
         TrueTypeFont::from_shapes_and_metrics(tables, shapes, hmtx)
     }
-    pub fn from_shapes_and_metrics(tables: Tables<impl Deref<Target=[u8]>>, shapes: Vec<Shape>, hmtx: Hmtx) -> TrueTypeFont {
-        let head = parse_head(tables.get(b"head").expect("no head")).get();
-        let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
-        let name = tables.get(b"name").map(|data| parse_name(data).get()).unwrap_or_default();
-        let weight = tables.get(b"OS/2").map(|data| parse_os2(data).get().weight);
+    pub fn from_shapes_and_metrics(tables: Tables<impl Deref<Target=[u8]>>, shapes: Vec<Shape>, hmtx: Hmtx) -> Result<TrueTypeFont, FontError> {
+        let head = parse_head(expect!(tables.get(b"head"), "no head"))?;
+        let cmap = tables.get(b"cmap").map(|data| parse_cmap(data)).transpose()?;
+        let name = tables.get(b"name").map(|data| parse_name(data)).transpose()?.unwrap_or_default();
+        let os2 = tables.get(b"OS/2").map(|data| parse_os2(data)).transpose()?;
 
-        TrueTypeFont {
+        Ok(TrueTypeFont {
             shapes,
             cmap,
             hmtx,
             units_per_em: head.units_per_em,
             bbox: head.bbox(),
-            kern: tables.get(b"kern").map(|data| parse_kern(data).get()).unwrap_or_default(),
+            kern: tables.get(b"kern").map(|data| parse_kern(data)).transpose()?.unwrap_or_default(),
             name,
             info: Info {
-                weight,
+                weight: os2.map(|t| t.weight),
             },
-        }
+        })
     }
     fn get_path(&self, idx: u32) -> Option<Outline> {
         get_outline(&self.shapes, idx)
@@ -88,7 +88,10 @@ impl Font for TrueTypeFont {
         Transform2F::from_scale(Vector2F::splat(scale.into()))
     }
     fn glyph(&self, id: GlyphId) -> Option<Glyph> {
-        assert!(id.0 <= u16::max_value() as u32);
+        if id.0 > u16::max_value() as u32 {
+            return None;
+        }
+        
         debug!("get gid {:?}", id);
         let path = self.get_path(id.0)?;
         let metrics = self.hmtx.metrics_for_gid(id.0 as u16);
@@ -143,32 +146,32 @@ fn fraction_i16(i: &[u8]) -> R<f32> {
     Ok((i, s as f32 / 16384.0))
 }
 
-pub fn parse_shapes(loca: &[u32], data: &[u8]) -> Vec<Shape> {
+pub fn parse_shapes(loca: &[u32], data: &[u8]) -> Result<Vec<Shape>, FontError> {
     let mut shapes = Vec::with_capacity(loca.len() - 1);
     for (i, (start, end)) in loca.iter().cloned().tuple_windows().enumerate() {
-        let slice = &data[start as usize .. end as usize];
+        let slice = expect!(data.get(start as usize .. end as usize), "out of bounds");
         //debug!("gid {} : data[{} .. {}]", i, start, end);
-        let shape = parse_glyph_shape(slice).get();
+        let shape = parse_glyph_shape(slice)?;
         shapes.push(shape);
     }
-    shapes
+    Ok(shapes)
 }
 // the following code is borrowed from stb-truetype and modified heavily
 
-fn parse_glyph_shape(data: &[u8]) -> R<Shape> {
+fn parse_glyph_shape(data: &[u8]) -> Result<Shape, FontError> {
     if data.len() == 0 {
         debug!("empty glyph");
-        return Ok((data, Shape::Empty));
+        return Ok(Shape::Empty);
     }
     let (i, number_of_contours) = be_i16(data)?;
     
     let (i, _) = take(8usize)(i)?;
     //debug!("n_contours: {}", number_of_contours);
     match number_of_contours {
-        0 => Ok((i, Shape::Empty)),
+        0 => Ok(Shape::Empty),
         n if n >= 0 => glyph_shape_positive_contours(i, number_of_contours as usize),
-        -1 => compound(i),
-        n => panic!("Contour format {} not supported.", n)
+        -1 => compound(i).get(),
+        n => error!("Contour format {} not supported.", n)
     }
 }
 
@@ -257,13 +260,13 @@ fn parse_coord(short: bool, same_or_pos: bool) -> impl Fn(&[u8]) -> R<i16> {
 fn mid(a: Vector2F, b: Vector2F) -> Vector2F {
     (a + b) * 0.5
 }
-fn glyph_shape_positive_contours(i: &[u8], number_of_contours: usize) -> R<Shape> {
+fn glyph_shape_positive_contours(i: &[u8], number_of_contours: usize) -> Result<Shape, FontError> {
     let (i, point_indices) = take(2 * number_of_contours)(i)?;
     let (i, num_instructions) = be_u16(i)?;
     let (mut i, _instructions) = take(num_instructions)(i)?;
     
     // total number of points
-    let n = 1 + be_u16(&point_indices[2 * number_of_contours - 2 ..]).get() as usize;
+    let n = 1 + be_u16(slice!(point_indices, 2 * number_of_contours - 2 ..)).get()? as usize;
 
     let mut flag_data = Vec::with_capacity(n);
 
@@ -280,7 +283,7 @@ fn glyph_shape_positive_contours(i: &[u8], number_of_contours: usize) -> R<Shape
             flag_data.push(flag);
         }
     }
-    assert_eq!(flag_data.len(), n);
+    require_eq!(flag_data.len(), n);
     
     // now load x coordinates
     let mut x_coord: i32 = 0;
@@ -310,7 +313,7 @@ fn glyph_shape_positive_contours(i: &[u8], number_of_contours: usize) -> R<Shape
         }
     }
     
-    Ok((i, Shape::Simple(outline)))
+    Ok(Shape::Simple(outline))
 }
 
 pub fn contour(points: impl Iterator<Item=(bool, Vector2F)>) -> Option<Contour> {

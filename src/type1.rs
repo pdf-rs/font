@@ -5,7 +5,7 @@ use nom::{IResult,
 use tuple::{TupleElements};
 use itertools::Itertools;
 use indexmap::IndexMap;
-use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId, Name, Value, Info};
+use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId, Name, Value, Info, FontError};
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
 use crate::parsers::parse;
@@ -61,46 +61,44 @@ impl Font for Type1Font {
 }
 
 impl Type1Font {
-    pub fn parse_pfa(data: &[u8]) -> Self {
+    pub fn parse_pfa(data: &[u8]) -> Result<Self, FontError> {
         let mut vm = Vm::new();
-        vm.parse_and_exec(data);
+        vm.parse_and_exec(data)?;
         Self::from_vm(vm)
     }
-    pub fn parse_pfb(data: &[u8]) -> Self {
+    pub fn parse_pfb(data: &[u8]) -> Result<Self, FontError> {
         let mut vm = Vm::new();
-        parse_pfb(&mut vm, data).get();
+        parse_pfb(&mut vm, data)?;
         Self::from_vm(vm)
     }
-    pub fn parse_postscript(data: &[u8]) -> Self {
+    pub fn parse_postscript(data: &[u8]) -> Result<Self, FontError> {
         let mut vm = Vm::new();
-        vm.parse_and_exec(data);
+        vm.parse_and_exec(data)?;
         Self::from_vm(vm)
     }
         
-    pub fn from_vm(vm: Vm) -> Self {
-        let (_font_name, font_dict) = vm.fonts().nth(0).unwrap();
+    pub fn from_vm(vm: Vm) -> Result<Self, FontError> {
+        let (_font_name, font_dict) = expect!(vm.fonts().nth(0), "no font in vm");
         
-        let private_dict = font_dict.get("Private").unwrap()
-            .as_dict().unwrap();
-        let len_iv = private_dict.get("lenIV")
-            .map(|i| i.as_int().unwrap()).unwrap_or(4) as usize;
-        let font_info = font_dict.get("FontInfo").and_then(|i| i.as_dict());
+        let private_dict = expect!(font_dict.get_dict("Private"), "no /Private dict");
+        let len_iv = private_dict.get_int("lenIV").unwrap_or(4) as usize;
+        let font_info = font_dict.get_dict("FontInfo");
         
         debug!("FontDict keys: {:?}", font_dict.iter().map(|(k, _)| k).format(", "));
         debug!("Private keys: {:?}", private_dict.iter().map(|(k, _)| k).format(", "));
         debug!("FontName: {:?}", font_dict.get("FontName"));
         debug!("FontInfo: {:?}", font_dict.get("FontInfo"));
         
-        let postscript_name = font_dict.get("FontName").map(|i| i.as_str().unwrap().into());
-        let full_name = font_dict.get("FontInfo").and_then(|i|
-            i.as_dict().unwrap().get("FullName").map(|i| i.as_str().unwrap().into())
-        );
+        let postscript_name = font_dict.get_str("FontName").map(|s| s.into());
+        let full_name = font_dict.get_dict("FontInfo")
+            .and_then(|d| d.get_str("FullName"))
+            .map(|s| s.into());
         let name = Name {
             full_name,
             postscript_name,
             .. Name::default()
         };
-        let weight = font_info.and_then(|d| d.get("Weight")).and_then(|i| i.as_str()).and_then(|s| match s {
+        let weight = font_info.and_then(|d| d.get_str("Weight")).and_then(|s| match s {
             "Light" => Some(300),
             "Regular" => Some(400),
             "Medium" => Some(500),
@@ -110,14 +108,16 @@ impl Type1Font {
             _ => None
         });
 
-        let char_strings = font_dict.get("CharStrings").expect("no /CharStrings").as_dict().unwrap();
+        let char_strings = expect!(font_dict.get_dict("CharStrings"), "no /CharStrings");
         
-        let subrs: Vec<Vec<u8>> = private_dict.get("Subrs").map(|subrs|
-            subrs.as_array().unwrap().iter()
-            .map(|item| Decoder::charstring().decode(item.as_bytes().unwrap(), len_iv).into())
-            .collect()
-        ).unwrap_or_default();
-        
+        let mut subrs = Vec::new();
+        if let Some(arr) = private_dict.get_array("Subrs") {
+            for item in arr.iter() {
+                let data = expect!(item.as_bytes(), "not a bytestring");
+                subrs.push(Decoder::charstring().decode(data, len_iv));
+            }
+        }
+
         let context = Context {
             subr_bias: 0,
             subrs,
@@ -170,7 +170,7 @@ impl Type1Font {
         }
 
         let font_matrix = font_dict.get("FontMatrix").unwrap().as_array().unwrap();
-        assert_eq!(font_matrix.len(), 6);
+        require_eq!(font_matrix.len(), 6);
         
         let bbox = font_dict.get("FontBBox")
             .map(|val| {
@@ -182,7 +182,7 @@ impl Type1Font {
                 font_matrix.iter().map(|item| item.as_f32().unwrap())
         ).unwrap();
         
-        Type1Font {
+        Ok(Type1Font {
             font_matrix: Transform2F::row_major(a, b, e, c, d, f),
             glyphs,
             codepoints,
@@ -192,7 +192,7 @@ impl Type1Font {
             info: Info {
                 weight,
             }
-        }
+        })
     }
 }
 
@@ -208,13 +208,13 @@ fn test_parser() {
     let mut vm = Vm::new();
     vm.parse_and_exec(b"/FontBBox{-180 -293 1090 1010}readonly ");
     vm.print_stack();
-    assert_eq!(vm.stack().len(), 2);
+    require_eq!(vm.stack().len(), 2);
 }
-fn parse_pfb<'a>(mut vm: &mut Vm, i: &'a [u8]) -> R<'a, ()> {
+fn parse_pfb(mut vm: &mut Vm, i: &[u8]) -> Result<(), FontError> {
     let mut input = i;
     while input.len() > 0 {
         let (i, magic) = le_u8(input)?;
-        assert_eq!(magic, 0x80);
+        require_eq!(magic, 0x80);
         let (i, block_type) = le_u8(i)?;
         match block_type {
             1 | 2 => {} // continue
@@ -225,7 +225,7 @@ fn parse_pfb<'a>(mut vm: &mut Vm, i: &'a [u8]) -> R<'a, ()> {
         let (i, block_len) = le_u32(i)?;
         info!("block type {}, length: {}", block_type, block_len);
     
-        let block = &i[.. block_len as usize];
+        let block = slice!(i, .. block_len as usize);
         match block_type {
             1 => {
                 vm.parse_and_exec(block);
@@ -234,17 +234,17 @@ fn parse_pfb<'a>(mut vm: &mut Vm, i: &'a [u8]) -> R<'a, ()> {
             _ => unreachable!()
         }
         
-        input = &i[block_len as usize ..];
+        input = slice!(i, block_len as usize ..);
     }
     
-    Ok((input, ()))
+    Ok(())
 }
-pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State) -> IResult<&'a [u8], ()>
+pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State) -> Result<(), FontError>
     where T: TryIndex + 'a, U: TryIndex + 'a
 {
     let mut ps_stack = vec![];
     while input.len() > 0 {
-        //trace!("input: {:?}", &input[.. input.len().min(10)]);
+        //trace!("input: {:?}", slice!(input, .. input.len().min(10)));
         trace!("current: {:?}", s.current);
         let b0 = parse(&mut input, be_u8)?;
         match b0 {
@@ -258,6 +258,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             4 => { // ⊦ dy vmoveto (4) ⊦
                 trace!("vmoveto");
+                require!(s.stack.len() >= 1);
                 s.flush();
 
                 let p = s.current + v(0., s.stack[0]);
@@ -267,6 +268,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             5 => { // ⊦ dx dy rlineto (5) ⊦
                 trace!("rlineto");
+                require!(s.stack.len() >= 2);
                 let p = s.current + v(s.stack[0], s.stack[1]);
                 s.contour.push_endpoint(p);
                 s.stack.clear();
@@ -274,6 +276,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             6 => { // ⊦ dx hlineto (6) ⊦
                 trace!("hlineto");
+                require!(s.stack.len() >= 1);
                 let p = s.current + v(s.stack[0], 0.);
                 s.contour.push_endpoint(p);
                 s.stack.clear();
@@ -281,6 +284,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             7 => { // dy vlineto (7)
                 trace!("vlineto");
+                require!(s.stack.len() >= 1);
                 let p = s.current + v(0., s.stack[0],);
                 s.contour.push_endpoint(p);
                 s.stack.clear();
@@ -288,6 +292,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             8 => { // ⊦ dx1 dy1 dx2 dy2 dx3 dy3 rrcurveto (8) ⊦
                 trace!("rrcurveto");
+                require!(s.stack.len() >= 6);
                 let c1 = s.current + v(s.stack[0], s.stack[1]);
                 let c2 = c1 + v(s.stack[2], s.stack[3]);
                 let p = c2 + v(s.stack[4], s.stack[5]);
@@ -301,9 +306,9 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 s.stack.clear();
             }
             10 => { // subr# callsubr (10) –
-                let subr_nr = s.pop().to_int();
+                let subr_nr = s.pop()?.to_int()?;
                 trace!("callsubr {}", subr_nr);
-                let subr = ctx.subr(subr_nr);
+                let subr = ctx.subr(subr_nr)?;
                 charstring(subr, ctx, s)?;
             }
             11 => { // return
@@ -338,18 +343,18 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     }
                     12 => { // num1 num2 div (12 12) quotient
                         trace!("div");
-                        let num2 = s.pop().to_float();
-                        let num1 = s.pop().to_float();
+                        let num2 = s.pop()?.to_float();
+                        let num1 = s.pop()?.to_float();
                         s.push(num1 / num2);
                     }
                     16 => { //  arg1 . . . argn n othersubr# callothersubr (12 16) –
-                        let subr_nr = s.pop().to_int();
+                        let subr_nr = s.pop()?.to_int()?;
                         trace!("callothersubr {}", subr_nr);
-                        let n = s.pop().to_int() as usize;
+                        let n = s.pop()?.to_int()? as usize;
                         
                         match subr_nr {
                             1 => {
-                                assert_eq!(n, 0);
+                                require_eq!(n, 0);
                                 s.flex_sequence = Some(Vec::with_capacity(7));
                                 
                                 // first moveto: referece point
@@ -362,22 +367,22 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                                 // (flex height, final x, final y) 0 callsubr
                             }
                             2 => {
-                                assert_eq!(n, 0);
+                                require_eq!(n, 0);
                             }
                             0 => {
                                 // end of flex sequences
-                                assert_eq!(n, 3);
+                                require_eq!(n, 3);
                                 let (_flex_height, x, y) = s.pop_tuple();
                                 let (_ref, c0, c1, p2, c3, c4, p5) = TupleElements::from_iter(s.flex_sequence.take().unwrap().into_iter()).unwrap();
-                                //assert_eq!(p5, v(x, y));
+                                //require_eq!(p5, v(x, y));
                                 s.contour.push_cubic(c0, c1, p2);
                                 s.contour.push_cubic(c3, c4, p5);
                                 ps_stack.push(y);
                                 ps_stack.push(x);
                             }
                             3 => {
-                                assert_eq!(n, 1);
-                                ps_stack.push(s.pop());
+                                require_eq!(n, 1);
+                                ps_stack.push(s.pop()?);
                                 ps_stack.push(Value::Int(3));
                             }
                             _ => {
@@ -474,11 +479,11 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let v = parse(&mut input, be_i32)?;
                 s.push(v as f32 / 65536.);
             }
-            c => panic!("unknown code {}", c)
+            c => error!("unknown code {}", c)
         }
         
         trace!("stack: {:?}", s.stack);
     };
     
-    Ok((input, ()))
+    Ok(())
 }

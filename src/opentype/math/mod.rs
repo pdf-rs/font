@@ -1,98 +1,29 @@
 #![allow(non_snake_case)]
 
 use std::collections::{HashMap, HashSet};
-use crate::R;
+use crate::{R, FontError, ParseResult};
 use crate::opentype::coverage_table;
-use crate::parsers::{Parser, FixedSize, array_iter};
+use crate::parsers::{Parser, NomParser, FixedSize, array_iter};
+use itertools::Itertools;
+use std::iter::FromIterator;
 
 use nom::number::complete::{be_i16, be_u16};
 pub mod assembly;
 
-pub fn parse_math(data: &[u8]) -> R<MathHeader> {
-    MathHeader::parse(data)
-}
-
-
-macro_rules! parser {
-    ($name:ident : $fun:ident -> $out:ty) => (
-        #[allow(non_camel_case_types)]
-        pub struct $name;
-        impl Parser for $name {
-            type Output = $out;
-            fn parse(data: &[u8])-> R<Self::Output> {
-                $fun(data)
-            }
-        }
-        impl FixedSize for $name {
-            const SIZE: usize = std::mem::size_of::<$out>();
-        }
-    )
-}
 parser!(int16 : be_i16 -> i16);
 parser!(uint16 : be_u16 -> u16);
 
-macro_rules! parse_field {
-    ($start:expr, $input:expr, ?$ptr:ident $parser:ident, $field:expr) => ({
-        let (i, offset) = <$ptr as Parser>::parse($input)?;
-        if offset != 0 {
-            let data = &$start[offset as usize ..];
-            let (_, value) = <$parser as Parser>::parse(data)?;
-            Ok((i, value))
-        } else {
-            Ok((i, Default::default()))
-        }
-    });
-    ($start:expr, $input:expr, @ $ptr:ident $parser:ident, $field:expr) => ({
-        let (i, offset) = <$ptr as Parser>::parse($input)?;
-        assert_ne!(offset, 0, stringify!($field));
-
-        let data = &$start[offset as usize ..];
-        let (_, value) = <$parser as Parser>::parse(data)?;
-        Ok((i, value))
-    });
-    ($start:expr, $input:expr, $parser:ident, $field:expr) => (
-        <$parser as Parser>::parse($input)
-    );
+pub fn parse_math(data: &[u8]) -> Result<MathHeader, FontError> {
+    MathHeader::parse(data)
 }
-macro_rules! field_size {
-    (@ $ptr:ident $(?)* $parser:ident) => (<$ptr as FixedSize>::SIZE);
-    ($parser:ident) => (<$parser as FixedSize>::SIZE);
-}
-
-macro_rules! table {
-    ($name:ident { $( $(#[$meta:meta])* $(?$ptr_opt:ident)* $(@$ptr:ident)* $parser:ident $field:tt, )* } ) => (
-        #[derive(Clone, Debug)]
-        pub struct $name {
-            $(
-                $(#[$meta])*
-                pub $field: <$parser as Parser>::Output,
-            )*
-        }
-        impl Parser for $name {
-            type Output = $name;
-            fn parse(input: &[u8]) -> R<$name> {
-                let i = input;
-                $(
-                    let (i, $field) = parse_field!(input, i, $(?$ptr_opt)* $(@$ptr)* $parser, $field)?;
-                )*
-                Ok((i, $name { $( $field, )* }))
-            }
-        }
-        impl FixedSize for $name {
-            const SIZE: usize = 0 $(+ field_size!($(@$ptr_opt)* $(@$ptr)* $parser) )*;
-        }
-    );
-}
-
-
 
 #[derive(Default, Clone, Debug)]
 pub struct MathValueRecord {
     pub value: i16
 }
-impl Parser for MathValueRecord {
+impl NomParser for MathValueRecord {
     type Output = Self;
-    fn parse<'a>(i: &'a [u8])-> R<'a, Self::Output> {
+    fn parse2(i: &[u8])-> ParseResult<Self::Output> {
         let (i, value) = be_i16(i)?;
         let (i, _offset) = be_i16(i)?;
         Ok((i, MathValueRecord { value }))
@@ -303,6 +234,23 @@ table!(MathGlyphInfo {
     ?uint16 MathKernInfo kern_info,
 });
 
+fn merge2<A, B, T, C>(a: A, b: B) -> Result<C, FontError>
+where A: Iterator, B: Iterator<Item=Result<T, FontError>>, C: FromIterator<(A::Item, T)>
+{
+    a.zip(b).map(|(a, b)| match b {
+        Ok(b) => Ok((a, b)),
+        Err(e) => Err(e)
+    }).try_collect()
+}
+fn merge2rr<A, B, T, U, C>(a: A, b: B) -> Result<C, FontError>
+where A: Iterator<Item=Result<T, FontError>>, B: Iterator<Item=Result<U, FontError>>, C: FromIterator<(T, U)>
+{
+    a.zip(b).map(|(a, b)| match (a, b) {
+        (Ok(a), Ok(b)) => Ok((a, b)),
+        (Err(e), _) | (_, Err(e)) => Err(e)
+    }).try_collect()
+}
+
 #[derive(Clone, Debug)]
 pub struct MathItalicsCorrectionInfo {
     map: HashMap<u16, MathValueRecord>
@@ -312,15 +260,15 @@ impl MathItalicsCorrectionInfo {
         self.map.get(&gid)
     }
 }
-impl Parser for MathItalicsCorrectionInfo {
+impl NomParser for MathItalicsCorrectionInfo {
     type Output = MathItalicsCorrectionInfo;
-    fn parse(data: &[u8]) -> R<Self> {
+    fn parse2(data: &[u8]) -> ParseResult<Self> {
         let (i, italics_correction_coverage_offset) = be_u16(data)?;
-        let (_, italics_correction_coverage) = coverage_table(&data[italics_correction_coverage_offset as usize ..])?;
+        let italics_correction_coverage = coverage_table(slice!(data, italics_correction_coverage_offset as usize ..))?;
         let (i, italics_correction_count) = be_u16(i)?;
         let (i, italics_correction) = array_iter::<MathValueRecord>(i, italics_correction_count as usize)?;
-        let map = italics_correction_coverage.zip(italics_correction).collect();
-       Ok((i, MathItalicsCorrectionInfo { map }))
+        let map = merge2(italics_correction_coverage, italics_correction)?;
+        Ok((i, MathItalicsCorrectionInfo { map }))
     }
 }
 
@@ -333,15 +281,15 @@ impl MathTopAccentAttachment {
         self.map.get(&gid)
     }
 }
-impl Parser for MathTopAccentAttachment {
+impl NomParser for MathTopAccentAttachment {
     type Output = MathTopAccentAttachment;
-    fn parse(data: &[u8]) -> R<Self> {
+    fn parse2(data: &[u8]) -> ParseResult<Self> {
         let (i, top_accent_coverage_offset) = be_u16(data)?;
-        let (_, top_accent_coverage) = coverage_table(&data[top_accent_coverage_offset as usize ..])?;
+        let top_accent_coverage = coverage_table(slice!(data, top_accent_coverage_offset as usize ..))?;
         let (i, top_accent_attachment_count) = be_u16(i)?;
         let (i, top_accent_attachment) = array_iter::<MathValueRecord>(i, top_accent_attachment_count as usize)?;
-        let map = top_accent_coverage.zip(top_accent_attachment).collect();
-       Ok((i, MathTopAccentAttachment { map }))
+        let map = top_accent_coverage.zip(top_accent_attachment).map(|(a, b)| b.map(|b| (a, b))).try_collect()?;
+        Ok((i, MathTopAccentAttachment { map }))
     }
 }
 
@@ -387,16 +335,16 @@ pub struct GlyphAssembly {
     pub italics_correction: MathValueRecord,
     pub parts: Vec<GlyphPartRecord>
 }
-impl Parser for GlyphAssembly {
+impl NomParser for GlyphAssembly {
     type Output = Self;
-    fn parse(data: &[u8]) -> R<Self> {
-        let (i, italics_correction) = MathValueRecord::parse(data)?;
+    fn parse2(data: &[u8]) -> ParseResult<Self> {
+        let (i, italics_correction) = MathValueRecord::parse2(data)?;
         let (i, part_count) = be_u16(i)?;
         let (i, parts) = array_iter::<GlyphPartRecord>(i, part_count as usize)?;
 
         Ok((i, GlyphAssembly {
             italics_correction,
-            parts: parts.collect()
+            parts: parts.try_collect()?
         }))
     }
 }
@@ -408,19 +356,19 @@ pub struct MathGlyphConstruction {
 }
 impl Parser for MathGlyphConstruction {
     type Output = Self;
-    fn parse(data: &[u8]) -> R<Self> {
+    fn parse(data: &[u8]) -> Result<Self, FontError> {
         let (i, glyph_assembly_offset) = be_u16(data)?;
         let glyph_assembly = match glyph_assembly_offset {
             0 => None,
-            off => Some(GlyphAssembly::parse(&data[off as usize ..])?.1)
+            off => Some(GlyphAssembly::parse(slice!(data, off as usize ..))?)
         };
         
         let (i, variant_count) = be_u16(i)?;
         let (i, variants) = array_iter::<MathGlyphVariantRecord>(i, variant_count as usize)?;
-        Ok((i, MathGlyphConstruction {
+        Ok(MathGlyphConstruction {
             glyph_assembly,
-            variants: variants.collect()
-        }))
+            variants: variants.try_collect()?
+        })
     }
 }
 
@@ -432,7 +380,7 @@ pub struct MathVariants {
 }
 impl Parser for MathVariants {
     type Output = MathVariants;
-    fn parse(data: &[u8]) -> R<Self> {
+    fn parse(data: &[u8]) -> Result<Self, FontError> {
         let (i, min_connector_overlap) = be_u16(data)?;
         let (i, vert_glyph_coverage_offset) = be_u16(i)?;
         let (i, horiz_glyph_coverage_offset) = be_u16(i)?;
@@ -444,26 +392,26 @@ impl Parser for MathVariants {
         let (i, horiz_glyph_construction_offsets) = array_iter::<uint16>(i, horiz_glyph_count as usize)?;
 
         let vert_glyph_construction = if vert_glyph_coverage_offset != 0 {
-            let (_, vert_glyph_coverage) = coverage_table(&data[vert_glyph_coverage_offset as usize ..])?;
-            let vert_glyph_construction = vert_glyph_construction_offsets.map(|off| MathGlyphConstruction::parse(&data[off as usize ..]).unwrap().1);
-            vert_glyph_coverage.zip(vert_glyph_construction).collect()
+            let vert_glyph_coverage = coverage_table(slice!(data, vert_glyph_coverage_offset as usize ..))?;
+            let vert_glyph_construction = vert_glyph_construction_offsets.map(|off| MathGlyphConstruction::parse(slice!(data, off? as usize ..)));
+            merge2(vert_glyph_coverage, vert_glyph_construction)?
         } else {
             HashMap::new()
         };
         
         let horiz_glyph_construction = if horiz_glyph_coverage_offset != 0 {
-            let (_, horiz_glyph_coverage) = coverage_table(&data[horiz_glyph_coverage_offset as usize ..])?;
-            let horiz_glyph_construction = horiz_glyph_construction_offsets.map(|off| MathGlyphConstruction::parse(&data[off as usize ..]).unwrap().1);
-            horiz_glyph_coverage.zip(horiz_glyph_construction).collect()
+            let horiz_glyph_coverage = coverage_table(slice!(data, horiz_glyph_coverage_offset as usize ..))?;
+            let horiz_glyph_construction = horiz_glyph_construction_offsets.map(|off| MathGlyphConstruction::parse(slice!(data, off? as usize ..)));
+            merge2(horiz_glyph_coverage, horiz_glyph_construction)?
         } else {
             HashMap::new()
         };
         
-        Ok((i, MathVariants {
+        Ok(MathVariants {
             min_connector_overlap,
             vert_glyph_construction,
             horiz_glyph_construction
-        }))
+        })
     }
 }
 
@@ -474,13 +422,13 @@ pub struct MathKern {
 }
 impl Parser for MathKern {
     type Output = Self;
-    fn parse(i: &[u8]) -> R<Self> {
+    fn parse(i: &[u8]) -> Result<Self, FontError> {
         let (i, height_count) = be_u16(i)?;
         let (i, heights) = array_iter::<MathValueRecord>(i, height_count as usize)?;
         let (i, kerns) = array_iter::<MathValueRecord>(i, height_count as usize)?;
-        let (i, last) = MathValueRecord::parse(i)?;
-        let pairs = heights.zip(kerns).collect();
-        Ok((i, MathKern { pairs,last }))
+        let last = MathValueRecord::parse(i)?;
+        let pairs = merge2rr(heights, kerns)?;
+        Ok(MathKern { pairs, last })
     }
 }
 
@@ -509,31 +457,29 @@ pub struct MathKernInfo {
 }
 impl Parser for MathKernInfo {
     type Output = Self;
-    fn parse(data: &[u8]) -> R<Self> {
-        use itertools::Itertools;
-
+    fn parse(data: &[u8]) -> Result<Self, FontError> {
         let (i, coverage_offset) = be_u16(data)?;
-        let (_, coverage) = coverage_table(&data[coverage_offset as usize ..])?;
+        let coverage = coverage_table(slice!(data, coverage_offset as usize ..))?;
         let (i, kern_count) = be_u16(i)?;
         let (i, records) = array_iter::<uint16>(i, 4 * kern_count as usize)?;
 
         let parse_kern = |off| if off > 0 {
-            MathKern::parse(&data[off as usize ..]).unwrap().1
+            MathKern::parse(slice!(data, off as usize ..))
         } else {
-            MathKern::default()
+            Ok(MathKern::default())
         };
 
         let records = records.tuples().map(|(a, b, c, d)| {
-            MathKernInfoRecord {
-                top_right: parse_kern(a),
-                top_left: parse_kern(b),
-                bottom_right: parse_kern(c),
-                bottom_left: parse_kern(d),
-            }
+            Ok(MathKernInfoRecord {
+                top_right: parse_kern(a?)?,
+                top_left: parse_kern(b?)?,
+                bottom_right: parse_kern(c?)?,
+                bottom_left: parse_kern(d?)?,
+            })
         });
-        let entries = coverage.zip(records).collect();
+        let entries = merge2(coverage, records)?;
 
-        Ok((i, MathKernInfo { entries }))
+        Ok(MathKernInfo { entries })
     }
 }
 
@@ -544,8 +490,8 @@ pub struct ExtendedShapes {
 
 impl Parser for ExtendedShapes {
     type Output = Self;
-    fn parse(data: &[u8]) -> R<Self> {
-        let (i, glyphs) = coverage_table(data)?;
-        Ok((i, ExtendedShapes { glyphs: glyphs.collect() }))
+    fn parse(data: &[u8]) -> Result<Self, FontError> {
+        let glyphs = coverage_table(data)?;
+        Ok(ExtendedShapes { glyphs: glyphs.collect() })
     }
 }

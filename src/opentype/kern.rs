@@ -1,4 +1,4 @@
-use crate::{R, parsers::*, opentype::gpos::KernTable};
+use crate::{R, parsers::*, opentype::gpos::KernTable, FontError};
 use nom::{
     number::complete::{be_u8, be_u16, be_i16, be_u32},
     bytes::complete::take,
@@ -6,7 +6,7 @@ use nom::{
     combinator::map,
 };
 
-fn parse_kern_format0<'a>(i: &'a [u8], table: &mut KernTable) -> R<'a, ()> {
+fn parse_kern_format0<'a>(i: &'a [u8], table: &mut KernTable) -> Result<(), FontError> {
     let (i, n_pairs) = be_u16(i)?;
     let (i, _search_range) = be_u16(i)?;
     let (i, _entry_selector) = be_u16(i)?;
@@ -16,21 +16,21 @@ fn parse_kern_format0<'a>(i: &'a [u8], table: &mut KernTable) -> R<'a, ()> {
     for (left, right, kern) in iterator(i, tuple((be_u16, be_u16, be_i16))).take(n_pairs as usize) {
         table.glyph_pairs.insert((left, right), kern);
     }
-    Ok((i, ()))
+    Ok(())
 }
 
-fn parse_kern_format2<'a>(data: &'a [u8], table: &mut KernTable) -> R<'a, ()> {
+fn parse_kern_format2<'a>(data: &'a [u8], table: &mut KernTable) -> Result<(), FontError> {
     let (i, _row_width) = be_u16(data)?;
     let (i, left_class_table_off) = be_u16(i)?;
     let (i, right_class_table_off) = be_u16(i)?;
     let (i, _array_off) = be_u16(i)?;
     
-    let num_left = be_u16(&data[left_class_table_off as usize + 2 ..])?.1 as usize;
-    let num_right = be_u16(&data[right_class_table_off as usize + 2 ..])?.1 as usize;
+    let num_left = be_u16(slice!(data, left_class_table_off as usize + 2 ..))?.1 as usize;
+    let num_right = be_u16(slice!(data, right_class_table_off as usize + 2 ..))?.1 as usize;
     table.glyph_pairs.reserve(num_left * num_right);
 
     let class_table = |off| {
-        let (i, first_glyph) = be_u16(&data[off as usize ..])?;
+        let (i, first_glyph) = be_u16(slice!(data, off as usize ..))?;
         let (i, n_glyphs) = be_u16(i)?;
         let (_, offsets) = take(n_glyphs as usize * 2)(i)?;
         Ok((first_glyph ..).zip(iterator(offsets, map(be_u16, |n| n as usize))))
@@ -38,32 +38,32 @@ fn parse_kern_format2<'a>(data: &'a [u8], table: &mut KernTable) -> R<'a, ()> {
     for (left_gid, left_off) in class_table(left_class_table_off)? {
         for (right_gid, right_off) in class_table(right_class_table_off)? {
             let off = left_off + right_off;
-            let (_, kern) = be_i16(&data[off .. off + 2])?;
+            let (_, kern) = be_i16(slice!(data, off .. off + 2))?;
             table.glyph_pairs.insert((left_gid, right_gid), kern);
         }
     }
-    Ok((i, ()))
+    Ok(())
 }
 
-pub fn parse_kern(input: &[u8]) -> R<KernTable> {
+pub fn parse_kern(input: &[u8]) -> Result<KernTable, FontError> {
     let (_i, version) = be_u16(input)?;
     debug!("kern table version {}", version);
     match version {
         0 => parse_kern_ms(input),
         1 => parse_kern_apple(input),
-        _ => panic!("stahp!")
+        _ => error!("stahp!")
     }
 }
 
-pub fn parse_kern_apple(i: &[u8]) -> R<KernTable> {
+pub fn parse_kern_apple(i: &[u8]) -> Result<KernTable, FontError> {
     let (_i, version) = be_u32(i)?;
-    assert_eq!(version, 0x00010000);
+    require_eq!(version, 0x00010000);
     
-    unimplemented!()
+    error!("apple kern table is not implemented")
 }
-pub fn parse_kern_ms(i: &[u8]) -> R<KernTable> {
+pub fn parse_kern_ms(i: &[u8]) -> Result<KernTable, FontError> {
     let (i, version) = be_u16(i)?;
-    assert_eq!(version, 0);
+    require_eq!(version, 0);
     
     let mut table = KernTable::default();
     let (mut i, n_tables) = be_u16(i)?;
@@ -72,10 +72,10 @@ pub fn parse_kern_ms(i: &[u8]) -> R<KernTable> {
         debug!("format={}, coverage={:02x}", format, coverage);
         let data = parse(&mut i, take(length as usize - 6))?;
         match (format, coverage) {
-            (0, 0x01) => parse_kern_format0(data, &mut table)?.1,
-            (2, 0x01) => parse_kern_format2(data, &mut table)?.1,
-            (f, _) => panic!("invalid kern subtable format {}", f)
+            (0, 0x01) => parse_kern_format0(data, &mut table)?,
+            (2, 0x01) => parse_kern_format2(data, &mut table)?,
+            (f, _) => error!("invalid kern subtable format {}", f)
         }
     }
-    Ok((i, table))
+    Ok(table)
 }

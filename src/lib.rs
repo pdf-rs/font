@@ -147,6 +147,10 @@ impl dyn Font {
     }
 }
 
+#[macro_use]
+mod macros;
+#[macro_use]
+mod error;
 mod truetype;
 mod cff;
 mod type1;
@@ -162,12 +166,14 @@ mod woff;
 #[cfg(feature="svg")]
 mod svg;
 
+pub use error::FontError;
 pub use truetype::TrueTypeFont;
 pub use cff::CffFont;
 pub use type1::Type1Font;
 pub use opentype::{OpenTypeFont};
 
 pub type R<'a, T> = IResult<&'a [u8], T, VerboseError<&'a [u8]>>;
+pub type ParseResult<'a, T> = Result<(&'a [u8], T), FontError>;
 
 #[derive(Copy, Clone)]
 pub enum Value {
@@ -209,18 +215,26 @@ impl From<f32> for Value {
 }
 impl Value {
     #[inline]
-    fn to_int(self) -> i32 {
+    fn to_int(self) -> Result<i32, FontError> {
         match self {
-            Value::Int(i) => i,
-            Value::Float(_) => panic!("tried to cast a float to int")
+            Value::Int(i) => Ok(i),
+            Value::Float(_) => Err(FontError::TypeError("tried to cast a float to int"))
         }
     }
     #[inline]
-    fn to_uint(self) -> u32 {
+    fn to_uint(self) -> Result<u32, FontError> {
         match self {
-            Value::Int(i) if i >= 0 => i as u32,
-            Value::Int(_) => panic!("expected a unsigned int"),
-            Value::Float(_) => panic!("tried to cast a float to int")
+            Value::Int(i) if i >= 0 => Ok(i as u32),
+            Value::Int(_) => Err(FontError::TypeError("expected a unsigned int")),
+            Value::Float(_) => Err(FontError::TypeError("tried to cast a float to int"))
+        }
+    }
+    #[inline]
+    fn to_usize(self) -> Result<usize, FontError> {
+        match self {
+            Value::Int(i) if i >= 0 => Ok(i as usize),
+            Value::Int(_) => Err(FontError::TypeError("expected a unsigned int")),
+            Value::Float(_) => Err(FontError::TypeError("tried to cast a float to int"))
         }
     }
     #[inline]
@@ -275,12 +289,18 @@ pub struct Context<T=(), U=()> {
 
 impl<T, U> Context<T, U> where T: TryIndex, U: TryIndex {
     #[inline]
-    pub fn subr(&self, idx: i32) -> &[u8] {
-        self.subrs.try_index((idx + self.subr_bias) as usize).expect("requested subroutine not found")
+    pub fn subr(&self, idx: i32) -> Result<&[u8], FontError> {
+        match self.subrs.try_index((idx + self.subr_bias) as usize) {
+            Some(sub) => Ok(sub),
+            None => error!("requested subroutine {} not found", idx)
+        }
     }
     #[inline]
-    pub fn global_subr(&self, idx: i32) -> &[u8] {
-        self.global_subrs.try_index((idx + self.global_subr_bias) as usize).expect("requested global subroutine not found")
+    pub fn global_subr(&self, idx: i32) -> Result<&[u8], FontError> {
+        match self.global_subrs.try_index((idx + self.global_subr_bias) as usize) {
+            Some(sub) => Ok(sub),
+            None => error!("requested global subroutine {} not found", idx)
+        }
     }
 }
 
@@ -354,8 +374,8 @@ impl State {
         self.stack.push(v.into());
     }
     #[inline]
-    pub fn pop(&mut self) -> Value {
-        self.stack.pop().expect("no value on the stack")
+    pub fn pop(&mut self) -> Result<Value, FontError> {
+        Ok(expect!(self.stack.pop(), "no value on the stack"))
     }
     #[inline]
     fn pop_tuple<T>(&mut self) -> T where
@@ -377,7 +397,7 @@ impl State {
 
 pub trait IResultExt {
     type Item;
-    fn get(self) -> Self::Item;
+    fn get(self) -> Result<Self::Item, FontError>;
 }
 
 fn print_err(e: nom::Err<VerboseError<&[u8]>>) -> ! {
@@ -396,10 +416,10 @@ fn print_err(e: nom::Err<VerboseError<&[u8]>>) -> ! {
 impl<T> IResultExt for IResult<&[u8], T, VerboseError<&[u8]>> {
     type Item = T;
     #[inline]
-    fn get(self) -> T {
+    fn get(self) -> Result<T, FontError> {
         match self {
-            Ok((_, t)) => t,
-            Err(e) => print_err(e),
+            Ok((_, t)) => Ok(t),
+            Err(e) => Err(FontError::from(e))
         }
     }
 }
@@ -415,25 +435,25 @@ pub enum FontType {
     Cff,
 }
 
-pub fn parse(data: &[u8]) -> Box<dyn Font + Send + Sync + 'static> {
-    let magic: &[u8; 4] = data[0 .. 4].try_into().unwrap();
+pub fn parse(data: &[u8]) -> Result<Box<dyn Font + Send + Sync + 'static>, FontError> {
+    let magic: &[u8; 4] = slice!(data, 0 .. 4).try_into().unwrap();
     info!("font magic: {:?} ({:?})", magic, String::from_utf8_lossy(&*magic));
     match magic {
-        &[0x80, 1, _, _] => Box::new(Type1Font::parse_pfb(data)) as _,
-        b"OTTO" | [0,1,0,0] => Box::new(OpenTypeFont::parse(data)) as _,
-        b"ttcf" | b"typ1" => unimplemented!(), // Box::new(TrueTypeFont::parse(data, 0)) as _,
-        b"true" => Box::new(TrueTypeFont::parse(data)) as _,
-        b"%!PS" => Box::new(Type1Font::parse_postscript(data)) as _,
+        &[0x80, 1, _, _] => Ok(Box::new(Type1Font::parse_pfb(data)?) as _),
+        b"OTTO" | [0,1,0,0] => Ok(Box::new(OpenTypeFont::parse(data)?) as _),
+        b"ttcf" | b"typ1" => error!("FontCollections not implemented"), // Box::new(TrueTypeFont::parse(data, 0)) as _,
+        b"true" => Ok(Box::new(TrueTypeFont::parse(data)?) as _),
+        b"%!PS" => Ok(Box::new(Type1Font::parse_postscript(data)?) as _),
 
         #[cfg(feature="woff")]
-        b"wOFF" => Box::new(woff::parse_woff(data).get()) as _,
+        b"wOFF" => Ok(Box::new(woff::parse_woff(data)?) as _),
 
         #[cfg(feature="woff")]
-        b"wOF2" => Box::new(woff::parse_woff2(data).get()) as _,
+        b"wOF2" => Ok(Box::new(woff::parse_woff2(data)?) as _),
         
-        &[1, _, _, _] => Box::new(CffFont::parse(data, 0)) as _,
-        &[37, 33, _, _] => Box::new(Type1Font::parse_pfa(data)) as _,
-        magic => panic!("unknown magic {:?}", magic)
+        &[1, _, _, _] => Ok(Box::new(CffFont::parse(data, 0)?) as _),
+        &[37, 33, _, _] => Ok(Box::new(Type1Font::parse_pfa(data)?) as _),
+        magic => Err(FontError::UnknownMagic(*magic))
     }
 }
 
@@ -449,7 +469,7 @@ pub fn font_info(data: &[u8]) -> Option<FontInfo> {
     let magic: &[u8; 4] = data[0 .. 4].try_into().unwrap();
     info!("font magic: {:?} ({:?})", magic, String::from_utf8_lossy(&*magic));
     match magic {
-        b"OTTO" | [0,1,0,0] => Some(OpenTypeFont::info(data)),
+        b"OTTO" | [0,1,0,0] => OpenTypeFont::info(data).ok(),
         _ => None
     }
 }

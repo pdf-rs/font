@@ -3,7 +3,7 @@
 use std::convert::TryInto;
 use std::collections::HashMap;
 use std::ops::{Deref};
-use crate::{Font, R, IResultExt, VMetrics, HMetrics, Glyph, GlyphId, Name, FontInfo, FontType, Info};
+use crate::{Font, R, IResultExt, VMetrics, HMetrics, Glyph, GlyphId, Name, FontInfo, FontType, Info, FontError, ParseResult};
 use crate::truetype::{Shape, parse_shapes, get_outline};
 use crate::cff::{read_cff};
 use pdf_encoding::Encoding;
@@ -60,68 +60,68 @@ pub struct OpenTypeFont {
     info: Info,
 }
 impl OpenTypeFont {
-    pub fn parse(data: &[u8]) -> Self {
-        let tables = parse_tables(data).get();
+    pub fn parse(data: &[u8]) -> Result<Self, FontError> {
+        let tables = parse_tables(data)?;
         for (tag, _) in tables.entries() {
             debug!("tag: {:?} ({:?})", tag, std::str::from_utf8(&tag));
         }
         
         OpenTypeFont::from_tables(tables)
     }
-    pub fn info(data: &[u8]) -> FontInfo {
-        let tables = parse_tables(data).get();
-        let name = tables.get(b"name").map(|data| parse_name(data).get()).unwrap_or_default();
-        let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
+    pub fn info(data: &[u8]) -> Result<FontInfo, FontError> {
+        let tables = parse_tables(data)?;
+        let name = tables.get(b"name").map(|data| parse_name(data)).transpose()?.unwrap_or_default();
+        let cmap = tables.get(b"cmap").map(|data| parse_cmap(data)).transpose()?;
 
-        FontInfo {
+        Ok(FontInfo {
             name,
             typ: FontType::OpenType,
             codepoints: cmap.map(|cmap| cmap.codepoints(10)).unwrap_or_default(),
-        }
+        })
     }
-    pub fn from_hmtx_glyf_and_tables(hmtx: Option<Hmtx>, glyf: Option<Vec<Shape>>, tables: Tables<impl Deref<Target=[u8]>>) -> Self {
+    pub fn from_hmtx_glyf_and_tables(hmtx: Option<Hmtx>, glyf: Option<Vec<Shape>>, tables: Tables<impl Deref<Target=[u8]>>) -> Result<Self, FontError> {
         let outlines: Vec<_>;
         let font_matrix;
         let bbox;
         if let Some(cff) = tables.get(b"CFF ") {
-            let slot = read_cff(cff).get().slot(0);
+            let slot = read_cff(cff)?.slot(0)?;
             bbox = slot.bbox();
-            outlines = slot.outlines().map(|(outline, _, _)| outline).collect();
+            outlines = slot.outlines()?.map(|r| r.map(|(outline, _, _)| outline)).collect::<Result<_, _>>()?;
             font_matrix = slot.font_matrix();
         } else {
-            let head = parse_head(tables.get(b"head").expect("no head")).get();
+            let head = parse_head(expect!(tables.get(b"head"), "no head"))?;
             bbox = Some(head.bbox());
             font_matrix = Transform2F::from_scale(Vector2F::splat(1.0 / head.units_per_em as f32));
             outlines = glyf.map(|shapes| (0 .. shapes.len()).filter_map(|idx| get_outline(&shapes, idx as u32)).collect()).unwrap_or_default();
         }
 
         #[cfg(feature="svg")]
-        let svg = tables.get(b"SVG ").map(|data| parse_svg(data).unwrap().1);
+        let svg = tables.get(b"SVG ").map(|data| parse_svg(data)).transpose()?;
         
-        let maxp = tables.get(b"maxp").map(|data| parse_maxp(data).get());
+        let maxp = tables.get(b"maxp").map(|data| parse_maxp(data)).transpose()?;
         let num_glyphs = maxp.as_ref().map(|maxp| maxp.num_glyphs as u32).unwrap_or(outlines.len() as u32);
 
         let gpos = if let Some(data) = tables.get(b"GPOS") {
-            let maxp = maxp.as_ref().expect("no maxp");
-            Some(parse_gpos(data, &maxp).get())
+            let maxp = expect!(maxp.as_ref(), "no maxp");
+            Some(parse_gpos(data, &maxp)?)
         } else if let Some(data) = tables.get(b"kern") {
-            Some(GPos::from_kern(parse_kern(data).get()))
+            Some(GPos::from_kern(parse_kern(data)?))
         } else {
             None
         };
         
-        let gsub = tables.get(b"GSUB").map(|data| parse_gsub(data).get());
+        let gsub = tables.get(b"GSUB").map(|data| parse_gsub(data)).transpose()?;
         
-        let cmap = tables.get(b"cmap").map(|data| parse_cmap(data).get());
-        let math = tables.get(b"MATH").map(|data| parse_math(data).get());
-        let vmetrics = tables.get(b"hhea").map(|data| parse_hhea(data).get().into());
-        let name = tables.get(b"name").map(|data| parse_name(data).get()).unwrap_or_default();
-        let gdef = tables.get(b"gdef").map(|data| parse_gdef(data).get());
-        tables.get(b"BASE").map(|data| parse_base(data).get());
+        let cmap = tables.get(b"cmap").map(|data| parse_cmap(data)).transpose()?;
+        let math = tables.get(b"MATH").map(|data| parse_math(data)).transpose()?;
+        let vmetrics = tables.get(b"hhea").map(|data| parse_hhea(data)).transpose()?.map(|v| v.into());
+        let name = tables.get(b"name").map(|data| parse_name(data)).transpose()?.unwrap_or_default();
+        let gdef = tables.get(b"gdef").map(|data| parse_gdef(data)).transpose()?;
+        tables.get(b"BASE").map(|data| parse_base(data)).transpose()?;
 
-        let weight = tables.get(b"OS/2").map(|data| os2::parse_os2(data).get().weight);
+        let weight = tables.get(b"OS/2").map(|data| os2::parse_os2(data)).transpose()?.map(|os2| os2.weight);
 
-        OpenTypeFont {
+        Ok(OpenTypeFont {
             outlines,
             gpos,
             cmap,
@@ -141,19 +141,19 @@ impl OpenTypeFont {
             info: Info {
                 weight,
             },
-        }
+        })
     }
-    pub fn from_tables<T>(tables: Tables<T>) -> Self where T: Deref<Target=[u8]> {
-        let head = parse_head(tables.get(b"head").expect("no head")).get();
-        let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp")).get();
-        let hhea = parse_hhea(tables.get(b"hhea").expect("no hhea")).get();
+    pub fn from_tables<T>(tables: Tables<T>) -> Result<Self, FontError> where T: Deref<Target=[u8]> {
+        let head = parse_head(expect!(tables.get(b"head"), "no head"))?;
+        let maxp = parse_maxp(expect!(tables.get(b"maxp"), "no maxp"))?;
+        let hhea = parse_hhea(expect!(tables.get(b"hhea"), "no hhea"))?;
         
         let glyf = tables.get(b"glyf").map(|data| {
-            let loca = parse_loca(tables.get(b"loca").expect("no loca"), &head, &maxp).get();
+            let loca = parse_loca(expect!(tables.get(b"loca"), "no loca"), &head, &maxp)?;
             parse_shapes(&loca, data)
-        });
+        }).transpose()?;
         
-        let hmtx = tables.get(b"hmtx").map(|data| parse_hmtx(data, &hhea, &maxp).get());
+        let hmtx = tables.get(b"hmtx").map(|data| parse_hmtx(data, &hhea, &maxp).get()).transpose()?;
         
         OpenTypeFont::from_hmtx_glyf_and_tables(hmtx, glyf, tables)
     }
@@ -232,7 +232,7 @@ impl<T: Deref<Target=[u8]>> Tables<T> {
     }
 }
 // (tag, content)
-pub fn parse_tables(data: &[u8]) -> R<Tables<&[u8]>> {
+pub fn parse_tables(data: &[u8]) -> Result<Tables<&[u8]>, FontError> {
     let (i, _magic) = take(4usize)(data)?; 
     let (i, num_tables) = be_u16(i)?;
     let (i, _search_range) = be_u16(i)?;
@@ -242,14 +242,15 @@ pub fn parse_tables(data: &[u8]) -> R<Tables<&[u8]>> {
     let mut entries = HashMap::with_capacity(num_tables as usize);
     for _ in 0 .. num_tables {
         let (tag, _, off, len) = parse(&mut i, tuple((take(4usize), be_u32, be_u32, be_u32)))?;
+        let (off, len) = (off as usize, len as usize);
         entries.insert(
             tag.try_into().expect("slice too short"),
-            data.get(off as usize .. off as usize + len as usize).expect("out of bounds")
+            slice!(data, off .. off + len)
         );
         debug!("tag: {:?} ({:?})", tag, std::str::from_utf8(&tag));
     }
     
-    Ok((i, Tables { entries }))
+    Ok(Tables { entries })
 }
 
 pub struct Head {
@@ -268,15 +269,15 @@ impl Head {
         RectF::from_points(bb_min, bb_max)
     }
 }
-pub fn parse_head(i: &[u8]) -> R<Head> {
+pub fn parse_head(i: &[u8]) -> Result<Head, FontError> {
     let (i, major) = be_u16(i)?;
     let (i, minor) = be_u16(i)?;
-    assert_eq!((major, minor), (1, 0));
+    require_eq!((major, minor), (1, 0));
     
     let (i, _revision) = be_i32(i)?;
     let (i, _cksum) = be_u32(i)?;
     let (i, magic) = be_i32(i)?;
-    assert_eq!(magic, 0x5F0F3CF5);
+    require_eq!(magic, 0x5F0F3CF5);
     
     let (i, _flags) = be_u16(i)?;
     let (i, units_per_em) = be_u16(i)?;
@@ -296,28 +297,28 @@ pub fn parse_head(i: &[u8]) -> R<Head> {
     let (i, _font_direction_hint) = be_u16(i)?;
     let (i, index_to_loc_format) = be_i16(i)?;
     let (i, glyph_data_format) = be_u16(i)?;
-    assert_eq!(glyph_data_format, 0);
+    require_eq!(glyph_data_format, 0);
     
-    Ok((i, Head {
+    Ok(Head {
         units_per_em,
         index_to_loc_format,
         x_min, x_max, y_min, y_max,
         mac_style,
-    }))
+    })
 }
 pub struct Maxp {
     pub num_glyphs: u16
 }
-pub fn parse_maxp(i: &[u8]) -> R<Maxp> {
+pub fn parse_maxp(i: &[u8]) -> Result<Maxp, FontError> {
     let (i, _version) = be_i32(i)?;
     let (i, num_glyphs) = be_u16(i)?;
-    Ok((i, Maxp { num_glyphs }))
+    Ok(Maxp { num_glyphs })
 }
-pub fn parse_loca<'a>(i: &'a [u8], head: &Head, maxp: &Maxp) -> R<'a, Vec<u32>> {
+pub fn parse_loca<'a>(i: &'a [u8], head: &Head, maxp: &Maxp) -> Result<Vec<u32>, FontError> {
     match head.index_to_loc_format {
-        0 => count(map(be_u16, |n| 2 * n as u32), maxp.num_glyphs as usize + 1)(i),
-        1 => count(be_u32, maxp.num_glyphs as usize + 1)(i),
-        _ => panic!("invalid index_to_loc_format")
+        0 => count(map(be_u16, |n| 2 * n as u32), maxp.num_glyphs as usize + 1)(i).get(),
+        1 => count(be_u32, maxp.num_glyphs as usize + 1)(i).get(),
+        _ => error!("invalid index_to_loc_format")
     }
 }
 
@@ -327,7 +328,7 @@ pub struct Hhea {
     descender: i16,
     number_of_hmetrics: u16 
 }
-pub fn parse_hhea(i: &[u8]) -> R<Hhea> {
+pub fn parse_hhea(i: &[u8]) -> Result<Hhea, FontError> {
     let (i, _majorVersion) = be_u16(i)?;
     let (i, _minorVersion) = be_u16(i)?;
     let (i, ascender) = be_i16(i)?;
@@ -348,12 +349,12 @@ pub fn parse_hhea(i: &[u8]) -> R<Hhea> {
     let (i, _metricDataFormat) = be_i16(i)?;
     let (i, number_of_hmetrics) = be_u16(i)?;
     
-    Ok((i, Hhea {
+    Ok(Hhea {
         line_gap,
         ascender,
         descender,
         number_of_hmetrics
-    }))
+    })
 }
 impl Into<VMetrics> for Hhea {
     fn into(self) -> VMetrics {
@@ -437,18 +438,18 @@ pub fn parse_vhea(i: &[u8]) -> R<VMetrics> {
     }))
 }
 
-pub fn parse_skript_list(data: &[u8]) -> R<()> {
+pub fn parse_skript_list(data: &[u8]) -> Result<(), FontError> {
     let (i, script_count) = be_u16(data)?;
     
     for (tag, offset) in iterator_n(i, tuple((take(4usize), be_u16)), script_count) {
         debug!("script {}", String::from_utf8_lossy(tag));
-        let script_data = &data[offset as usize ..];
+        let script_data = slice!(data, offset as usize ..);
         
         let (i, _default_lang_sys_off) = be_u16(script_data)?;
         let (i, sys_lang_count) = be_u16(i)?;
         
         for (_tag, offset) in iterator_n(i, tuple((take(4usize), be_u16)), sys_lang_count) {
-            let i = &script_data[offset as usize ..];
+            let i = slice!(script_data, offset as usize ..);
             let (i, _lookup_order) = be_u16(i)?;
             let (i, _required_feature_index) = be_u16(i)?;
             let (i, feature_index_count) = be_u16(i)?;
@@ -457,26 +458,26 @@ pub fn parse_skript_list(data: &[u8]) -> R<()> {
             }
         }
     }
-    Ok((i, ()))
+    Ok(())
 }
 
-pub fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(usize, &[u8], u16, u16) -> R<()>) -> R<()> {
+pub fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(usize, &[u8], u16, u16) -> Result<(), FontError>) -> Result<(), FontError> {
     let (i, lookup_count) = be_u16(data)?;
     for (lookup_idx, table_off) in iterator_n(i, be_u16, lookup_count).enumerate() {
-        let table_data = &data[table_off as usize ..];
+        let table_data = slice!(data, table_off as usize ..);
         let (i, lookup_type) = be_u16(table_data)?;
         let (i, lookup_flag) = be_u16(i)?;
         let (i, subtable_count) = be_u16(i)?;
         
         for subtable_off in iterator_n(i, be_u16, subtable_count) {
-            inner(lookup_idx, &table_data[subtable_off as usize ..], lookup_type, lookup_flag)?;
+            inner(lookup_idx, slice!(table_data, subtable_off as usize ..), lookup_type, lookup_flag)?;
         }
     }
-    Ok((i, ()))
+    Ok(())
 }
 
 // maps gid -> class id
-pub fn parse_class_def<'a>(data: &'a [u8], map: &mut HashMap<u16, u16>) -> R<'a, ()> {
+pub fn parse_class_def<'a>(data: &'a [u8], map: &mut HashMap<u16, u16>) -> Result<(), FontError> {
     let (i, format) = be_u16(data)?;
     match format {
         1 => {
@@ -496,31 +497,31 @@ pub fn parse_class_def<'a>(data: &'a [u8], map: &mut HashMap<u16, u16>) -> R<'a,
                 }
             }
         }
-        f => panic!("invalid class list format {}", f)
+        f => error!("invalid class list format {}", f)
     }
-    Ok((i, ()))
+    Ok(())
 }
 
-pub fn coverage_table<'a>(i: &'a [u8]) -> R<impl Iterator<Item=u16> + 'a> {
+pub fn coverage_table<'a>(i: &'a [u8]) -> Result<impl Iterator<Item=u16> + 'a, FontError> {
     let (i, format) = be_u16(i)?;
     debug!("coverage table format {}", format);
     match format {
         1 => {
             let (i, glyph_count) = be_u16(i)?;
-            Ok((i, Either::Left(iterator_n(i, be_u16, glyph_count))))
+            Ok(Either::Left(iterator_n(i, be_u16, glyph_count)))
         },
         2 => {
             let (i, range_count) = be_u16(i)?;
-            Ok((i, Either::Right(
+            Ok(Either::Right(
                 iterator_n(i, tuple((be_u16, be_u16, be_u16)), range_count)
                     .flat_map(|(start, end, _i)| start ..= end)
-            )))
+            ))
         },
-        n => panic!("invalid coverage format {}", n)
+        n => error!("invalid coverage format {}", n)
     }
 }
 
-pub fn parse_name(data: &[u8]) -> R<Name> {
+pub fn parse_name(data: &[u8]) -> Result<Name, FontError> {
     let mut name = Name::default();
 
     let (i, format) = be_u16(data)?;
@@ -528,12 +529,12 @@ pub fn parse_name(data: &[u8]) -> R<Name> {
         0 | 1 => {
             let (i, count) = be_u16(i)?;
             let (i, string_offset) = be_u16(i)?;
-            let string_data = &data[string_offset as usize ..];
+            let string_data = slice!(data, string_offset as usize ..);
             for name_record in iterator_n(i, tuple((be_u16, be_u16, be_u16, be_u16, be_u16, be_u16)), count) {
                 let (platform_id, encoding_id, language_id, name_id, length, offset) = name_record;
                 //debug!("platform_id={}, encoding_id={}, language_id={}, name_id={}", platform_id, encoding_id, language_id, name_id);
 
-                let encoded = &string_data[offset as usize .. offset as usize + length as usize];
+                let encoded = slice!(string_data, offset as usize .. offset as usize + length as usize);
                 //debug!("string: {:?}", encoded);
 
                 let field = match name_id {
@@ -553,7 +554,7 @@ pub fn parse_name(data: &[u8]) -> R<Name> {
         }
         _ => {}
     }
-    Ok((i, name))
+    Ok(name)
 }
 
 fn utf16_be(data: &[u8]) -> Result<String, std::string::FromUtf16Error> {
@@ -577,10 +578,11 @@ impl fmt::Debug for Tag {
         }
     }
 }
-impl Parser for Tag {
+impl NomParser for Tag {
     type Output = Self;
-    fn parse(i: &[u8]) -> R<Self::Output> {
-        tag(i)
+    fn parse2(i: &[u8]) -> ParseResult<Self::Output> {
+        let (i, t) = tag(i)?;
+        Ok((i, t))
     }
 }
 impl FixedSize for Tag {
