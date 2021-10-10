@@ -113,8 +113,7 @@ impl Type1Font {
         let mut subrs = Vec::new();
         if let Some(arr) = private_dict.get_array("Subrs") {
             for item in arr.iter() {
-                let data = expect!(item.as_bytes(), "not a bytestring");
-                subrs.push(Decoder::charstring().decode(data, len_iv));
+                subrs.push(item.as_bytes().map(|data| Decoder::charstring().decode(data, len_iv)));
             }
         }
 

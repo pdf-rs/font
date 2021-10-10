@@ -260,6 +260,15 @@ impl TryIndex for () {
         None
     }
 }
+impl TryIndex for Vec<Option<Vec<u8>>> {
+    #[inline]
+    fn try_index(&self, idx: usize) -> Option<&[u8]> {
+        match self.get(idx) {
+            Some(Some(ref v)) => Some(&**v),
+            _ => None
+        }
+    }
+}
 impl TryIndex for Vec<Vec<u8>> {
     #[inline]
     fn try_index(&self, idx: usize) -> Option<&[u8]> {
