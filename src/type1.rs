@@ -476,7 +476,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             255 => {
                 let v = parse(&mut input, be_i32)?;
-                s.push(v as f32 / 65536.);
+                s.push(v);
             }
             c => error!("unknown code {}", c)
         }
