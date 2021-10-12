@@ -68,6 +68,15 @@ macro_rules! offset {
 
 #[macro_export]
 macro_rules! get {
+    (mut $var:expr $(, $item:expr)*) => ({
+        let v = &mut $var;
+        $(
+        let v = match v.get_mut($item) {
+            Some(v) => v,
+            None => return Err(crate::FontError::Get(stringify!($item)))
+        }; )*
+        v
+    });
     ($var:expr $(, $item:expr)*) => ({
         let v = &$var;
         $(
