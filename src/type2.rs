@@ -79,7 +79,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
     while input.len() > 0 && !s.done {
         let (i, b0) = be_u8(input)?;
         let i = match b0 {
-            0 => error!("reserved"),
+            0 => error!("reserved {}", b0),
             1 => { // ⊦ y dy hstem (1) ⊦
                 trace!("hstem");
                 maybe_width(s, |n| n == 2);
@@ -87,7 +87,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 s.stack.clear();
                 i
             }
-            2 => error!("reserved"),
+            2 => error!("reserved {}", b0),
             3 => { // ⊦ x dx vstem (3) ⊦
                 trace!("vstem");
                 maybe_width(s, |n| n == 2);
@@ -157,7 +157,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 s.stack.clear();
                 i
             }
-            9 => panic!("reserved"),
+            9 => error!("reserved {}", b0),
             10 => { // subr# callsubr (10) –
                 trace!("callsubr");
                 let subr_nr = s.pop()?.to_int()?;
@@ -213,7 +213,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         s.push(num1 / num2);
                         i
                     }
-                    13 => error!("reserved"),
+                    13 => error!("reserved {}", b1),
                     14 => { // num neg (12 14) num2
                         trace!("neg");
                         match s.pop()? {
@@ -223,13 +223,13 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         i
                     }
                     15 => error!("unimplemented: eq"),
-                    16 | 17 => error!("reserved"),
+                    16 | 17 => error!("reserved {}", b1),
                     18 => { // num drop (12 18)
                         trace!("drop");
                         s.pop()?;
                         i
                     }
-                    19 => error!("reserved"),
+                    19 => error!("reserved {}", b1),
                     20 => error!("unimplemented: put"),
                     21 => error!("unimplemented: get"),
                     22 => error!("unimplemented: ifelse"),
@@ -249,7 +249,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         s.push(num1 * num2);
                         i
                     }
-                    25 => error!("reserved"),
+                    25 => error!("reserved {}", b1),
                     26 => { // num sqrt (12 26) num2
                         trace!("sqrt");
                         let num1 = s.pop()?.to_float();
@@ -298,7 +298,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         }
                         i
                     }
-                    31 | 32 | 33 => error!("reserved"),
+                    31 | 32 | 33 => error!("reserved {}", b1),
                     34 => { // |- dx1 dx2 dy2 dx3 dx4 dx5 dx6 hflex (12 34) |-
                         trace!("hflex");
                         let slice = s.stack.as_slice();
@@ -347,10 +347,10 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         s.stack.clear();
                         i
                     }
-                    38 ..= 255 => error!("reserved")
+                    38 ..= 255 => error!("reserved {}", b1),
                 }
             }
-            13 => error!("reserved"),
+            13 => error!("reserved {}", b0),
             14 => { //– endchar (14) ⊦
                 trace!("endchar");
                 maybe_width(s, |n| n == 0);
@@ -358,7 +358,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 s.done = true;
                 i
             }
-            15 | 16 | 17 => error!("reserved"),
+            15 | 16 | 17 => error!("reserved {}", b0),
             18 => { // |- y dy {dya dyb}* hstemhm (18) |-
                 trace!("hstemhm");
                 maybe_width(s, |n| n % 2 == 0);
