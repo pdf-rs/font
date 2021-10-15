@@ -79,7 +79,11 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
     while input.len() > 0 && !s.done {
         let (i, b0) = be_u8(input)?;
         let i = match b0 {
-            0 => error!("reserved {}", b0),
+            0 => {
+                warn!("reserved Type2 operator 0");
+                //error!("reserved {}", b0);
+                i
+            }
             1 => { // ⊦ y dy hstem (1) ⊦
                 trace!("hstem");
                 maybe_width(s, |n| n == 2);
