@@ -22,15 +22,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let args: Vec<String> = env::args().collect();
     let data = fs::read(args.get(1).expect("no filename given")).expect("can't read specified file");
-    let font = parse(&data);
-    
+    let font = parse(&data).unwrap();
     let num_glyphs = font.num_glyphs();
     if num_glyphs == 0 {
         println!("no glyphs");
         return Ok(());
     }
+
+    let (single, glyphs) = match args.get(2).map(|s| s.parse::<u32>().unwrap()) {
+        None => (false, 0 .. num_glyphs),
+        Some(gid) => (true, gid .. gid + 1)
+    };
+    let num_glyphs = glyphs.len() as u32;
     let mut bbox = font.bbox().unwrap_or(RectF::new(Vector2F::default(), Vector2F::new(1.0, 1.0)));
-    for i in 0 .. num_glyphs {
+    for i in glyphs.clone() {
         if let Some(glyph) = font.glyph(GlyphId(i)) {
             bbox = bbox.union_rect(glyph.path.bounds());
         }
@@ -48,9 +53,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     scene.set_view_box(RectF::new(Vector2F::default(), size));
     let paint = scene.push_paint(&Paint::from_color(ColorU::black()));
 
-    for gid in 0 .. num_glyphs {
-        let y = gid as u32 / glyphs_x;
-        let x = gid as u32 % glyphs_x;
+    for gid in glyphs.clone() {
+        let x;
+        let y;
+        if single {
+            x = 0;
+            y = 0;
+        } else {
+            y = gid as u32 / glyphs_x;
+            x = gid as u32 % glyphs_x;
+        }
         let offset = Vector2F::new(x as f32, (y + 1) as f32) * bbox.size();
         let transform = Transform2F::from_scale(scale)
         * font.font_matrix()
@@ -65,7 +77,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Some(glyph) = font.glyph(GlyphId(gid)) {
             let mut outline = glyph.path;
             outline.transform(&transform);
-            scene.push_path(DrawPath::new(outline, paint));
+            let mut draw_path = DrawPath::new(outline, paint);
+            draw_path.set_name(gid.to_string());
+            scene.push_draw_path(draw_path);
         }
     }
 
