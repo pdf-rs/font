@@ -438,32 +438,50 @@ pub enum FontType {
     OpenType,
     TrueTypeCollection,
     Type1,
+    Type1Pfb,
+    Type1Pfa,
     TrueType,
     Woff,
     Woff2,
     Cff,
 }
 
+pub fn font_type(data: &[u8]) -> Option<FontType> {
+    let t = match data.get(0..4)? {
+        &[0x80, 1, _, _] => FontType::Type1Pfb,
+        b"OTTO" | [0,1,0,0] => FontType::OpenType,
+        b"ttcf" | b"typ1" => FontType::TrueTypeCollection,
+        b"true" => FontType::TrueType,
+        b"%!PS" => FontType::Type1,
+        b"wOFF" => FontType::Woff,
+        b"wOF2" => FontType::Woff2,
+        &[1, _, _, _] => FontType::Cff,
+        &[37, 33, _, _] => FontType::Type1Pfa,
+        _ => return None
+    };
+    Some(t)
+}
+
 pub fn parse(data: &[u8]) -> Result<Box<dyn Font + Send + Sync + 'static>, FontError> {
     let magic: &[u8; 4] = slice!(data, 0 .. 4).try_into().unwrap();
     info!("font magic: {:?} ({:?})", magic, String::from_utf8_lossy(&*magic));
-    match magic {
-        &[0x80, 1, _, _] => Ok(Box::new(Type1Font::parse_pfb(data)?) as _),
-        b"OTTO" | [0,1,0,0] => Ok(Box::new(OpenTypeFont::parse(data)?) as _),
+    Ok(match magic {
+        &[0x80, 1, _, _] => Box::new(t!(Type1Font::parse_pfb(data))) as _,
+        b"OTTO" | [0,1,0,0] => Box::new(t!(OpenTypeFont::parse(data))) as _,
         b"ttcf" | b"typ1" => error!("FontCollections not implemented"), // Box::new(TrueTypeFont::parse(data, 0)) as _,
-        b"true" => Ok(Box::new(TrueTypeFont::parse(data)?) as _),
-        b"%!PS" => Ok(Box::new(Type1Font::parse_postscript(data)?) as _),
+        b"true" => Box::new(t!(TrueTypeFont::parse(data))) as _,
+        b"%!PS" => Box::new(t!(Type1Font::parse_postscript(data))) as _,
 
         #[cfg(feature="woff")]
-        b"wOFF" => Ok(Box::new(woff::parse_woff(data)?) as _),
+        b"wOFF" => Box::new(t!(woff::parse_woff(data))) as _,
 
         #[cfg(feature="woff")]
-        b"wOF2" => Ok(Box::new(woff::parse_woff2(data)?) as _),
+        b"wOF2" => Box::new(t!(woff::parse_woff2(data))) as _,
         
-        &[1, _, _, _] => Ok(Box::new(CffFont::parse(data, 0)?) as _),
-        &[37, 33, _, _] => Ok(Box::new(Type1Font::parse_pfa(data)?) as _),
-        magic => Err(FontError::UnknownMagic(*magic))
-    }
+        &[1, _, _, _] => Box::new(t!(CffFont::parse(data, 0))) as _,
+        &[37, 33, _, _] => Box::new(t!(Type1Font::parse_pfa(data))) as _,
+        magic => return Err(FontError::UnknownMagic(*magic))
+    })
 }
 
 use std::ops::RangeInclusive;

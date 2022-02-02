@@ -349,6 +349,17 @@ pub fn parse<'a, T, E>(input: &mut &'a [u8], parser: impl Fn(&'a [u8]) -> Result
     Ok(t)
 }
 
+pub fn count<'a, T>(parser: impl Fn(&[u8]) -> ParseResult<T>, count: usize) -> impl Fn(&[u8]) -> ParseResult<Vec<T>>
+{
+    move |mut i: &[u8]| {
+        let mut vec = Vec::with_capacity(count);
+        for _ in 0 .. count {
+            let t = parse(&mut i, &parser)?; // don't steal my parser!
+            vec.push(t);
+        }
+        Ok((i, vec))
+    }
+}
 pub fn count_map<'a, K, V>(parser: impl Fn(&[u8]) -> ParseResult<(K, V)>, count: usize) -> impl Fn(&[u8]) -> ParseResult<IndexMap<K, V>>
     where K: Hash + Eq
 {

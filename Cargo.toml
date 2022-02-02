@@ -10,7 +10,7 @@ svg = ["svg_dom", "inflate"]
 woff = ["brotli-decompressor"]
 
 [dependencies]
-pdf_encoding = "0.1.0"
+pdf_encoding = "0.3"
 pathfinder_geometry = { git = "https://github.com/servo/pathfinder/" }
 pathfinder_content = { git = "https://github.com/servo/pathfinder/" }
 pathfinder_color = { git = "https://github.com/servo/pathfinder/" }

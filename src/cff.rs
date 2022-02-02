@@ -4,7 +4,11 @@ use std::collections::HashMap;
 use std::iter::once;
 use std::borrow::Cow;
 use std::rc::Rc;
-use crate::{Font, Glyph, Value, Context, State, type1, type2, IResultExt, R, VMetrics, HMetrics, GlyphId, Name, Info, FontError};
+use crate::{
+    Font, Glyph, Value, Context, State, type1, type2, IResultExt, R,
+    VMetrics, HMetrics, GlyphId, Name, Info, FontError, ParseResult,
+};
+use crate::parsers::count as count2;
 use nom::{
     number::complete::{be_u8, be_u16, be_i16, be_u24, be_u32, be_i32},
     bytes::complete::{take},
@@ -14,7 +18,7 @@ use nom::{
     error::{make_error, ErrorKind},
     Err::*,
 };
-use pdf_encoding::{Encoding};
+use pdf_encoding::{Encoding, glyphname_to_unicode};
 use pathfinder_content::outline::{Outline};
 use pathfinder_geometry::{vector::Vector2F, transform2d::Transform2F, rect::RectF};
 use tuple::TupleElements;
@@ -25,6 +29,7 @@ pub struct CffFont {
     font_matrix: Transform2F,
     codepoint_map: [u16; 256],  // codepoint -> glyph index
     name_map: HashMap<String, u16>,
+    unicode_map: HashMap<&'static str, u16>,
     encoding: Option<Encoding>,
     bbox: Option<RectF>,
     vmetrics: Option<VMetrics>,
@@ -34,7 +39,10 @@ pub struct CffFont {
 
 impl CffFont {
     pub fn parse(data: &[u8], idx: u32) -> Result<Self, FontError> {
-        read_cff(data)?.slot(idx)?.parse_font()
+        let cff = t!(read_cff(data));
+        let slot = t!(cff.slot(idx));
+        let font = t!(slot.parse_font());
+        Ok(font)
     }
 }
 impl Font for CffFont {
@@ -53,6 +61,13 @@ impl Font for CffFont {
             Some(&n) => Some(GlyphId(n as u32))
         }
     }
+    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
+        let c = std::char::from_u32(codepoint)?;
+        let mut buf = [0; 4];
+        let s = c.encode_utf8(&mut buf);
+        self.unicode_map.get(&*s).map(|&id| GlyphId(id as u32))
+    }
+
     fn gid_for_name(&self, name: &str) -> Option<GlyphId> {
         match self.name_map.get(name) {
             None => None,
@@ -134,11 +149,11 @@ pub struct CffSlot<'a> {
 impl<'a> Cff<'a> {
     pub fn slot(self, idx: u32) -> Result<CffSlot<'a>, FontError> {
         let data = self.dict_index.get(idx as usize).ok_or(FontError::NoSuchSlot)?;
-        let top_dict = dict(data)?.1;
+        let top_dict = dict(data)?;
         info!("top dict: {:?}", top_dict);
         
         let offset = get!(top_dict, &Operator::CharStrings, 0).to_usize()?;
-        let char_strings = index(self.data.get(offset ..).unwrap()).get()?;
+        let (_, char_strings) = index(self.data.get(offset ..).unwrap())?;
         
         // num glyphs includes glyph 0 (.notdef)
         let num_glyphs = char_strings.len() as usize;
@@ -148,9 +163,9 @@ impl<'a> Cff<'a> {
         let mut subrs_list = vec![];
         if let Some(fdarray_entry) = top_dict.get(&Operator::FDArray) {
             let fdarray_offset = get!(fdarray_entry, 0).to_usize()?;
-            let fdarray_data_list = index(offset!(self.data, fdarray_offset)).get()?;
+            let (_, fdarray_data_list) = index(offset!(self.data, fdarray_offset))?;
             for fdarray_data in &fdarray_data_list {
-                let fdarray_dict = dict(&fdarray_data).get()?;
+                let fdarray_dict = dict(&fdarray_data)?;
                 let private_dict_entry = get!(fdarray_dict, &Operator::Private);
                 let (private_dict, subrs) = self.private_dict_and_subrs(&private_dict_entry)?;
                 private_dict_list.push(Rc::new(private_dict));
@@ -180,7 +195,7 @@ impl<'a> Cff<'a> {
         }
 
         let offset = get!(top_dict, &Operator::CharStrings, 0).to_int()? as usize;
-        let char_strings = index(self.data.get(offset ..).unwrap()).get()?;
+        let (_, char_strings) = index(self.data.get(offset ..).unwrap())?;
         
         // num glyphs includes glyph 0 (.notdef)
         let num_glyphs = char_strings.len() as usize;
@@ -199,13 +214,17 @@ impl<'a> Cff<'a> {
         let private_dict_size = get!(private_dict_entry, 0).to_usize()?;
         let private_dict_offset = get!(private_dict_entry, 1).to_usize()?;
         let private_dict_data = get!(self.data, private_dict_offset .. private_dict_offset + private_dict_size);
-        let private_dict = dict(private_dict_data).get()?;
+        let private_dict = dict(private_dict_data)?;
         info!("private dict: {:?}", private_dict);
 
-        let subrs = private_dict.get(&Operator::Subrs).map(|arr| {
-            let private_subroutines_offset = get!(arr, 0).to_usize()?;
-            index(offset!(self.data, private_dict_offset + private_subroutines_offset)).get()
-        }).transpose()?.unwrap_or_default();
+        let (_, subrs) = private_dict.get(&Operator::Subrs)
+            .and_then(|arr| arr.get(0))
+            .map(|item| {
+                let private_subroutines_offset = item.to_usize()?;
+                index(offset!(self.data, private_dict_offset + private_subroutines_offset))
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         Ok((private_dict, subrs))
     }
@@ -243,16 +262,16 @@ fn range3_record(data: &[u8]) -> R<(usize, usize)> {
 impl<'a> CffSlot<'a> {
     pub fn font_matrix(&self) -> Transform2F {
         self.top_dict.get(&Operator::FontMatrix)
-            .map(|arr| {
-                let (a, b, c, d, e, f) = TupleElements::from_iter(arr.iter().map(|&v| v.to_float())).unwrap();
+            .and_then(|arr| TupleElements::from_iter(arr.iter().map(|&v| v.to_float())))
+            .map(|(a, b, c, d, e, f)| {
                 Transform2F::row_major(a, b, e, c, d, f)
             })
             .unwrap_or(Transform2F::from_scale(Vector2F::splat(0.001)))
     }
     pub fn bbox(&self) -> Option<RectF> {
         self.top_dict.get(&Operator::FontBBox)
-            .map(|arr| {
-                let (a, b, c, d) = TupleElements::from_iter(arr.iter().map(|&v| v.to_float())).unwrap();
+            .and_then(|arr| TupleElements::from_iter(arr.iter().map(|&v| v.to_float())))
+            .map(|(a, b, c, d)| {
                 RectF::from_points(Vector2F::new(a, b), Vector2F::new(c, d))
             })
     }
@@ -329,10 +348,16 @@ impl<'a> CffSlot<'a> {
         */
     }
     fn parse_font(&self) -> Result<CffFont, FontError> {
-        let glyph_name = |sid: SID|
-            STANDARD_STRINGS.get(sid as usize).cloned().unwrap_or_else(||
-                ::std::str::from_utf8(self.cff.string_index.get(sid as usize - STANDARD_STRINGS.len()).expect("no such string")).expect("Invalid glyph name")
-            );
+        let glyph_name = |sid: SID| {
+            if let Some(name) = STANDARD_STRINGS.get(sid as usize) {
+                return Ok(name.clone());
+            }
+            if let Some(data) = self.cff.string_index.get(sid as usize - STANDARD_STRINGS.len()) {
+                return std::str::from_utf8(data).map_err(|_| FontError::Other(format!("invalid glyph name {:?}", data)));
+            }
+            Err(FontError::Other(format!("SID out of bounds {} > {} standard strings + {} font string index entries",
+                sid, STANDARD_STRINGS.len(), self.cff.string_index.len())))
+        };
         let charset_offset: usize = self.top_dict.get(&Operator::Charset).map(|v| get!(v, 0).to_usize()).transpose()?.unwrap_or(0);
         let sids: Cow<[SID]> = match charset_offset {
             0 => ISO_ADOBE_CHARSET[..].into(),
@@ -354,10 +379,10 @@ impl<'a> CffSlot<'a> {
         // sid -> gid
         let sid_map: HashMap<SID, u16> = once(0).chain(sids.iter().cloned()).enumerate()
             .map(|(gid, sid)| (sid as u16, gid as u16))
-            .inspect(|&(sid, gid)| debug!("sid {} ({}) -> gid {}", sid, glyph_name(sid), gid))
+            .inspect(|&(sid, gid)| debug!("sid {} ({:?}) -> gid {}", sid, glyph_name(sid), gid))
             .collect();
         let name_map: HashMap<_, _> = once(0).chain(sids.iter().cloned()).enumerate()
-            .map(|(gid, sid)| (glyph_name(sid).to_owned(), gid as u16))
+            .filter_map(|(gid, sid)| Some((glyph_name(sid).ok()?.to_owned(), gid as u16)))
             .collect();
     
         let build_default = |encoding: &[SID; 256]| -> [u16; 256] {
@@ -396,11 +421,11 @@ impl<'a> CffSlot<'a> {
         for (i, &gid) in cmap.iter().enumerate() {
             if gid != 0 {
                 let sid = sids[gid as usize - 1];
-                debug!("{} -> gid={}, sid={}, name={}", i, gid, sid, glyph_name(sid));
+                debug!("{} -> gid={}, sid={}, name={:?}", i, gid, sid, glyph_name(sid));
             }
         }
         
-        let glyphs = self.outlines()?.map(|r| r.map(|(outline, width, lsb)| {
+        let glyphs: Vec<_> = self.outlines()?.map(|r| r.map(|(outline, width, lsb)| {
             Glyph {
                 metrics: HMetrics {
                     advance: width,
@@ -410,11 +435,20 @@ impl<'a> CffSlot<'a> {
             }
         })).collect::<Result<_, _>>()?;
         
+        let mut unicode_map = HashMap::with_capacity(glyphs.len());
+        for n in 0..glyphs.len()-1 {
+            if let Some(c) = sids.get(n).and_then(|&sid| glyph_name(sid).ok()).and_then(|name| glyphname_to_unicode(name)) {
+                unicode_map.insert(c, (n+1) as u16);
+            }
+        }
+        info!("unicode_map: {:?}", unicode_map);
+        
         Ok(CffFont {
             glyphs,
             font_matrix: self.font_matrix(),
             codepoint_map: cmap,
             name_map,
+            unicode_map,
             encoding,
             bbox: self.bbox(),
             vmetrics: None,
@@ -426,17 +460,21 @@ impl<'a> CffSlot<'a> {
     }
 }
 
-fn dict(mut input: &[u8]) -> R<HashMap<Operator, Vec<Value>>> {
+fn dict(mut input: &[u8]) -> Result<HashMap<Operator, Vec<Value>>, FontError> {
     let mut map = HashMap::new();
     while input.len() > 0 {
-        let (i, args) = many0(value)(input)?;
-        let (i, key) = operator(i)?;
+        let mut args = Vec::new();
+        while let Ok((i, arg)) = value(input) {
+            args.push(arg);
+            input = i;
+        }
+        let (i, key) = operator(input)?;
         map.insert(key, args);
         
         input = i;
     }
 
-    Ok((input, map))
+    Ok(map)
 }
 
 enum CharstringType {
@@ -445,12 +483,12 @@ enum CharstringType {
 }
 
     
-fn index(i: &[u8]) -> R<Vec<&[u8]>> {
+fn index(i: &[u8]) -> ParseResult<Vec<&[u8]>> {
     let (i, n) = map(be_u16, |n| n as usize)(i)?;
     debug!("n={}", n);
     if n != 0 {
         let (i, offSize) = be_u8(i)?;
-        let (i, offsets) = count(map(offset(offSize), |o| o - 1), n+1)(i)?;
+        let (i, offsets) = count2(|i| offset(offSize)(i).map(|(i, o)| (i, o - 1)), n+1)(i)?;
         let (i, data) = take(offsets[n])(i)?;
         
         let items = offsets.windows(2).map(|w| data.get(w[0] as usize .. w[1] as usize).unwrap()).collect();
@@ -460,17 +498,17 @@ fn index(i: &[u8]) -> R<Vec<&[u8]>> {
     }
 }
 
-fn offset(size: u8) -> impl Fn(&[u8]) -> R<u32> {
-    move |i| match size {
-        1 => map(be_u8, |n| n as u32)(i),
-        2 => map(be_u16, |n| n as u32)(i),
-        3 => be_u24(i),
-        4 => be_u32(i),
-        _ => Err(Failure(make_error(i, ErrorKind::TooLarge)))
-    }
+fn offset(size: u8) -> impl Fn(&[u8]) -> ParseResult<u32> {
+    move |i| Ok(match size {
+        1 => map(be_u8, |n| n as u32)(i)?,
+        2 => map(be_u16, |n| n as u32)(i)?,
+        3 => be_u24(i)?,
+        4 => be_u32(i)?,
+        n => key!(n),
+    })
 }
 
-fn float(data: &[u8]) -> R<f32> {
+fn float(data: &[u8]) -> ParseResult<f32> {
     let mut pos = 0;
     let mut next_nibble = || -> u8 {
         let nibble = (data[pos/2] >> (4 * (1 - (pos & 1)) as u8)) & 0xf;
@@ -480,38 +518,38 @@ fn float(data: &[u8]) -> R<f32> {
     
     let mut is_negaive = false;
     let mut num_digits = 0;
-    let mut n: i32 = 0;
+    let mut n: u128 = 0;
     let mut p: i32 = 0;
     let mut power_negative = false;
     let mut decimal_point = None;
     loop {
         match next_nibble() {
             d @ 0 ..= 9 => {
-                n = 10 * n + d as i32;
+                n = 10 * n + d as u128;
                 num_digits += 1;
             }
             0xa => decimal_point = Some(num_digits),
-            b @ 0xb | b @ 0xc  => { // positive 10^x
+            b @ 0xb | b @ 0xc => { // positive 10^x
                 power_negative = b == 0xc;
                 loop {
                     match next_nibble() {
                         d @ 0 ..= 9 => p = 10 * p + d as i32,
                         0xf => break,
-                        _ => panic!("invalid float")
+                        b => key!(b),
                     }
                 }
             },
-            0xd => panic!("reserved"),
+            0xd => reserved!(0xd),
             0xe => is_negaive = true,
             0xf => break,
             _ => unreachable!()
         }
     }
     
-    if is_negaive {
-        n *= -1;
-    }
     let mut value = n as f32;
+    if is_negaive {
+        value = -value;
+    }
     let mut power = 0;
     if let Some(dp) = decimal_point {
         power += dp - num_digits;
@@ -529,21 +567,21 @@ fn float(data: &[u8]) -> R<f32> {
 }
 
 
-fn value(input: &[u8]) -> R<Value> {
+fn value(input: &[u8]) -> ParseResult<Value> {
     let (i, b0) = be_u8(input)?;
     
-    match b0 {
-        22 ..= 27 => panic!("reserved"),
-        28 => map(be_i16, |n| n.into())(i),
-        29 => map(be_i32, |n| n.into())(i),
-        30 => map(float, |f| f.into())(i),
-        31 => panic!("reserved"),
-        b0 @ 32 ..= 246 => Ok((i, (b0 as i32 - 139).into())),
-        b0 @ 247 ..= 250 => map(be_u8, |b1| ((b0 as i32 - 247) * 256 + b1 as i32 + 108).into())(i),
-        b0 @ 251 ..= 254 => map(be_u8, |b1| (-(b0 as i32 - 251) * 256 - b1 as i32 - 108).into())(i),
-        255 => panic!("reserved"),
-        _ => Err(Error(make_error(input, ErrorKind::TooLarge))) 
-    }
+    Ok(match b0 {
+        22 ..= 27 => reserved!(b0),
+        28 => map(be_i16, |n| n.into())(i)?,
+        29 => map(be_i32, |n| n.into())(i)?,
+        30 => float(i).map(|(i, f)| (i, f.into()))?,
+        31 => reserved!(b0),
+        b0 @ 32 ..= 246 => (i, (b0 as i32 - 139).into()),
+        b0 @ 247 ..= 250 => map(be_u8, |b1| ((b0 as i32 - 247) * 256 + b1 as i32 + 108).into())(i)?,
+        b0 @ 251 ..= 254 => map(be_u8, |b1| (-(b0 as i32 - 251) * 256 - b1 as i32 - 108).into())(i)?,
+        255 => reserved!(b0),
+        b0 => reserved!(b0),
+    })
 }
 
 #[allow(dead_code)] 
@@ -601,10 +639,13 @@ enum Operator {
     InitialRandomSeed,
     Subrs,
     DefaultWidthX,
-    NominalWidthX
+    NominalWidthX,
+    BCD,
+
+    Reserved,
 }
 
-fn operator(input: &[u8]) -> R<Operator> {
+fn operator(input: &[u8]) -> ParseResult<Operator> {
     use Operator::*;
     
     let (i, b) = be_u8(input)?;
@@ -639,6 +680,7 @@ fn operator(input: &[u8]) -> R<Operator> {
                 12 => (i, StemSnapH),
                 13 => (i, StemSnapV),
                 14 => (i, ForceBold),
+                15 | 16 => (i, Reserved),
                 17 => (i, LanguageGroup),
                 18 => (i, ExpansionFactor),
                 19 => (i, InitialRandomSeed),
@@ -646,6 +688,7 @@ fn operator(input: &[u8]) -> R<Operator> {
                 21 => (i, PostScript),
                 22 => (i, BaseFontName),
                 23 => (i, BaseFontBlend),
+                24 ..= 29 => (i, Reserved),
                 30 => (i, ROS),
                 31 => (i, CIDFontVersion),
                 32 => (i, CIDFontRevision),
@@ -655,9 +698,9 @@ fn operator(input: &[u8]) -> R<Operator> {
                 36 => (i, FDArray),
                 37 => (i, FDSelect),
                 38 => (i, FontName),
+                255 => (i, Reserved),
                 n => {
-                    warn!("unknown OP 12 {}", n);
-                    return Err(nom::Err::Failure(make_error(input, ErrorKind::TooLarge)));
+                    key!(n);
                 }
             }
         }
@@ -670,9 +713,12 @@ fn operator(input: &[u8]) -> R<Operator> {
         19 => (i, Subrs),
         20 => (i, DefaultWidthX),
         21 => (i, NominalWidthX),
+        22 ..= 27 => (i, Reserved),
+        30 => (i, BCD),
+        31 => (i, Reserved),
+        255 => (i, Reserved),
         n => {
-            warn!("unknown OP {}", n);
-            return Err(nom::Err::Failure(make_error(input, ErrorKind::TooLarge)));
+            key!(n);
         }
     };
     Ok((i, v))

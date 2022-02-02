@@ -13,13 +13,38 @@ pub enum FontError {
     Other(String),
     TypeError(&'static str),
     OutOfBounds(&'static str, u32),
-    Get(&'static str),
+    Get(&'static str, u32, &'static str),
     Require(&'static str),
+    Reserved(&'static str, u32, u8),
+    Key(&'static str, u32, u8),
+    Context(&'static str, u32, Box<FontError>)
 }
 
 impl<'a> From<Err<VerboseError<&'a [u8]>>> for FontError {
     fn from(e: Err<VerboseError<&'a [u8]>>) -> Self {
         FontError::Parse(e.map(|e| e.errors.into_iter().map(|(_, k)| k).collect()))
+    }
+}
+
+#[macro_export]
+macro_rules! t {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(e) => return Err(FontError::Context(file!(), line!(), Box::new(e)))
+        }
+    }
+}
+#[macro_export]
+macro_rules! key {
+    ($k:expr) => {
+        return Err(FontError::Key(file!(), line!(), $k))
+    }
+}
+#[macro_export]
+macro_rules! reserved {
+    ($k:expr) => {
+        return Err(FontError::Reserved(file!(), line!(), $k))
     }
 }
 
@@ -73,7 +98,7 @@ macro_rules! get {
         $(
         let v = match v.get_mut($item) {
             Some(v) => v,
-            None => return Err(crate::FontError::Get(stringify!($item)))
+            None => return Err(crate::FontError::Get(file!(), line!(), stringify!($item)))
         }; )*
         v
     });
@@ -82,7 +107,7 @@ macro_rules! get {
         $(
         let v = match v.get($item) {
             Some(v) => v,
-            None => return Err(crate::FontError::Get(stringify!($item)))
+            None => return Err(crate::FontError::Get(file!(), line!(), stringify!($item)))
         }; )*
         v
     });

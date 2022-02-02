@@ -61,7 +61,7 @@ pub struct OpenTypeFont {
 }
 impl OpenTypeFont {
     pub fn parse(data: &[u8]) -> Result<Self, FontError> {
-        let tables = parse_tables(data)?;
+        let tables = t!(parse_tables(data));
         for (tag, _) in tables.entries() {
             debug!("tag: {:?} ({:?})", tag, std::str::from_utf8(&tag));
         }
@@ -84,42 +84,42 @@ impl OpenTypeFont {
         let font_matrix;
         let bbox;
         if let Some(cff) = tables.get(b"CFF ") {
-            let slot = read_cff(cff)?.slot(0)?;
+            let slot = t!(read_cff(cff)?.slot(0));
             bbox = slot.bbox();
-            outlines = slot.outlines()?.map(|r| r.map(|(outline, _, _)| outline)).collect::<Result<_, _>>()?;
+            outlines = t!(slot.outlines()?.map(|r| r.map(|(outline, _, _)| outline)).collect::<Result<_, _>>());
             font_matrix = slot.font_matrix();
         } else {
-            let head = parse_head(expect!(tables.get(b"head"), "no head"))?;
+            let head = t!(parse_head(expect!(tables.get(b"head"), "no head")));
             bbox = Some(head.bbox());
             font_matrix = Transform2F::from_scale(Vector2F::splat(1.0 / head.units_per_em as f32));
             outlines = glyf.map(|shapes| (0 .. shapes.len()).filter_map(|idx| get_outline(&shapes, idx as u32)).collect()).unwrap_or_default();
         }
 
         #[cfg(feature="svg")]
-        let svg = tables.get(b"SVG ").map(|data| parse_svg(data)).transpose()?;
+        let svg = t!(tables.get(b"SVG ").map(|data| parse_svg(data)).transpose());
         
-        let maxp = tables.get(b"maxp").map(|data| parse_maxp(data)).transpose()?;
+        let maxp = t!(tables.get(b"maxp").map(|data| parse_maxp(data)).transpose());
         let num_glyphs = maxp.as_ref().map(|maxp| maxp.num_glyphs as u32).unwrap_or(outlines.len() as u32);
 
         let gpos = if let Some(data) = tables.get(b"GPOS") {
             let maxp = expect!(maxp.as_ref(), "no maxp");
-            Some(parse_gpos(data, &maxp)?)
+            Some(t!(parse_gpos(data, &maxp)))
         } else if let Some(data) = tables.get(b"kern") {
-            Some(GPos::from_kern(parse_kern(data)?))
+            Some(GPos::from_kern(t!(parse_kern(data))))
         } else {
             None
         };
         
-        let gsub = tables.get(b"GSUB").map(|data| parse_gsub(data)).transpose()?;
+        let gsub = t!(tables.get(b"GSUB").map(|data| parse_gsub(data)).transpose());
         
-        let cmap = tables.get(b"cmap").map(|data| parse_cmap(data)).transpose()?;
-        let math = tables.get(b"MATH").map(|data| parse_math(data)).transpose()?;
-        let vmetrics = tables.get(b"hhea").map(|data| parse_hhea(data)).transpose()?.map(|v| v.into());
-        let name = tables.get(b"name").map(|data| parse_name(data)).transpose()?.unwrap_or_default();
-        let gdef = tables.get(b"gdef").map(|data| parse_gdef(data)).transpose()?;
-        tables.get(b"BASE").map(|data| parse_base(data)).transpose()?;
+        let cmap = t!(tables.get(b"cmap").map(|data| parse_cmap(data)).transpose());
+        let math = t!(tables.get(b"MATH").map(|data| parse_math(data)).transpose());
+        let vmetrics = t!(tables.get(b"hhea").map(|data| parse_hhea(data)).transpose()).map(|v| v.into());
+        let name = t!(tables.get(b"name").map(|data| parse_name(data)).transpose()).unwrap_or_default();
+        let gdef = t!(tables.get(b"gdef").map(|data| parse_gdef(data)).transpose());
+        let base = t!(tables.get(b"BASE").map(|data| parse_base(data)).transpose());
 
-        let weight = tables.get(b"OS/2").map(|data| os2::parse_os2(data)).transpose()?.map(|os2| os2.weight);
+        let weight = t!(tables.get(b"OS/2").map(|data| os2::parse_os2(data)).transpose()).map(|os2| os2.weight);
 
         Ok(OpenTypeFont {
             outlines,
@@ -144,16 +144,16 @@ impl OpenTypeFont {
         })
     }
     pub fn from_tables<T>(tables: Tables<T>) -> Result<Self, FontError> where T: Deref<Target=[u8]> {
-        let head = parse_head(expect!(tables.get(b"head"), "no head"))?;
-        let maxp = parse_maxp(expect!(tables.get(b"maxp"), "no maxp"))?;
-        let hhea = parse_hhea(expect!(tables.get(b"hhea"), "no hhea"))?;
+        let head = t!(parse_head(expect!(tables.get(b"head"), "no head")));
+        let maxp = t!(parse_maxp(expect!(tables.get(b"maxp"), "no maxp")));
+        let hhea = t!(parse_hhea(expect!(tables.get(b"hhea"), "no hhea")));
         
-        let glyf = tables.get(b"glyf").map(|data| {
+        let glyf = t!(tables.get(b"glyf").map(|data| {
             let loca = parse_loca(expect!(tables.get(b"loca"), "no loca"), &head, &maxp)?;
             parse_shapes(&loca, data)
-        }).transpose()?;
+        }).transpose());
         
-        let hmtx = tables.get(b"hmtx").map(|data| parse_hmtx(data, &hhea, &maxp).get()).transpose()?;
+        let hmtx = t!(tables.get(b"hmtx").map(|data| parse_hmtx(data, &hhea, &maxp).get()).transpose());
         
         OpenTypeFont::from_hmtx_glyf_and_tables(hmtx, glyf, tables)
     }
@@ -245,7 +245,7 @@ pub fn parse_tables(data: &[u8]) -> Result<Tables<&[u8]>, FontError> {
         let (off, len) = (off as usize, len as usize);
         entries.insert(
             tag.try_into().expect("slice too short"),
-            slice!(data, off .. off + len)
+            slice!(data, off ..) //off + len)
         );
         debug!("tag: {:?} ({:?})", tag, std::str::from_utf8(&tag));
     }
