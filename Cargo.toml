@@ -7,7 +7,7 @@ edition = "2018"
 [features]
 unstable = ["slotmap/unstable", "tuple/nightly"]
 svg = ["svg_dom", "inflate"]
-woff = ["brotli-decompressor"]
+woff = ["brotli-decompressor", "inflate"]
 
 [dependencies]
 pdf_encoding = "0.3"
