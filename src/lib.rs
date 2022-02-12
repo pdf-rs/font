@@ -135,13 +135,23 @@ pub trait Font: 'static {
         TypeId::of::<Self>()
     }
 }
-impl dyn Font {
-    pub fn downcast<T: Font>(&self) -> Option<&T> {
+impl dyn Font + Sync + Send {
+    pub fn downcast_ref<T: Font>(&self) -> Option<&T> {
         unsafe {
             if self._type_id() == TypeId::of::<T>() {
                 Some(&*(self as *const dyn Font as *const T))
             } else {
                 None
+            }
+        }
+    }
+    pub fn downcast_box<T: Font>(self: Box<Self>) -> Result<Box<T>, Box<Self>> {
+        unsafe {
+            if self._type_id() == TypeId::of::<T>() {
+                let ptr = Box::into_raw(self);
+                Ok(Box::from_raw(ptr.cast()))
+            } else {
+                Err(self)
             }
         }
     }
