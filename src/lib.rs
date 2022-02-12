@@ -181,6 +181,8 @@ pub use truetype::TrueTypeFont;
 pub use cff::CffFont;
 pub use type1::Type1Font;
 pub use opentype::{OpenTypeFont};
+
+#[cfg(feature="woff")]
 pub use woff::{parse_woff, parse_woff2};
 
 pub type R<'a, T> = IResult<&'a [u8], T, VerboseError<&'a [u8]>>;

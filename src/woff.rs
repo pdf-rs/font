@@ -129,7 +129,7 @@ pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
     
     let glyf = tables.get(b"glyf").map(|glyf_data| {
         match entry_tables[b"glyf"].flags {
-            0 => parse_glyf_t0(&glyf_data).get(),
+            0 => parse_glyf_t0(&glyf_data),
             3 => {
                 let head = parse_head(tables.get(b"head").expect("no head"))?;
                 let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp"))?;
@@ -143,7 +143,7 @@ pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
     OpenTypeFont::from_hmtx_glyf_and_tables(hmtx, glyf, tables)
 }
 
-fn parse_glyf_t0(i: &[u8]) -> R<Vec<Shape>> {
+fn parse_glyf_t0(i: &[u8]) -> Result<Vec<Shape>, FontError> {
     let (i, _) = tag([0u8; 4])(i)?;
     let (i, num_glyphs) = be_u16(i)?;
     let (i, _index_format) = be_u16(i)?;
@@ -214,7 +214,7 @@ fn parse_glyf_t0(i: &[u8]) -> R<Vec<Shape>> {
         }
     }
     
-    Ok((i, glyphs))
+    Ok(glyphs)
 }
 
 #[derive(Debug)]
