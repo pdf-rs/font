@@ -49,7 +49,7 @@ fn parse_base_script_list<'a>(data: &'a [u8], tags: impl Array<Item=Tag>) -> Res
     for (script_tag, offset) in iterator_n(i, tuple((tag, offset)), base_script_count) {
         let (_, (default_baseline_idx, baselines)) = parse_base_script_table(offset.of(data).unwrap())?;
         for (base_pos, base_tag) in baselines.zip(tags.by_ref()) {
-            println!("{:?} @ {}", base_tag?, base_pos);
+            //println!("{:?} @ {}", base_tag?, base_pos);
         }
     }
     Ok(())
