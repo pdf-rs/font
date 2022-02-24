@@ -150,7 +150,7 @@ impl<'a> Cff<'a> {
     pub fn slot(self, idx: u32) -> Result<CffSlot<'a>, FontError> {
         let data = self.dict_index.get(idx as usize).ok_or(FontError::NoSuchSlot)?;
         let top_dict = dict(data)?;
-        info!("top dict: {:?}", top_dict);
+        //info!("top dict: {:?}", top_dict);
         
         let offset = get!(top_dict, &Operator::CharStrings, 0).to_usize()?;
         let (_, char_strings) = index(self.data.get(offset ..).unwrap())?;
@@ -215,7 +215,7 @@ impl<'a> Cff<'a> {
         let private_dict_offset = get!(private_dict_entry, 1).to_usize()?;
         let private_dict_data = get!(self.data, private_dict_offset .. private_dict_offset + private_dict_size);
         let private_dict = dict(private_dict_data)?;
-        info!("private dict: {:?}", private_dict);
+        //info!("private dict: {:?}", private_dict);
 
         let (_, subrs) = private_dict.get(&Operator::Subrs)
             .and_then(|arr| arr.get(0))
@@ -441,7 +441,7 @@ impl<'a> CffSlot<'a> {
                 unicode_map.insert(c, (n+1) as u16);
             }
         }
-        info!("unicode_map: {:?}", unicode_map);
+        //info!("unicode_map: {:?}", unicode_map);
         
         Ok(CffFont {
             glyphs,
