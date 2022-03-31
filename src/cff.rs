@@ -305,10 +305,10 @@ impl<'a> CffSlot<'a> {
             };
             match char_string_type {
                 CharstringType::Type1 => {
-                    type1::charstring(data, &context, &mut state)?;
+                    t!(type1::charstring(data, &context, &mut state));
                 },
                 CharstringType::Type2 => {
-                    type2::charstring(data, &context, &mut state)?;
+                    t!(type2::charstring(data, &context, &mut state));
                 }
             }
             let default_width = self.private_dict[id].get(&Operator::DefaultWidthX)
@@ -384,7 +384,7 @@ impl<'a> CffSlot<'a> {
         let name_map: HashMap<_, _> = once(0).chain(sids.iter().cloned()).enumerate()
             .filter_map(|(gid, sid)| Some((glyph_name(sid).ok()?.to_owned(), gid as u16)))
             .collect();
-    
+        
         let build_default = |encoding: &[SID; 256]| -> [u16; 256] {
             let mut cmap = [0u16; 256];
             for (codepoint, sid) in encoding.iter().enumerate() {
@@ -487,9 +487,9 @@ fn index(i: &[u8]) -> ParseResult<Vec<&[u8]>> {
     let (i, n) = map(be_u16, |n| n as usize)(i)?;
     debug!("n={}", n);
     if n != 0 {
-        let (i, offSize) = be_u8(i)?;
-        let (i, offsets) = count2(|i| offset(offSize)(i).map(|(i, o)| (i, o - 1)), n+1)(i)?;
-        let (i, data) = take(offsets[n])(i)?;
+        let (i, offSize) = t!(be_u8(i));
+        let (i, offsets) = t!(count2(|i| offset(offSize)(i).map(|(i, o)| (i, o - 1)), n+1)(i));
+        let (i, data) = t!(take(offsets[n])(i));
         
         let items = offsets.windows(2).map(|w| data.get(w[0] as usize .. w[1] as usize).unwrap()).collect();
         Ok((i, items))

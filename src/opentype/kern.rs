@@ -56,11 +56,43 @@ pub fn parse_kern(input: &[u8]) -> Result<KernTable, FontError> {
 }
 
 pub fn parse_kern_apple(i: &[u8]) -> Result<KernTable, FontError> {
-    let (_i, version) = be_u32(i)?;
+    let (i, version) = be_u32(i)?;
     require_eq!(version, 0x00010000);
     
-    error!("apple kern table is not implemented")
+    let mut table = KernTable::default();
+    let (mut input, n_tables) = be_u32(i)?;
+    for _ in 0 .. n_tables {
+        let (i, length) = be_u32(i)?;
+        let (i, coverage) = be_u8(i)?;
+        let (i, format) = be_u8(i)?;
+        let (i, tuple_index) = be_u16(i)?;
+
+        let (new_input, data) = take(length)(i)?;
+        match format {
+            0 => apple_kern_0(i, &mut table)?,
+            _ => error!("unimplemented apple kern format {}", format),
+        }
+        input = new_input;
+    }
+    Ok(table)
 }
+
+fn apple_kern_0(i: &[u8], table: &mut KernTable) -> Result<(), FontError> {
+    let (i, n_pairs) = be_u16(i)?;
+    let (i, _) = be_u16(i)?;
+    let (i, _) = be_u16(i)?;
+    let (i, _) = be_u16(i)?;
+
+    for _ in 0 .. n_pairs {
+        let (i, left) = be_u16(i)?;
+        let (i, right) = be_u16(i)?;
+        let (i, value) = be_i16(i)?;
+        table.glyph_pairs.insert((left, right), value);
+    }
+
+    Ok(())
+}
+
 pub fn parse_kern_ms(i: &[u8]) -> Result<KernTable, FontError> {
     let (i, version) = be_u16(i)?;
     require_eq!(version, 0);

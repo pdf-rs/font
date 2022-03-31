@@ -239,13 +239,14 @@ pub fn parse_tables(data: &[u8]) -> Result<Tables<&[u8]>, FontError> {
     let (i, _entry_selector) = be_u16(i)?;
     let (mut i, _range_shift) = be_u16(i)?;
     
+    debug!("{} tables", num_tables);
     let mut entries = HashMap::with_capacity(num_tables as usize);
     for _ in 0 .. num_tables {
         let (tag, _, off, len) = parse(&mut i, tuple((take(4usize), be_u32, be_u32, be_u32)))?;
         let (off, len) = (off as usize, len as usize);
         entries.insert(
             tag.try_into().expect("slice too short"),
-            slice!(data, off ..) //off + len)
+            slice!(data, off .. off+len) //off + len)
         );
         debug!("tag: {:?} ({:?})", tag, std::str::from_utf8(&tag));
     }

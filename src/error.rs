@@ -31,7 +31,7 @@ macro_rules! t {
     ($e:expr) => {
         match $e {
             Ok(v) => v,
-            Err(e) => return Err(FontError::Context(file!(), line!(), Box::new(e)))
+            Err(e) => return Err(FontError::Context(file!(), line!(), Box::new(e.into())))
         }
     }
 }
