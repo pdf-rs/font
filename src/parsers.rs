@@ -212,7 +212,7 @@ fn procedure(i: &[u8]) -> R<Vec<Token>> {
 fn test_procedure() {
     use crate::IResultExt;
     assert_eq!(
-        procedure("{-180 -293 1090 1010}readonly ".as_bytes()).get(),
+        procedure("{-180 -293 1090 1010}readonly ".as_bytes()).get().unwrap(),
         vec![
             Token::Int(-180),
             Token::Int(-293),
@@ -221,7 +221,7 @@ fn test_procedure() {
         ]
     );
     assert_eq!(
-        procedure("{1 index exch /.notdef put} ".as_bytes()).get(),
+        procedure("{1 index exch /.notdef put} ".as_bytes()).get().unwrap(),
         vec![
             Token::Int(1),
             Token::Name("index".as_bytes()),

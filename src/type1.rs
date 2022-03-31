@@ -207,7 +207,7 @@ fn test_parser() {
     let mut vm = Vm::new();
     vm.parse_and_exec(b"/FontBBox{-180 -293 1090 1010}readonly ");
     vm.print_stack();
-    require_eq!(vm.stack().len(), 2);
+    assert_eq!(vm.stack().len(), 2);
 }
 fn parse_pfb(mut vm: &mut Vm, i: &[u8]) -> Result<(), FontError> {
     let mut input = i;
