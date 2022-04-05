@@ -102,7 +102,6 @@ pub fn parse_cmap(input: &[u8]) -> Result<CMap, FontError> {
             }
             4 => {
                 let (i, len) = be_u16(i)?;
-                dbg!(i.len(), len);
                 //let (_i, data) = t!(take(len - 4)(i)); // aleady have 4 header bytes
                 let data = if i.len() < len as usize - 4 {
                     warn!("not enough data. trying anyway");
