@@ -91,7 +91,7 @@ pub fn parse_cmap(input: &[u8]) -> Result<CMap, FontError> {
         match format {
             0 => {
                 let (i, len) = be_u16(i)?;
-                let (_i, data) = take(len - 4)(i)?; // aleady have 4 header bytes
+                let (_i, data) = t!(take(len - 4)(i)); // aleady have 4 header bytes
                 
                 let (i, _language) = be_u16(data)?;
                 for (code, gid) in iterator(i, be_u8).enumerate() {
@@ -102,7 +102,14 @@ pub fn parse_cmap(input: &[u8]) -> Result<CMap, FontError> {
             }
             4 => {
                 let (i, len) = be_u16(i)?;
-                let (_i, data) = take(len - 4)(i)?; // aleady have 4 header bytes
+                dbg!(i.len(), len);
+                //let (_i, data) = t!(take(len - 4)(i)); // aleady have 4 header bytes
+                let data = if i.len() < len as usize - 4 {
+                    warn!("not enough data. trying anyway");
+                    i
+                } else {
+                    &i[.. len as usize - 4]
+                };
                 
                 let (i, _language) = be_u16(data)?;
                 let (i, segCountX2) = be_u16(i)?;
