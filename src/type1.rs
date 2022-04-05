@@ -193,6 +193,10 @@ impl Type1Font {
             }
         })
     }
+
+    pub fn unicode_names(&self) -> impl Iterator<Item=(GlyphId, &'static str)> + '_ {
+        self.unicode_map.iter().map(|(&s, &g)| (GlyphId(g), s))
+    }
 }
 
 fn parse_binary<'a>(vm: &mut Vm, data: &'a [u8]) {
