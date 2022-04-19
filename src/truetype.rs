@@ -31,7 +31,7 @@ pub enum Shape {
 #[derive(Clone)]
 pub struct TrueTypeFont {
     shapes: Vec<Shape>,
-    cmap: Option<CMap>,
+    pub cmap: Option<CMap>,
     hmtx: Hmtx,
     units_per_em: u16,
     bbox: RectF,
