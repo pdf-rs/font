@@ -27,7 +27,7 @@ use tuple::TupleElements;
 pub struct CffFont {
     glyphs: Vec<Glyph>,
     font_matrix: Transform2F,
-    codepoint_map: [u16; 256],  // codepoint -> glyph index
+    pub codepoint_map: [u16; 256],  // codepoint -> glyph index
     name_map: HashMap<String, u16>,
     pub unicode_map: HashMap<&'static str, u16>,
     encoding: Option<Encoding>,
