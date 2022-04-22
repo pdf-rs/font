@@ -380,7 +380,7 @@ impl<'a> Input<'a> {
             },
             Err(_) => {
                 let slice = &self.data[.. self.data.len().min(20)];
-                debug!("input: {:?} {:?}", String::from_utf8_lossy(slice), slice);
+                trace!("input: {:?} {:?}", String::from_utf8_lossy(slice), slice);
                 None
             }
         }
@@ -575,7 +575,7 @@ impl Vm {
     }
     pub fn exec_token(&mut self, token: Token, input: &mut Input) -> Result<(), FontError> {
         let item = self.transform_token(token);
-        debug!("exec_token {:?}", self.display(item));
+        trace!("exec_token {:?}", self.display(item));
         match item {
             Item::Operator(op) => self.exec_operator(op, input)?,
             Item::Name(key) => {
@@ -591,7 +591,7 @@ impl Vm {
     }
     
     fn exec_expand(&mut self, item: Item, input: &mut Input) -> Result<(), FontError> {
-        debug!("exec_expand {:?}", self.display(item));
+        trace!("exec_expand {:?}", self.display(item));
         match item {
             Item::Operator(op) => {
                 self.exec_operator(op, input)?;
@@ -627,7 +627,7 @@ impl Vm {
         Ok(())
     }
     fn exec(&mut self, item: Item, input: &mut Input) -> Result<(), FontError> {
-        debug!("exec {:?}", self.display(item));
+        trace!("exec {:?}", self.display(item));
         /*
         loop {
             let mut s = String::new();
@@ -1077,7 +1077,7 @@ impl Vm {
         }
         let tk = input.parse(token);
         
-        debug!("token: {:?}", tk);
+        trace!("token: {:?}", tk);
         self.exec_token(tk, input)
     }
     // returns the number of bytes processed

@@ -29,7 +29,7 @@ pub struct CffFont {
     font_matrix: Transform2F,
     codepoint_map: [u16; 256],  // codepoint -> glyph index
     name_map: HashMap<String, u16>,
-    unicode_map: HashMap<&'static str, u16>,
+    pub unicode_map: HashMap<&'static str, u16>,
     encoding: Option<Encoding>,
     bbox: Option<RectF>,
     vmetrics: Option<VMetrics>,
