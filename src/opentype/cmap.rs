@@ -73,11 +73,13 @@ pub fn parse_cmap(input: &[u8]) -> Result<CMap, FontError> {
     let (i, num_tables) = be_u16(i)?;
     
     let tables = iterator(i, tuple((be_u16, be_u16, be_u32))).take(num_tables as usize)
-        .filter_map(|entry| match entry {
-            (0, _, off) | (1, 0, off) | (3, 0, off) | (3, 10, off) | (3, 1, off) => Some(off),
-            (platform, encoding, _) => {
-                warn!("unsupported cmap platform={}, encoding={}", platform, encoding);
-                None
+        .filter_map(|entry| {
+            match entry {
+                (0, _, off) | (3, 0, off) | (3, 10, off) | (3, 1, off) => Some(off),
+                (platform, encoding, _) => {
+                    warn!("unsupported cmap platform={}, encoding={}", platform, encoding);
+                    None
+                }
             }
         })
         .filter_map(|off| input.get(off as usize ..));
@@ -160,10 +162,13 @@ pub fn parse_cmap(input: &[u8]) -> Result<CMap, FontError> {
                 let (i, first_code) = be_u16(i)?;
                 let (i, entry_count) = be_u16(i)?;
                 cmap.reserve(entry_count as usize);
-                cmap.extend(iterator_n(i, be_u16, entry_count).enumerate()
-                    .filter(|&(_, gid)| gid != 0)
-                    .map(|(i, gid)| (first_code as u32 + i as u32, gid as u32))
-                );
+                for (i, gid) in iterator_n(i, be_u16, entry_count).enumerate() {
+                    if gid != 0 {
+                        let c = first_code as u32 + i as u32;
+                        trace!("codepoint {}({}+{}) -> gid {}", c, first_code, i, gid);
+                        cmap.insert(c, gid as u32);
+                    }
+                }
             }
             12 => {
                 let (i, _reserved) = be_u16(i)?;
