@@ -19,8 +19,8 @@ use pathfinder_geometry::{
 #[derive(Clone)]
 pub struct Type1Font {
     glyphs: IndexMap<String, Glyph>, // namee -> glyph
-    codepoints: HashMap<u32, u32>, // codepoint -> glyph id
-    unicode_map: HashMap<&'static str, u32>,
+    pub codepoints: HashMap<u32, u32>, // codepoint -> glyph id
+    pub unicode_map: HashMap<&'static str, u32>,
     font_matrix: Transform2F,
     bbox: Option<RectF>,
     name: Name,
@@ -147,7 +147,10 @@ impl Type1Font {
             state.clear();
 
             if let Some(unicode) = glyphname_to_unicode(name) {
+                debug!("{} -> {} @ {}", name, unicode, index);
                 unicode_map.insert(unicode, index as u32);
+            } else {
+                debug!("canot map {}", name);
             }
         }
         
