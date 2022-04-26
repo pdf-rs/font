@@ -506,7 +506,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             255 => {
                 let (i, v) = be_i32(i)?;
-                s.push(v);
+                s.push(v as f32 / 65536.);
                 i
             }
         };
