@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
+use pdf_encoding::Encoding;
 use crate::{GlyphId, R, parsers::*, FontError};
 use nom::{
     number::complete::{be_u8, be_u16, be_u32, be_u24},
@@ -68,26 +69,49 @@ impl CMap {
     }
 }
 
-pub fn parse_cmap(input: &[u8]) -> Result<CMap, FontError> {
+pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
     let (i, _version) = be_u16(input)?;
     let (i, num_tables) = be_u16(i)?;
-    
-    let tables = iterator(i, tuple((be_u16, be_u16, be_u32))).take(num_tables as usize)
-        .filter_map(|entry| {
-            match entry {
-                (0, _, off) | (3, 0, off) | (3, 10, off) | (3, 1, off) => Some(off),
-                (platform, encoding, _) => {
-                    warn!("unsupported cmap platform={}, encoding={}", platform, encoding);
-                    None
-                }
-            }
-        })
-        .filter_map(|off| input.get(off as usize ..));
     
     let mut cmap = HashMap::new();
     let mut cmap2 = HashMap::new();
     let mut cmap3 = Vec::new();
-    for table in tables {
+    let mut cmap_encoding = None;
+
+    let have_unicode = iterator(i, tuple((be_u16, be_u16, be_u32))).take(num_tables as usize)
+        .any(|t| matches!(t, (0, _, _) | (3, 0, _) | (3, 10, _) | (3, 1, _)));
+
+    for (platform, encoding, offset) in iterator(i, tuple((be_u16, be_u16, be_u32))).take(num_tables as usize) {
+        let encoding = match (platform, encoding) {
+            (0, _) | (3, 0) | (3, 10) | (3, 1) => Encoding::Unicode,
+            (1, 0) => {
+                if have_unicode {
+                    continue;
+                } else {
+                    Encoding::MacRomanEncoding
+                }
+            }
+            _ => {
+                warn!("unsupported cmap platform={}, encoding={}", platform, encoding);
+                continue;
+            }
+        };
+
+        let table = match input.get(offset as usize ..) {
+            Some(data) => data,
+            None => continue
+        };
+        
+        match (cmap_encoding, encoding) {
+            (None, e) => cmap_encoding = Some(e),
+            (Some(c), e) => {
+                if c != e {
+                    warn!("more then one non-unicode encoding {:?} and {:?}", c, e);
+                    continue;
+                }
+            }
+        }
+
         let (i, format) = be_u16(table)?;
         debug!("cmap format {}", format);
         match format {
@@ -223,8 +247,8 @@ pub fn parse_cmap(input: &[u8]) -> Result<CMap, FontError> {
         }
     }
 
-    Ok(CMap {
+    Ok((CMap {
         single_codepoint: cmap,
         double_codepoint: cmap2
-    })
+    }, cmap_encoding.unwrap_or(Encoding::Unicode)))
 }

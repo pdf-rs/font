@@ -32,6 +32,7 @@ pub enum Shape {
 pub struct TrueTypeFont {
     shapes: Vec<Shape>,
     pub cmap: Option<CMap>,
+    encoding: Option<Encoding>,
     hmtx: Hmtx,
     units_per_em: u16,
     bbox: RectF,
@@ -58,13 +59,17 @@ impl TrueTypeFont {
     }
     pub fn from_shapes_and_metrics(tables: Tables<impl Deref<Target=[u8]>>, shapes: Vec<Shape>, hmtx: Hmtx) -> Result<TrueTypeFont, FontError> {
         let head = parse_head(expect!(tables.get(b"head"), "no head"))?;
-        let cmap = tables.get(b"cmap").map(|data| parse_cmap(data)).transpose()?;
+        let (cmap, encoding) = match tables.get(b"cmap").map(|data| parse_cmap(data)).transpose()? {
+            Some((cmap, encoding)) => (Some(cmap), Some(encoding)),
+            None => (None, None)
+        };
         let name = tables.get(b"name").map(|data| parse_name(data)).transpose()?.unwrap_or_default();
         let os2 = tables.get(b"OS/2").map(|data| parse_os2(data)).transpose()?;
 
         Ok(TrueTypeFont {
             shapes,
             cmap,
+            encoding,
             hmtx,
             units_per_em: head.units_per_em,
             bbox: head.bbox(),
@@ -102,17 +107,20 @@ impl Font for TrueTypeFont {
         })
     }
     fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
-        self.gid_for_unicode_codepoint(codepoint)
-    }
-    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
-        debug!("glyph for unicode codepoint {0} ({0:#x})", codepoint);
         match self.cmap {
             Some(ref cmap) => cmap.get_codepoint(codepoint).map(GlyphId),
             None => None
         }
     }
+    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
+        match (self.cmap.as_ref(), self.encoding) {
+            (Some(cmap), Some(Encoding::Unicode)) => cmap.get_codepoint(codepoint).map(GlyphId),
+            (Some(cmap), _) => self.gid_for_codepoint(codepoint),
+            _ => None
+        }
+    }
     fn encoding(&self) -> Option<Encoding> {
-        Some(Encoding::Unicode)
+        self.encoding
     }
     fn bbox(&self) -> Option<RectF> {
         Some(self.bbox)

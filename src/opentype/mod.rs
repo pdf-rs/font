@@ -44,6 +44,7 @@ pub struct OpenTypeFont {
     outlines: Vec<Outline>,
     pub gpos: Option<GPos>,
     pub cmap: Option<CMap>,
+    encoding: Option<Encoding>,
     hmtx: Option<Hmtx>,
     bbox: Option<RectF>,
     pub gsub: Option<GSub>,
@@ -76,7 +77,7 @@ impl OpenTypeFont {
         Ok(FontInfo {
             name,
             typ: FontType::OpenType,
-            codepoints: cmap.map(|cmap| cmap.codepoints(10)).unwrap_or_default(),
+            codepoints: cmap.map(|cmap| cmap.0.codepoints(10)).unwrap_or_default(),
         })
     }
     pub fn from_hmtx_glyf_and_tables(hmtx: Option<Hmtx>, glyf: Option<Vec<Shape>>, tables: Tables<impl Deref<Target=[u8]>>) -> Result<Self, FontError> {
@@ -112,7 +113,10 @@ impl OpenTypeFont {
         
         let gsub = t!(tables.get(b"GSUB").map(|data| parse_gsub(data)).transpose());
         
-        let cmap = t!(tables.get(b"cmap").map(|data| parse_cmap(data)).transpose());
+        let (cmap, encoding) = match t!(tables.get(b"cmap").map(|data| parse_cmap(data)).transpose()) {
+            Some((cmap, encoding)) => (Some(cmap), Some(encoding)),
+            None => (None, None)
+        };
         let math = t!(tables.get(b"MATH").map(|data| parse_math(data)).transpose());
         let vmetrics = t!(tables.get(b"hhea").map(|data| parse_hhea(data)).transpose()).map(|v| v.into());
         let name = t!(tables.get(b"name").map(|data| parse_name(data)).transpose()).unwrap_or_default();
@@ -131,6 +135,7 @@ impl OpenTypeFont {
             math,
             gdef,
             vmetrics,
+            encoding,
 
             #[cfg(feature="svg")]
             svg,
@@ -182,19 +187,23 @@ impl Font for OpenTypeFont {
         self.svg.as_ref().and_then(|svg| svg.glyphs.get(&(gid.0 as u16)))
     }
     fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
-        self.gid_for_unicode_codepoint(codepoint)
-    }
-    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
         match self.cmap {
             Some(ref cmap) => cmap.get_codepoint(codepoint).map(GlyphId),
             None => None
+        }
+    }
+    fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
+        match (self.cmap.as_ref(), self.encoding) {
+            (Some(cmap), Some(Encoding::Unicode)) => cmap.get_codepoint(codepoint).map(GlyphId),
+            (Some(cmap), _) => self.gid_for_codepoint(codepoint),
+            _ => None
         }
     }
     fn gid_for_name(&self, _name: &str) -> Option<GlyphId> {
         None
     }
     fn encoding(&self) -> Option<Encoding> {
-        Some(Encoding::Unicode)
+        self.encoding
     }
     fn bbox(&self) -> Option<RectF> {
         self.bbox
