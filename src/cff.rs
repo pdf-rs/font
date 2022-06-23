@@ -29,6 +29,7 @@ pub struct CffFont {
     font_matrix: Transform2F,
     pub codepoint_map: [u16; 256],  // codepoint -> glyph index
     name_map: HashMap<String, u16>,
+    pub sid_map: HashMap<SID, u16>,
     pub unicode_map: HashMap<&'static str, u16>,
     encoding: Option<Encoding>,
     bbox: Option<RectF>,
@@ -456,6 +457,7 @@ impl<'a> CffSlot<'a> {
             info: Info {
                 weight: None,
             },
+            sid_map,
         })
     }
 }
