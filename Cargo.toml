@@ -18,10 +18,10 @@ tuple = { git = "https://github.com/s3bk/tuple/" }
 nom = "5.1"
 log = "0.4"
 rand = { version = "0.7", features = ["wasm-bindgen"] }
-slotmap = { version = "0.4" }
+slotmap = { version = "1.0" }
 decorum = "0.3"
-itertools = "0.9"
-indexmap = "1.4"
+itertools = "0.10"
+indexmap = "1.9"
 brotli-decompressor = { version = "2.3", optional = true }
 inflate = { version = "0.4.5", optional = true }
 svg_dom = { git = "https://github.com/s3bk/svg", optional=true }
