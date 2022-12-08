@@ -371,7 +371,7 @@ impl<'a> Input<'a> {
             false
         }
     }
-    fn try_parse<T, E>(&mut self, parser: impl Fn(&'a [u8]) -> Result<(&[u8], T), E>) -> Option<T> {
+    fn try_parse<T, E>(&mut self, parser: impl Fn(&'a [u8]) -> Result<(&'a [u8], T), E>) -> Option<T> {
         match parser(self.data) {
             Ok((i, t)) => {
                 let n = self.data.len() - i.len();
