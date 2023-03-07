@@ -27,7 +27,7 @@ macro_rules! parse_field {
     });
     ($start:expr, $input:expr, @ $ptr:ident $parser:ident, $field:expr) => ({
         let (i, offset) = <$ptr as NomParser>::parse2($input)?;
-        assert_ne!(offset, 0, stringify!($field));
+        require!(offset != 0);
 
         let data = slice!($start, offset as usize ..);
         let value = <$parser as Parser>::parse(data)?;

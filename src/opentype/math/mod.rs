@@ -222,7 +222,7 @@ table!(MathConstants {
 
 table!(MathGlyphInfo {
     /// Offset to MathItalicsCorrectionInfo table, from the beginning of the MathGlyphInfo table.
-    @uint16 MathItalicsCorrectionInfo italics_correction_info,
+    ?uint16 MathItalicsCorrectionInfo italics_correction_info,
 
     /// Offset to MathTopAccentAttachment table, from the beginning of the MathGlyphInfo table.
     @uint16 MathTopAccentAttachment top_accent_attachment,
@@ -251,7 +251,7 @@ where A: Iterator<Item=Result<T, FontError>>, B: Iterator<Item=Result<U, FontErr
     }).try_collect()
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MathItalicsCorrectionInfo {
     map: HashMap<u16, MathValueRecord>
 }
