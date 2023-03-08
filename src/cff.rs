@@ -144,20 +144,30 @@ pub struct CffSlot<'a> {
     private_dict: Vec<Rc<Dict>>,
     char_strings: Index<'a>,
     subrs: Vec<Rc<Index<'a>>>,
-    num_glyphs: usize
+    num_glyphs: usize,
+    font_matrix: Transform2F,
+}
+
+fn parse_font_matrix(arr: &[Value]) -> Option<Transform2F> {
+    TupleElements::from_iter(arr.iter().map(|&v| v.to_float()))
+    .map(|(a, b, c, d, e, f)| {
+        Transform2F::row_major(a, b, e, c, d, f)
+    })
 }
     
 impl<'a> Cff<'a> {
     pub fn slot(self, idx: u32) -> Result<CffSlot<'a>, FontError> {
         let data = self.dict_index.get(idx as usize).ok_or(FontError::NoSuchSlot)?;
         let top_dict = dict(data)?;
-        //info!("top dict: {:?}", top_dict);
+        info!("top dict: {:?}", top_dict);
         
         let offset = get!(top_dict, &Operator::CharStrings, 0).to_usize()?;
         let (_, char_strings) = index(self.data.get(offset ..).unwrap())?;
         
         // num glyphs includes glyph 0 (.notdef)
         let num_glyphs = char_strings.len() as usize;
+
+        let mut font_matrix = top_dict.get(&Operator::FontMatrix).and_then(|a| parse_font_matrix(&a));
         
         // retrieve Font Dicts if it exists.
         let mut private_dict_list = vec![];
@@ -167,6 +177,10 @@ impl<'a> Cff<'a> {
             let (_, fdarray_data_list) = index(offset!(self.data, fdarray_offset))?;
             for fdarray_data in &fdarray_data_list {
                 let fdarray_dict = dict(&fdarray_data)?;
+                if let Some(ma) = fdarray_dict.get(&Operator::FontMatrix).and_then(|a| parse_font_matrix(&a)) {
+                    font_matrix = Some(ma);
+                }
+                dbg!(&fdarray_dict);
                 let private_dict_entry = get!(fdarray_dict, &Operator::Private);
                 let (private_dict, subrs) = self.private_dict_and_subrs(&private_dict_entry)?;
                 private_dict_list.push(Rc::new(private_dict));
@@ -207,7 +221,8 @@ impl<'a> Cff<'a> {
             private_dict,
             char_strings,
             subrs,
-            num_glyphs
+            num_glyphs,
+            font_matrix: font_matrix.unwrap_or(Transform2F::from_scale(Vector2F::splat(0.001)))
         })
     }
 
@@ -262,12 +277,7 @@ fn range3_record(data: &[u8]) -> R<(usize, usize)> {
 
 impl<'a> CffSlot<'a> {
     pub fn font_matrix(&self) -> Transform2F {
-        self.top_dict.get(&Operator::FontMatrix)
-            .and_then(|arr| TupleElements::from_iter(arr.iter().map(|&v| v.to_float())))
-            .map(|(a, b, c, d, e, f)| {
-                Transform2F::row_major(a, b, e, c, d, f)
-            })
-            .unwrap_or(Transform2F::from_scale(Vector2F::splat(0.001)))
+        self.font_matrix
     }
     pub fn bbox(&self) -> Option<RectF> {
         self.top_dict.get(&Operator::FontBBox)
