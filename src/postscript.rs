@@ -385,9 +385,6 @@ impl<'a> Input<'a> {
             }
         }
     }
-    fn parse<T>(&mut self, parser: impl Fn(&'a [u8]) -> R<'a, T>) -> T {
-        self.try_parse(parser).unwrap()
-    }
 }
 impl<'a> Deref for Input<'a> {
     type Target = [u8];
@@ -792,7 +789,7 @@ impl Vm {
                     (Item::File, Item::String(key)) => {
                         let string = self.get_string_mut(key);
                         let flag = input.read_to(string);
-                        input.parse(space);
+                        expect!(input.try_parse(space), "Failed to parse space");
                         
                         self.push(Item::String(key));
                         self.push(Item::Bool(flag));
@@ -1068,14 +1065,14 @@ impl Vm {
         }
     }
     pub fn step(&mut self, input: &mut Input) -> Result<(), FontError> {
-        input.parse(space);
+        expect!(input.try_parse(space), "Failed to parse space");
         if let Some(_) = input.try_parse(comment) {
             return Ok(());
         }
         if input.len() == 0 {
             return Ok(());
         }
-        let tk = input.parse(token);
+        let tk = expect!(input.try_parse(token), "Failed to parse token");
         
         trace!("token: {:?}", tk);
         self.exec_token(tk, input)
