@@ -400,20 +400,20 @@ impl State {
         Ok(expect!(self.stack.pop(), "no value on the stack"))
     }
     #[inline]
-    fn pop_tuple<T>(&mut self) -> T where
+    fn pop_tuple<T>(&mut self) -> Result<T, FontError> where
         T: TupleElements<Element=Value>
     {
         let range = self.stack.len() - T::N ..;
-        T::from_iter(self.stack.drain(range)).unwrap()
+        Ok(expect!(T::from_iter(self.stack.drain(range)), "not enoug data on the stack"))
     }
     /// get stack[0 .. T::N] as a tuple
     /// does not modify the stack
     #[inline]
-    pub fn args<T>(&mut self) -> T where
+    pub fn args<T>(&mut self) -> Result<T, FontError> where
         T: TupleElements<Element=Value>
     {
         trace!("get {} args from {:?}", T::N, self.stack);
-        T::from_iter(self.stack.iter().cloned()).unwrap()
+        Ok(expect!(T::from_iter(self.stack.iter().cloned()), "not enough data on the stack"))
     }
 }
 
@@ -506,7 +506,7 @@ pub struct FontInfo {
 }
 
 pub fn font_info(data: &[u8]) -> Option<FontInfo> {
-    let magic: &[u8; 4] = data[0 .. 4].try_into().unwrap();
+    let magic: &[u8; 4] = data[0 .. 4].try_into().ok()?;
     info!("font magic: {:?} ({:?})", magic, String::from_utf8_lossy(&*magic));
     match magic {
         b"OTTO" | [0,1,0,0] => OpenTypeFont::info(data).ok(),

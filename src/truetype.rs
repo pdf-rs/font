@@ -327,7 +327,7 @@ fn glyph_shape_positive_contours(i: &[u8], number_of_contours: usize) -> Result<
 pub fn contour(points: impl Iterator<Item=(bool, Vector2F)>) -> Option<Contour> {
     let mut points = points.peekable();
     
-    let (start_on, p) = points.next().unwrap();
+    let (start_on, p) = points.next()?;
     let start_off = !start_on;
     let (s, sc) = if start_off {
         // if we start off with an off-curve point, then when we need to find a

@@ -5,7 +5,7 @@ use nom::{
     bytes::complete::{take_till, take_till1, take_while, take_while_m_n, tag},
     number::complete::{be_u8, be_u16},
     sequence::{delimited, tuple, preceded, terminated},
-    combinator::{opt, map, recognize},
+    combinator::{opt, map, recognize, map_res},
     character::complete::{one_of, digit0, digit1},
     branch::alt,
     multi::many0,
@@ -57,12 +57,12 @@ pub fn string(i: &[u8]) -> R<Vec<u8>> {
 }
 
 pub fn integer(i: &[u8]) -> R<i32> {
-    map(
+    map_res(
         recognize(tuple((
             opt(one_of("+-")),
             digit1
         ))),
-        |s| std::str::from_utf8(s).unwrap().parse().unwrap()
+        |s| std::str::from_utf8(s).unwrap().parse()
     )(i)
 }
 
@@ -70,7 +70,7 @@ pub fn plus_minus(i: &[u8]) -> R<&[u8]> {
     alt((tag("+"), tag("-")))(i)
 }
 pub fn float(i: &[u8]) -> R<f32> {
-    map(
+    map_res(
         recognize(tuple((
             opt(plus_minus),
             digit0,
@@ -82,7 +82,7 @@ pub fn float(i: &[u8]) -> R<f32> {
                 digit1
             ))) 
         ))),
-        |s| std::str::from_utf8(s).unwrap().parse::<f32>().expect("overflow")
+        |s| std::str::from_utf8(s).unwrap().parse::<f32>()
     )(i)
 }
 pub fn delimited_literal(i: &[u8]) -> R<Vec<u8>> {

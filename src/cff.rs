@@ -162,7 +162,7 @@ impl<'a> Cff<'a> {
         info!("top dict: {:?}", top_dict);
         
         let offset = get!(top_dict, &Operator::CharStrings, 0).to_usize()?;
-        let (_, char_strings) = index(self.data.get(offset ..).unwrap())?;
+        let (_, char_strings) = index(slice!(self.data, offset ..))?;
         
         // num glyphs includes glyph 0 (.notdef)
         let num_glyphs = char_strings.len() as usize;
@@ -503,7 +503,7 @@ fn index(i: &[u8]) -> ParseResult<Vec<&[u8]>> {
         let (i, offsets) = t!(count2(|i| offset(offSize)(i).map(|(i, o)| (i, o - 1)), n+1)(i));
         let (i, data) = t!(take(offsets[n])(i));
         
-        let items = offsets.windows(2).map(|w| data.get(w[0] as usize .. w[1] as usize).unwrap()).collect();
+        let items = offsets.windows(2).map(|w| Ok(slice!(data, w[0] as usize .. w[1] as usize))).collect::<Result<_, _>>()?;
         Ok((i, items))
     } else {
         Ok((i, vec![]))

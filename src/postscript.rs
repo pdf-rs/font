@@ -203,7 +203,7 @@ impl<'a> RefItem<'a> {
         }
     }
     pub fn as_str(&self) -> Option<&'a str> {
-        self.as_bytes().map(|b| std::str::from_utf8(b).unwrap())
+        self.as_bytes().and_then(|b| std::str::from_utf8(b).ok())
     }
     pub fn as_f32(&self) -> Option<f32> {
         match *self {
@@ -463,11 +463,11 @@ impl Vm {
             RefDict { vm: self, dict: self.get_dict(dict) }
         ))
     }
-    fn pop_tuple<T>(&mut self) -> T where
+    fn pop_tuple<T>(&mut self) -> Result<T, FontError> where
         T: TupleElements<Element=Item>
     {
         let range = self.stack.len() - T::N ..;
-        T::from_iter(self.stack.drain(range)).unwrap()
+        Ok(expect!(T::from_iter(self.stack.drain(range)), "not enough data on the stack"))
     }
     fn pop(&mut self) -> Item {
         self.stack.pop().expect("empty stack")
@@ -672,7 +672,7 @@ impl Vm {
                 self.push(Item::Dict(key));
             }
             Operator::DefineFont => {
-                match self.pop_tuple() {
+                match self.pop_tuple()? {
                     (Item::Literal(lit), Item::Dict(dict_key)) => {
                         let font_name = String::from_utf8(self.get_lit(lit).to_owned())
                             .expect("Font name is not valid UTF-8");
@@ -694,7 +694,7 @@ impl Vm {
                 }
             }
             Operator::For => {
-                match self.pop_tuple() {
+                match self.pop_tuple()? {
                     (Item::Int(initial), Item::Int(increment), Item::Int(limit), Item::Array(procedure)) => {
                         match increment {
                             i if i > 0 => require!(limit > initial),
@@ -716,7 +716,7 @@ impl Vm {
                 }
             }
             Operator::If => {
-                match self.pop_tuple() {
+                match self.pop_tuple()? {
                     (Item::Bool(cond), Item::Array(proc)) => {
                         if cond {
                             self.exec_array(proc, input);
@@ -726,7 +726,7 @@ impl Vm {
                 }
             }
             Operator::IfElse => {
-                match self.pop_tuple() {
+                match self.pop_tuple()? {
                     (Item::Bool(cond), Item::Array(proc_a), Item::Array(proc_b)) => {
                         let proc = if cond {
                             proc_a
@@ -744,7 +744,7 @@ impl Vm {
                 self.exec(item, input);
             }
             Operator::Eq => {
-                let (a, b) = self.pop_tuple();
+                let (a, b) = self.pop_tuple()?;
                 self.push(Item::Bool(a == b));
             }
             Operator::Cvx => {
@@ -753,7 +753,7 @@ impl Vm {
                 self.push(item);
             }
             Operator::Def => {
-                let (key, val) = self.pop_tuple();
+                let (key, val) = self.pop_tuple()?;
                 self.current_dict_mut().insert(key, val);
             }
             Operator::Dict => {
@@ -766,7 +766,7 @@ impl Vm {
                 }
             }
             Operator::Known => {
-                match self.pop_tuple() {
+                match self.pop_tuple()? {
                     (Item::Dict(dict), key) => {
                         let dict = self.get_dict(dict);
                         let known = dict.contains_key(&key);
@@ -785,7 +785,7 @@ impl Vm {
                 }
             },
             Operator::ReadString => {
-                match self.pop_tuple() {
+                match self.pop_tuple()? {
                     (Item::File, Item::String(key)) => {
                         let string = self.get_string_mut(key);
                         let flag = input.read_to(string);
@@ -843,7 +843,7 @@ impl Vm {
             }
             Operator::End => self.pop_dict(),
             Operator::Exch => {
-                let (a, b) = self.pop_tuple();
+                let (a, b) = self.pop_tuple()?;
                 self.push(b);
                 self.push(a);
             }
@@ -864,7 +864,7 @@ impl Vm {
                 },
                 arg => error!("index: invalid argument {:?}", self.display(arg))
             }
-            Operator::Get => match self.pop_tuple() {
+            Operator::Get => match self.pop_tuple()? {
                 (Item::Array(key), Item::Int(index)) if index >= 0 => {
                     let &item = self.get_array(key).get(index as usize).expect("out of bounds");
                     self.push(item);
@@ -880,7 +880,7 @@ impl Vm {
                 args => error!("get: invalid arguments {:?}", self.display_tuple(args))
             }
             Operator::Put => {
-                let (a, b, c) = self.pop_tuple();
+                let (a, b, c) = self.pop_tuple()?;
                 let a = self.resolve(a).unwrap_or(a);
                 match (a, b, c) {
                     (Item::Array(array), Item::Int(idx), any) => {
@@ -1007,7 +1007,7 @@ impl Vm {
                 self.push(out);
             }
             Operator::Add => {
-                let out = match self.pop_tuple() {
+                let out = match self.pop_tuple()? {
                     (Item::Int(a), Item::Int(b)) => match a.checked_add(b) {
                         Some(c) => Item::Int(c),
                         None => Item::Real(R32::from(a as f32) + R32::from(b as f32))
@@ -1021,7 +1021,7 @@ impl Vm {
                 self.push(out);
             }
             Operator::Sub => {
-                let out = match self.pop_tuple() {
+                let out = match self.pop_tuple()? {
                     (Item::Int(a), Item::Int(b)) => match a.checked_sub(b) {
                         Some(c) => Item::Int(c),
                         None => Item::Real(R32::from(a as f32) - R32::from(b as f32))
@@ -1034,7 +1034,7 @@ impl Vm {
                 self.push(out);
             }
             Operator::Mul => {
-                let out = match self.pop_tuple() {
+                let out = match self.pop_tuple()? {
                     (Item::Int(a), Item::Int(b)) => match a.checked_mul(b) {
                         Some(c) => Item::Int(c),
                         None => Item::Real(R32::from(a as f32) * R32::from(b as f32))

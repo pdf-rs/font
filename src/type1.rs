@@ -130,16 +130,19 @@ impl Type1Font {
         let mut unicode_map = HashMap::with_capacity(char_strings.len());
         let mut state = State::new();
         for (name, item) in char_strings.string_entries() {
-            let data = item.as_bytes().unwrap();
+            let data = expect!(item.as_bytes(), "data is not bytes");
 
             let decoded = Decoder::charstring().decode(&data, len_iv);
             //debug!("{} decoded: {:?}", name, String::from_utf8_lossy(&decoded));
             
-            charstring(&decoded, &context, &mut state).unwrap();
+            if let Err(e) = charstring(&decoded, &context, &mut state) {
+                warn!("Failed to decode charstring for glyph {name}: {e:?}");
+                continue;
+            }
 
             let (index, _) = glyphs.insert_full(name.to_owned(), Glyph {
                 metrics: HMetrics {
-                    advance: state.char_width.unwrap(),
+                    advance: expect!(state.char_width, "CharWidth not set"),
                     lsb: state.lsb.unwrap_or_default()
                 },
                 path: state.take_path(),
@@ -161,9 +164,15 @@ impl Type1Font {
                 RefItem::Null => {},
                 RefItem::Literal(b".notdef") => {},
                 RefItem::Literal(name) => {
-                    let name = std::str::from_utf8(name).unwrap();
-                    if let Some((index, _, _)) = glyphs.get_full(name) {
-                        codepoints.insert(codepoint, index as u32);
+                    match std::str::from_utf8(name) {
+                        Ok(name) => {
+                            if let Some((index, _, _)) = glyphs.get_full(name) {
+                                codepoints.insert(codepoint, index as u32);
+                            }
+                        }
+                        Err(_) => {
+                            warn!("name not utf8: {:?}", name);
+                        }
                     }
                 }
                 _ => {}
@@ -171,7 +180,8 @@ impl Type1Font {
             codepoint += 1;
         }
 
-        let font_matrix = font_dict.get("FontMatrix").unwrap().as_array().unwrap();
+        let font_matrix = expect!(font_dict.get("FontMatrix"), "no FontMatrix");
+        let font_matrix = expect!(font_matrix.as_array(), "FontMatrix not an array");
         require_eq!(font_matrix.len(), 6);
         
         let bbox = font_dict.get("FontBBox")
@@ -341,7 +351,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         s.stack.clear();
                     }
                     7 => { // ⊦ sbx sby wx wy sbw (12 7) ⊦
-                        let (sbx, sby, wx, _wy, _sbw) = s.args();
+                        let (sbx, sby, wx, _wy, _sbw) = s.args()?;
                         trace!("sbw");
                         s.char_width = Some(wx.to_float());
                         s.current = v(sbx, sby);
@@ -378,7 +388,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                             0 => {
                                 // end of flex sequences
                                 require_eq!(n, 3);
-                                let (_flex_height, x, y) = s.pop_tuple();
+                                let (_flex_height, x, y) = s.pop_tuple()?;
                                 let (_ref, c0, c1, p2, c3, c4, p5) = expect!(TupleElements::from_iter(s.flex_sequence.take().unwrap().into_iter()), "can't parse flex sequence");
                                 //require_eq!(p5, v(x, y));
                                 s.contour.push_cubic(c0, c1, p2);
@@ -405,7 +415,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     }
                     33 => { // ⊦ x y setcurrentpoint (12 33) ⊦
                         trace!("setcurrentpoint");
-                        let (x, y) = s.args();
+                        let (x, y) = s.args()?;
                         let p = v(x, y);
                         s.current = p;
                         s.stack.clear();
@@ -415,7 +425,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             13 => { // ⊦ sbx wx hsbw (13) ⊦
                 trace!("hsbw");
-                let (sbx, wx) = s.args();
+                let (sbx, wx) = s.args()?;
                 let lsb = sbx.to_float();
                 s.lsb = Some(lsb);
                 s.current = Vector2F::new(lsb, 0.0);
@@ -428,7 +438,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             21 => { // ⊦ dx dy rmoveto (21) ⊦
                 trace!("rmoveto");
-                let (dx, dy) = s.args();
+                let (dx, dy) = s.args()?;
                 let p = s.current + v(dx, dy);
                 
                 // hack to counter the flex sequences hack by adobe
@@ -443,7 +453,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             22 => { // ⊦ dx hmoveto (22) ⊦
                 trace!("hmoveto");
-                let (dx, ) = s.args();
+                let (dx, ) = s.args()?;
                 let p = s.current + v(dx, 0.);
                 s.flush();
                 s.contour.push_endpoint(p);
@@ -452,7 +462,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             30 => { // ⊦ dy1 dx2 dy2 dx3 vhcurveto (30) ⊦
                 trace!("vhcurveto");
-                let (dy1, dx2, dy2, dx3) = s.args();
+                let (dy1, dx2, dy2, dx3) = s.args()?;
                 let c1 = s.current + v(0., dy1);
                 let c2 = c1 + v(dx2, dy2);
                 let p = c2 + v(dx3, 0.);
@@ -462,7 +472,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             31 => { // ⊦ dx1 dx2 dy2 dy3 hvcurveto (31) ⊦
                 trace!("hvcurveto");
-                let (dx1, dx2, dy2, dy3) = s.args();
+                let (dx1, dx2, dy2, dy3) = s.args()?;
                 let c1 = s.current + v(dx1, 0.);
                 let c2 = c1 + v(dx2, dy2);
                 let p = c2 + v(0., dy3);
