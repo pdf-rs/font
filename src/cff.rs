@@ -180,7 +180,6 @@ impl<'a> Cff<'a> {
                 if let Some(ma) = fdarray_dict.get(&Operator::FontMatrix).and_then(|a| parse_font_matrix(&a)) {
                     font_matrix = Some(ma);
                 }
-                dbg!(&fdarray_dict);
                 let private_dict_entry = get!(fdarray_dict, &Operator::Private);
                 let (private_dict, subrs) = self.private_dict_and_subrs(&private_dict_entry)?;
                 private_dict_list.push(Rc::new(private_dict));
@@ -210,7 +209,7 @@ impl<'a> Cff<'a> {
         }
 
         let offset = get!(top_dict, &Operator::CharStrings, 0).to_int()? as usize;
-        let (_, char_strings) = index(self.data.get(offset ..).unwrap())?;
+        let (_, char_strings) = index(slice!(self.data, offset ..))?;
         
         // num glyphs includes glyph 0 (.notdef)
         let num_glyphs = char_strings.len() as usize;
