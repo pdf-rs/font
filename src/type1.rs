@@ -186,9 +186,11 @@ impl Type1Font {
         
         let bbox = font_dict.get("FontBBox")
             .map(|val| {
-                let (a, b, c, d) = TupleElements::from_iter(val.as_array().unwrap().iter().map(|v| v.as_f32().unwrap())).unwrap();
-                RectF::from_points(Vector2F::new(a, b), Vector2F::new(c, d))
-            });
+                let arr = expect!(val.as_array(), "FontBox not an array");
+                require!(arr.len() == 4);
+                let (a, b, c, d) = expect!(TupleElements::from_iter(arr.iter().filter_map(|v| v.as_f32())), "needs 4 numbers");
+                Ok(RectF::from_points(Vector2F::new(a, b), Vector2F::new(c, d)))
+            }).transpose()?;
         
         let (a, b, c, d, e, f) = TupleElements::from_iter(
                 font_matrix.iter().map(|item| item.as_f32().unwrap())
@@ -389,7 +391,8 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                                 // end of flex sequences
                                 require_eq!(n, 3);
                                 let (_flex_height, x, y) = s.pop_tuple()?;
-                                let (_ref, c0, c1, p2, c3, c4, p5) = expect!(TupleElements::from_iter(s.flex_sequence.take().unwrap().into_iter()), "can't parse flex sequence");
+                                let flex_sequence = expect!(s.flex_sequence.take(), "no flex sequence");
+                                let (_ref, c0, c1, p2, c3, c4, p5) = expect!(TupleElements::from_iter(flex_sequence.into_iter()), "can't parse flex sequence");
                                 //require_eq!(p5, v(x, y));
                                 s.contour.push_cubic(c0, c1, p2);
                                 s.contour.push_cubic(c3, c4, p5);

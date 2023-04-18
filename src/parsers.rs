@@ -378,12 +378,12 @@ pub fn offset(i: &[u8]) -> R<Offset> {
 }
 pub struct Offset(pub u16);
 impl Offset {
-    pub fn of<'a>(&self, data: &'a [u8]) -> Option<&'a [u8]> {
+    pub fn of<'a>(&self, data: &'a [u8]) -> Result<&'a [u8], FontError> {
         let off = self.0 as usize;
         if off != 0 && off <= data.len() {
-            Some(&data[off ..])
+            Ok(&data[off ..])
         } else {
-            None
+            Err(FontError::OutOfBounds("offset", self.0 as _))
         }
     }
 }

@@ -193,7 +193,7 @@ fn parse_glyf_t0(i: &[u8]) -> Result<Vec<Shape>, FontError> {
                                     take_bits(triplet.y_bits())
                                 ))
                             )
-                        ).unwrap();
+                        )?;
                         let sign = |is_minus| if is_minus { -1 } else { 1 };
                         x += sign(triplet.x_minus()) * (vx + triplet.dx() as i16);
                         y += sign(triplet.y_minus()) * (vy + triplet.dy() as i16);

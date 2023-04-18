@@ -6,21 +6,21 @@ use nom::{IResult,
 
 macro_rules! point {
     ($iter:ident, x) => ({
-        let &x = $iter.next().unwrap();
+        let &x = expect!($iter.next(), "stack empty");
         v(x, 0.0)
     });
     ($iter:ident, y) => ({
-        let &y = $iter.next().unwrap();
+        let &y = expect!($iter.next(), "stack empty");
         v(0.0, y)
     });
     ($iter:ident, xy) => ({
-        let &x = $iter.next().unwrap();
-        let &y = $iter.next().unwrap();
+        let &x = expect!($iter.next(), "stack empty");
+        let &y = expect!($iter.next(), "stack empty");
         v(x, y)
     });
     ($iter:ident, yx) => ({
-        let &y = $iter.next().unwrap();
-        let &x = $iter.next().unwrap();
+        let &y = expect!($iter.next(), "stack empty");
+        let &x = expect!($iter.next(), "stack empty");
         v(x, y)
     });
 }
@@ -50,7 +50,7 @@ macro_rules! lines {
     });
 }
 
-fn alternating_curve(s: &mut State, mut horizontal: bool) {
+fn alternating_curve(s: &mut State, mut horizontal: bool) -> Result<(), FontError> {
     let mut slice = s.stack.as_slice();
     while slice.len() > 0 {
         slice = match (slice.len(), horizontal) {
@@ -61,6 +61,7 @@ fn alternating_curve(s: &mut State, mut horizontal: bool) {
         };
         horizontal = !horizontal;
     }
+    Ok(())
 }
 
 #[inline]
@@ -472,7 +473,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             30 => { // |- dy1 dx2 dy2 dx3 {dxa dxb dyb dyc dyd dxe dye dxf}* dyf? vhcurveto (30) |-
                     // |- {dya dxb dyb dxc dxd dxe dye dyf}+ dxf? vhcurveto (30) |-
                 trace!("vhcurveto");
-                alternating_curve(s, false);
+                alternating_curve(s, false)?;
                 
                 s.stack.clear();
                 i
@@ -480,7 +481,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             31 => { // |- dx1 dx2 dy2 dy3 {dya dxb dyb dxc dxd dxe dye dyf}* dxf? hvcurveto (31) |-
                     // |- {dxa dxb dyb dyc dyd dxe dye dxf}+ dyf? hvcurveto (31) |-
                 trace!("hvcurveto");
-                alternating_curve(s, true);
+                alternating_curve(s, true)?;
                 
                 s.stack.clear();
                 i
