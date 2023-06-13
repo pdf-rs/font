@@ -228,7 +228,7 @@ pub struct Tables<T> {
 }
 impl<T: Deref<Target=[u8]>> Tables<T> {
     pub fn get(&self, tag: &[u8; 4]) -> Option<&[u8]> {
-        self.entries.get(tag).map(|block| &**block)
+        self.entries.get(tag).map(|block| &**block).filter(|data| data.len() > 0)
     }
     pub fn entries(&self) -> impl Iterator<Item=([u8; 4], &[u8])>{
         self.entries.iter().map(|(&tag, data)| (tag, &**data))
