@@ -15,12 +15,13 @@ use pathfinder_geometry::{
     vector::Vector2F,
     rect::RectF
 };
+use istring::TinyString;
 
 #[derive(Clone)]
 pub struct Type1Font {
     glyphs: IndexMap<String, Glyph>, // namee -> glyph
     pub codepoints: HashMap<u32, u32>, // codepoint -> glyph id
-    pub unicode_map: HashMap<&'static str, u32>,
+    pub unicode_map: HashMap<TinyString, u32>,
     font_matrix: Transform2F,
     bbox: Option<RectF>,
     name: Name,
@@ -44,10 +45,8 @@ impl Font for Type1Font {
         self.glyphs.get_full(name).map(|(id, _, _)| GlyphId(id as u32))
     }
     fn gid_for_unicode_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
-        let c = std::char::from_u32(codepoint)?;
-        let mut buf = [0; 4];
-        let s = c.encode_utf8(&mut buf);
-        self.unicode_map.get(&*s).map(|&id| GlyphId(id))
+        let s = TinyString::from(char::from_u32(codepoint)?);
+        self.unicode_map.get(&s).map(|&id| GlyphId(id))
     }
     fn bbox(&self) -> Option<RectF> {
         self.bbox
@@ -151,9 +150,17 @@ impl Type1Font {
 
             if let Some(unicode) = glyphname_to_unicode(name) {
                 debug!("{} -> {} @ {}", name, unicode, index);
-                unicode_map.insert(unicode, index as u32);
+                unicode_map.insert(TinyString::new(unicode).unwrap(), index as u32);
             } else {
-                debug!("canot map {}", name);
+                if let Some(s) = name.strip_prefix("uni")
+                    .and_then(|id| u16::from_str_radix(id, 16).ok())
+                    .and_then(|num| char::from_u32(num as u32))
+                    .map(|c| TinyString::from(c))
+                {
+                        unicode_map.insert(s, index as u32);
+                } else {
+                    debug!("canot map {}", name);
+                }
             }
         }
         
@@ -209,8 +216,8 @@ impl Type1Font {
         })
     }
 
-    pub fn unicode_names(&self) -> impl Iterator<Item=(GlyphId, &'static str)> + '_ {
-        self.unicode_map.iter().map(|(&s, &g)| (GlyphId(g), s))
+    pub fn unicode_names(&self) -> impl Iterator<Item=(GlyphId, &str)> + '_ {
+        self.unicode_map.iter().map(|(s, &g)| (GlyphId(g), s.as_str()))
     }
 }
 

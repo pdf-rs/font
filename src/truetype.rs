@@ -168,7 +168,6 @@ pub fn parse_shapes(loca: &[u32], data: &[u8]) -> Result<Vec<Shape>, FontError> 
 
 fn parse_glyph_shape(data: &[u8]) -> Result<Shape, FontError> {
     if data.len() == 0 {
-        debug!("empty glyph");
         return Ok(Shape::Empty);
     }
     let (i, number_of_contours) = be_i16(data)?;
