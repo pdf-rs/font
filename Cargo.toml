@@ -25,6 +25,7 @@ indexmap = "1.9"
 brotli-decompressor = { version = "2.3", optional = true }
 inflate = { version = "0.4.5", optional = true }
 svg_dom = { git = "https://github.com/s3bk/svg", optional=true }
+istring = "0.3.4"
 
 [dev-dependencies]
 svg_dom = { git = "https://github.com/s3bk/svg" }
