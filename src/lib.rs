@@ -125,6 +125,7 @@ pub trait Font: 'static {
     fn kerning(&self, _left: GlyphId, _right: GlyphId) -> f32 {
         0.0
     }
+
     fn name(&self) -> &Name;
 
     fn info(&self) -> &Info;

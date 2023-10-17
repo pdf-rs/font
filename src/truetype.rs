@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::iter;
 use std::ops::Deref;
+use crate::opentype::post::parse_post;
 use crate::{Font, Glyph, R, IResultExt, GlyphId, Name, Info, FontError};
 use crate::parsers::{iterator, parse};
 use pdf_encoding::Encoding;
@@ -39,6 +41,7 @@ pub struct TrueTypeFont {
     kern: KernTable,
     name: Name,
     info: Info,
+    pub name_map: HashMap<String, u16>,
 }
 
 impl TrueTypeFont {
@@ -66,6 +69,12 @@ impl TrueTypeFont {
         let name = tables.get(b"name").map(|data| parse_name(data)).transpose()?.unwrap_or_default();
         let os2 = tables.get(b"OS/2").map(|data| parse_os2(data)).transpose()?;
 
+        let post = t!(tables.get(b"post").map(parse_post).transpose());
+        let mut name_map = HashMap::new();
+        if let Some(post) = post {
+            name_map.extend(post.names.into_iter().enumerate().map(|(i, name)| (name.into(), i as u16)));
+        }
+        
         Ok(TrueTypeFont {
             shapes,
             cmap,
@@ -78,6 +87,7 @@ impl TrueTypeFont {
             info: Info {
                 weight: os2.map(|t| t.weight),
             },
+            name_map,
         })
     }
     fn get_path(&self, idx: u32) -> Option<Outline> {

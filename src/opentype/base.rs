@@ -44,7 +44,7 @@ fn parse_base_tag_list(data: &[u8]) -> Result<impl Array<Item=Tag> + '_, FontErr
 }
 
 fn parse_base_script_list<'a>(data: &'a [u8], tags: impl Array<Item=Tag>) -> Result<(), FontError> {
-    let mut tags = tags.into_iter();
+    let mut tags = tags.iter();
     let (i, base_script_count) = be_u16(data)?;
     for (script_tag, offset) in iterator_n(i, tuple((tag, offset)), base_script_count) {
         let (default_baseline_idx, baselines) = parse_base_script_table(offset.of(data)?)?;

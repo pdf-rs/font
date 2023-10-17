@@ -30,6 +30,7 @@ pub mod math;
 pub mod gdef;
 pub mod base;
 pub mod os2;
+pub mod post;
 
 use math::{parse_math, MathHeader};
 use gpos::{parse_gpos, GPos};
@@ -52,6 +53,7 @@ pub struct OpenTypeFont {
     pub gdef: Option<GDef>,
     vmetrics: Option<VMetrics>,
 
+    pub name_map: HashMap<String, u16>,
     #[cfg(feature="svg")]
     svg:  Option<SvgTable>,
 
@@ -99,7 +101,7 @@ impl OpenTypeFont {
         #[cfg(feature="svg")]
         let svg = t!(tables.get(b"SVG ").map(|data| parse_svg(data)).transpose());
         
-        let maxp = t!(tables.get(b"maxp").map(|data| parse_maxp(data)).transpose());
+        let maxp = t!(tables.get(b"maxp").map(parse_maxp).transpose());
         let num_glyphs = maxp.as_ref().map(|maxp| maxp.num_glyphs as u32).unwrap_or(outlines.len() as u32);
 
         let gpos = if let Some(data) = tables.get(b"GPOS") {
@@ -111,17 +113,23 @@ impl OpenTypeFont {
             None
         };
         
-        let gsub = t!(tables.get(b"GSUB").map(|data| parse_gsub(data)).transpose());
+        let gsub = t!(tables.get(b"GSUB").map(parse_gsub).transpose());
         
         let (cmap, encoding) = match t!(tables.get(b"cmap").map(|data| parse_cmap(data)).transpose()) {
             Some((cmap, encoding)) => (Some(cmap), Some(encoding)),
             None => (None, None)
         };
-        let math = t!(tables.get(b"MATH").map(|data| parse_math(data)).transpose());
-        let vmetrics = t!(tables.get(b"hhea").map(|data| parse_hhea(data)).transpose()).map(|v| v.into());
-        let name = t!(tables.get(b"name").map(|data| parse_name(data)).transpose()).unwrap_or_default();
-        let gdef = t!(tables.get(b"gdef").map(|data| parse_gdef(data)).transpose());
-        let base = t!(tables.get(b"BASE").map(|data| parse_base(data)).transpose());
+        let math = t!(tables.get(b"MATH").map(parse_math).transpose());
+        let vmetrics = t!(tables.get(b"hhea").map(parse_hhea).transpose()).map(|v| v.into());
+        let name = t!(tables.get(b"name").map(parse_name).transpose()).unwrap_or_default();
+        let gdef = t!(tables.get(b"gdef").map(parse_gdef).transpose());
+        let base = t!(tables.get(b"BASE").map(parse_base).transpose());
+        let post = t!(tables.get(b"post").map(parse_post).transpose());
+        let mut name_map = HashMap::new();
+        if let Some(post) = post {
+            name_map.extend(post.names.into_iter().enumerate().map(|(i, name)| (name.into(), i as u16)));
+        }
+        
 
         let weight = t!(tables.get(b"OS/2").map(|data| os2::parse_os2(data)).transpose()).map(|os2| os2.weight);
 
@@ -136,6 +144,7 @@ impl OpenTypeFont {
             gdef,
             vmetrics,
             encoding,
+            name_map,
 
             #[cfg(feature="svg")]
             svg,
@@ -199,8 +208,8 @@ impl Font for OpenTypeFont {
             _ => None
         }
     }
-    fn gid_for_name(&self, _name: &str) -> Option<GlyphId> {
-        None
+    fn gid_for_name(&self, name: &str) -> Option<GlyphId> {
+        self.name_map.get(name).map(|&n| GlyphId(n as u32))
     }
     fn encoding(&self) -> Option<Encoding> {
         self.encoding
@@ -578,6 +587,8 @@ fn utf16_be(data: &[u8]) -> Result<String, std::string::FromUtf16Error> {
 }
 
 use std::fmt;
+
+use self::post::parse_post;
 #[derive(Copy, Clone, Hash, PartialEq, Eq)]
 pub struct Tag(pub [u8; 4]);
 impl fmt::Debug for Tag {

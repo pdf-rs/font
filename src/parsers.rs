@@ -2,7 +2,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::hash::Hash;
 use nom::{
-    bytes::complete::{take_till, take_till1, take_while, take_while_m_n, tag},
+    bytes::complete::{take, take_till, take_till1, take_while, take_while_m_n, tag},
     number::complete::{be_u8, be_u16},
     sequence::{delimited, tuple, preceded, terminated},
     combinator::{opt, map, recognize, map_res},
@@ -349,7 +349,7 @@ pub fn parse<'a, T, E>(input: &mut &'a [u8], parser: impl Fn(&'a [u8]) -> Result
     Ok(t)
 }
 
-pub fn count<'a, T>(parser: impl Fn(&[u8]) -> ParseResult<T>, count: usize) -> impl Fn(&[u8]) -> ParseResult<Vec<T>>
+pub fn count<'a, T>(parser: impl Fn(&'a [u8]) -> ParseResult<T>, count: usize) -> impl Fn(&'a [u8]) -> ParseResult<Vec<T>>
 {
     move |mut i: &[u8]| {
         let mut vec = Vec::with_capacity(count);
@@ -425,7 +425,7 @@ pub trait Array: Sized {
 
     fn len(&self) -> usize;
     fn get(&self, idx: usize) -> Result<Self::Item, FontError>;
-    fn into_iter(self) -> Self::Iter;
+    fn iter(&self) -> Self::Iter;
     fn map<F>(self, f: F) -> ArrayMap<Self, F> {
         ArrayMap { base: self, map: f }
     }
@@ -469,7 +469,7 @@ impl<'a, P: Parser + FixedSize> Array for ArrayBase<'a, P> {
         let off = P::SIZE * idx;
         P::parse(slice!(self.data, off .. off + P::SIZE))
     }
-    fn into_iter(self) -> Self::Iter {
+    fn iter(&self) -> Self::Iter {
         ArrayBaseIter { data: self.data, _m: PhantomData }
         //self.data.chunks_exact(P::SIZE).map(|chunk| P::parse(chunk))
     }
@@ -483,7 +483,7 @@ pub struct ArrayMap<A, F> {
     base: A,
     map: F,
 }
-impl<A: Array, F, T> Array for ArrayMap<A, F> where F: Fn(A::Item) -> Result<T, FontError>
+impl<A: Array, F, T> Array for ArrayMap<A, F> where F: Fn(A::Item) -> Result<T, FontError> + Clone
 {
     type Item = T;
     type Iter = ArrayMapIter<A, F>;
@@ -495,8 +495,8 @@ impl<A: Array, F, T> Array for ArrayMap<A, F> where F: Fn(A::Item) -> Result<T, 
     fn get(&self, idx: usize) -> Result<Self::Item, FontError> {
         self.base.get(idx).and_then(|v| (self.map)(v))
     }
-    fn into_iter(self) -> Self::Iter {
-        ArrayMapIter { base: self.base.into_iter(), map: self.map }
+    fn iter(&self) -> Self::Iter {
+        ArrayMapIter { base: self.base.iter(), map: self.map.clone() }
     }
 }
 impl<A: FixedSize, F> KnownSize for ArrayMap<A, F> {
@@ -544,4 +544,9 @@ impl<P: NomParser> Parser for P {
     fn parse(data: &[u8]) -> Result<Self::Output, FontError> {
         P::parse2(data).map(|(_, v)| v)
     }
+}
+pub fn pascal_string(i: &[u8]) -> ParseResult<&[u8]> {
+    let (i, len) = be_u8(i)?;
+    let (i, data) = take(len)(i)?;
+    Ok((i, data))
 }

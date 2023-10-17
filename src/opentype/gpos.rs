@@ -196,7 +196,7 @@ fn parse_mark_to_base_attachment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<
     let base_array = parse_base_array(slice!(data, base_array_offset as usize..), mark_class_count)?;
 
     let mark_array = parse_mark_array_table(slice!(data, mark_array_offset as usize ..))?;
-    for (mark_gid, m) in mark_coverage.zip(mark_array.into_iter()) {
+    for (mark_gid, m) in mark_coverage.zip(mark_array.iter()) {
         let (mark_class, mark_anchor) = m?;
         require!(mark_class < mark_class_count);
         for (base_nr, &base_gid) in base_coverage.iter().enumerate() {

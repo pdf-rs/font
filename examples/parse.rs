@@ -6,6 +6,6 @@ fn main() {
     let data = std::fs::read(&arg).expect("can't read file");
     let font = parse(&data).unwrap();
     println!("{} glyphs", font.num_glyphs());
-    let gid = font.gid_for_unicode_codepoint(205).unwrap();
+    let gid = font::GlyphId(758);
     font.glyph(gid);
 }
