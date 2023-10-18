@@ -36,6 +36,7 @@ pub struct CffFont {
     vmetrics: Option<VMetrics>,
     name: Name,
     info: Info,
+    pub cid: bool,
 }
 
 impl CffFont {
@@ -467,6 +468,7 @@ impl<'a> CffSlot<'a> {
                 weight: None,
             },
             sid_map,
+            cid: self.top_dict.contains_key(&Operator::ROS)
         })
     }
 }
