@@ -564,9 +564,10 @@ pub fn parse_name(data: &[u8]) -> Result<Name, FontError> {
                     _ => continue,
                 };
 
+                dbg!(platform_id, encoding_id);
                 match (platform_id, encoding_id) {
                     (0, _) => *field = String::from_utf8(encoded.into()).ok(),
-                    (3, 1) => *field = utf16_be(encoded).ok(),
+                    (3, 0) | (3, 1) => *field = utf16_be(encoded).ok(),
                     _ => {}
                 }
             }
