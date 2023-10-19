@@ -116,6 +116,16 @@ impl Font for TrueTypeFont {
             metrics
         })
     }
+    fn is_empty_glyph(&self, gid: GlyphId) -> bool {
+        if gid.0 > u16::max_value() as u32 {
+            return true;
+        }
+        match self.shapes.get(gid.0 as usize) {
+            None => true,
+            Some(Shape::Empty) => true,
+            _ => false
+        }
+    }
     fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
         match self.cmap {
             Some(ref cmap) => cmap.get_codepoint(codepoint).map(GlyphId),

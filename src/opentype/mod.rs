@@ -190,6 +190,9 @@ impl Font for OpenTypeFont {
             }
         })
     }
+    fn is_empty_glyph(&self, gid: GlyphId) -> bool {
+        self.outlines.get(gid.0 as usize).map(|o| o.len() == 0).unwrap_or(true)
+    }
 
     #[cfg(feature="svg")]
     fn svg_glyph(&self, gid: GlyphId) -> Option<&SvgGlyph> {

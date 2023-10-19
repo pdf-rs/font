@@ -67,6 +67,8 @@ pub trait Font: 'static {
     /// Note, that a *gid* is only meaningful within one font and cannot be transfered to another font.
     fn glyph(&self, gid: GlyphId) -> Option<Glyph>;
     
+    fn is_empty_glyph(&self, gid: GlyphId) -> bool;
+
     #[cfg(feature="svg")]
     fn svg_glyph(&self, gid: GlyphId) -> Option<&SvgGlyph> {
         None

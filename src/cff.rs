@@ -57,6 +57,10 @@ impl Font for CffFont {
     fn glyph(&self, id: GlyphId) -> Option<Glyph> {
         self.glyphs.get(id.0 as usize).cloned()
     }
+
+    fn is_empty_glyph(&self, gid: GlyphId) -> bool {
+        self.glyphs.get(gid.0 as usize).map(|g| g.path.len() == 0).unwrap_or(true)
+    }
     fn gid_for_codepoint(&self, codepoint: u32) -> Option<GlyphId> {
         match self.codepoint_map.get(codepoint as usize) {
             None | Some(&0) => None,
