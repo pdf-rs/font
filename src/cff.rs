@@ -435,8 +435,9 @@ impl<'a> CffSlot<'a> {
         debug!("cmap:");
         for (i, &gid) in cmap.iter().enumerate() {
             if gid != 0 {
-                let sid = sids[gid as usize - 1];
-                debug!("{} -> gid={}, sid={}, name={:?}", i, gid, sid, glyph_name(sid));
+                if let Some(&sid) = sids.get(gid as usize - 1) {
+                    debug!("{} -> gid={}, sid={}, name={:?}", i, gid, sid, glyph_name(sid));
+                }
             }
         }
         
