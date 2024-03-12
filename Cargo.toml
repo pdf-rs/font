@@ -8,6 +8,12 @@ edition = "2018"
 unstable = ["slotmap/unstable", "tuple/nightly"]
 svg = ["svg_dom", "inflate"]
 woff = ["brotli-decompressor", "inflate"]
+type1 = ["postscript"]
+type2 = []
+opentype = ["cff"]
+cff = ["type1", "type2"]
+postscript = []
+default = ["opentype"]
 
 [dependencies]
 pdf_encoding = "0.4"

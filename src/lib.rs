@@ -164,11 +164,18 @@ impl dyn Font + Sync + Send {
 mod macros;
 #[macro_use]
 mod error;
+
+#[cfg(feature="opentype")]
 mod truetype;
+#[cfg(feature="cff")]
 mod cff;
+#[cfg(feature="type1")]
 mod type1;
+#[cfg(feature="type2")]
 mod type2;
+#[cfg(feature="postscript")]
 mod postscript;
+#[cfg(feature="opentype")]
 pub mod opentype;
 mod parsers;
 mod eexec;
@@ -180,10 +187,14 @@ mod woff;
 mod svg;
 
 pub use error::FontError;
+#[cfg(feature="opentype")]
 pub use truetype::TrueTypeFont;
+#[cfg(feature="cff")]
 pub use cff::CffFont;
+#[cfg(feature="type1")]
 pub use type1::Type1Font;
-pub use opentype::{OpenTypeFont};
+#[cfg(feature="opentype")]
+pub use opentype::OpenTypeFont;
 
 #[cfg(feature="woff")]
 pub use woff::{parse_woff, parse_woff2};
@@ -482,10 +493,18 @@ pub fn parse(data: &[u8]) -> Result<Box<dyn Font + Send + Sync + 'static>, FontE
     let magic: &[u8; 4] = slice!(data, 0 .. 4).try_into().unwrap();
     info!("font magic: {:?} ({:?})", magic, String::from_utf8_lossy(&*magic));
     Ok(match magic {
+        #[cfg(feature="type1")]
         &[0x80, 1, _, _] => Box::new(t!(Type1Font::parse_pfb(data))) as _,
+        
+        #[cfg(feature="opentype")]
         b"OTTO" | [0,1,0,0] => Box::new(t!(OpenTypeFont::parse(data))) as _,
+        
         b"ttcf" | b"typ1" => error!("FontCollections not implemented"), // Box::new(TrueTypeFont::parse(data, 0)) as _,
+        
+        #[cfg(feature="opentype")]
         b"true" => Box::new(t!(TrueTypeFont::parse(data))) as _,
+        
+        #[cfg(feature="type1")]
         b"%!PS" => Box::new(t!(Type1Font::parse_postscript(data))) as _,
 
         #[cfg(feature="woff")]
@@ -493,9 +512,13 @@ pub fn parse(data: &[u8]) -> Result<Box<dyn Font + Send + Sync + 'static>, FontE
 
         #[cfg(feature="woff")]
         b"wOF2" => Box::new(t!(woff::parse_woff2(data))) as _,
-        
+
+        #[cfg(feature="cff")]
         &[1, _, _, _] => Box::new(t!(CffFont::parse(data, 0))) as _,
+        
+        #[cfg(feature="type1")]
         &[37, 33, _, _] => Box::new(t!(Type1Font::parse_pfa(data))) as _,
+
         magic => return Err(FontError::UnknownMagic(*magic))
     })
 }
@@ -512,6 +535,7 @@ pub fn font_info(data: &[u8]) -> Option<FontInfo> {
     let magic: &[u8; 4] = data[0 .. 4].try_into().ok()?;
     info!("font magic: {:?} ({:?})", magic, String::from_utf8_lossy(&*magic));
     match magic {
+        #[cfg(feature="opentype")]
         b"OTTO" | [0,1,0,0] => OpenTypeFont::info(data).ok(),
         _ => None
     }
