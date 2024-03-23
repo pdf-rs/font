@@ -13,6 +13,7 @@ type2 = []
 opentype = ["cff"]
 cff = ["type1", "type2"]
 postscript = []
+math = []
 default = ["opentype"]
 
 [dependencies]

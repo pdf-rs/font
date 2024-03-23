@@ -26,13 +26,18 @@ pub mod cmap;
 pub mod gpos;
 pub mod gsub;
 pub mod kern;
+
+#[cfg(feature="math")]
 pub mod math;
+
 pub mod gdef;
 pub mod base;
 pub mod os2;
 pub mod post;
 
+#[cfg(feature="math")]
 use math::{parse_math, MathHeader};
+
 use gpos::{parse_gpos, GPos};
 use gsub::{GSub, parse_gsub};
 use cmap::{CMap, parse_cmap};
@@ -49,6 +54,7 @@ pub struct OpenTypeFont {
     hmtx: Option<Hmtx>,
     bbox: Option<RectF>,
     pub gsub: Option<GSub>,
+    #[cfg(feature="math")]
     pub math: Option<MathHeader>,
     pub gdef: Option<GDef>,
     vmetrics: Option<VMetrics>,
@@ -119,7 +125,9 @@ impl OpenTypeFont {
             Some((cmap, encoding)) => (Some(cmap), Some(encoding)),
             None => (None, None)
         };
+        #[cfg(feature="math")]
         let math = t!(tables.get(b"MATH").map(parse_math).transpose());
+        
         let vmetrics = t!(tables.get(b"hhea").map(parse_hhea).transpose()).map(|v| v.into());
         let name = t!(tables.get(b"name").map(parse_name).transpose()).unwrap_or_default();
         let gdef = t!(tables.get(b"gdef").map(parse_gdef).transpose());
@@ -140,7 +148,10 @@ impl OpenTypeFont {
             hmtx,
             bbox,
             gsub,
+            
+            #[cfg(feature="math")]
             math,
+            
             gdef,
             vmetrics,
             encoding,
