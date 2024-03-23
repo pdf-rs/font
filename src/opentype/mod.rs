@@ -2,10 +2,11 @@
 
 use std::convert::TryInto;
 use std::collections::HashMap;
-use std::ops::{Deref};
+use std::ops::Deref;
 use crate::{Font, R, IResultExt, VMetrics, HMetrics, Glyph, GlyphId, Name, FontInfo, FontType, Info, FontError, ParseResult};
 use crate::truetype::{Shape, parse_shapes, get_outline};
-use crate::cff::{read_cff};
+#[cfg(feature="cff")]
+use crate::cff::read_cff;
 use pdf_encoding::Encoding;
 use crate::parsers::{*};
 use nom::{
@@ -15,9 +16,9 @@ use nom::{
     bytes::complete::take,
     sequence::tuple,
 };
-use pathfinder_content::outline::{Outline};
+use pathfinder_content::outline::Outline;
 use pathfinder_geometry::{vector::Vector2F, transform2d::Transform2F, rect::RectF};
-use itertools::{Either};
+use itertools::Either;
 
 #[cfg(feature="svg")]
 use crate::svg::{SvgTable, parse_svg, SvgGlyph};
@@ -92,11 +93,16 @@ impl OpenTypeFont {
         let outlines: Vec<_>;
         let font_matrix;
         let bbox;
+        
         if let Some(cff) = tables.get(b"CFF ") {
+            #[cfg(feature="cff")]{
             let slot = t!(read_cff(cff)?.slot(0));
             bbox = slot.bbox();
             outlines = t!(slot.outlines()?.map(|r| r.map(|(outline, _, _)| outline)).collect::<Result<_, _>>());
             font_matrix = slot.font_matrix();
+            }
+            #[cfg(not(feature="cff"))]
+            return Err(FontError::TypeError("CFF is not enabled"));
         } else {
             let head = t!(parse_head(expect!(tables.get(b"head"), "no head")));
             bbox = Some(head.bbox());
