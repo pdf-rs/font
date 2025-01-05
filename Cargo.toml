@@ -2,7 +2,7 @@
 name = "font"
 version = "0.1.0"
 authors = ["Sebastian Köln <s3bk@protonmail.org>"]
-edition = "2018"
+edition = "2021"
 
 [features]
 unstable = ["slotmap/unstable", "tuple/nightly"]
@@ -33,7 +33,6 @@ brotli-decompressor = { version = "2.3", optional = true }
 inflate = { version = "0.4.5", optional = true }
 svg_dom = { git = "https://github.com/s3bk/svg", optional=true }
 istring = "0.3.4"
-vello_encoding = "*"
 
 [dev-dependencies]
 svg_dom = { git = "https://github.com/s3bk/svg" }
@@ -44,10 +43,10 @@ walkdir = "2.3"
 env_logger = { version = "*" }
 memmap = "*"
 
-[patch."https://github.com/s3bk/svg"]
-svg_dom = { path = "../svg/dom" }
-svg_draw = { path = "../svg/draw" }
-svg_text = { path = "../svg/text" }
+# [patch."https://github.com/s3bk/svg"]
+# svg_dom = { path = "../svg/dom" }
+# svg_draw = { path = "../svg/draw" }
+# svg_text = { path = "../svg/text" }
 
 [patch."https://github.com/pdf-rs/font"]
 font = { path = "." }

@@ -162,36 +162,6 @@ pub trait Encoder {
     fn encode_shape<'f, O, E>(&mut self, f: impl for<'a> FnMut(&mut Self::Pen<'a>) -> Result<O, E> + 'f) -> Result<(O, Self::GlyphRef), E>;
 }
 
-
-
-mod vello_impl {
-    use crate::{Encoder, Pen};
-    use vello_encoding::{Encoding, PathEncoder};
-    use pathfinder_geometry::vector::Vector2F;
-
-    impl<'a> Pen for PathEncoder<'a> {
-        fn move_to(&mut self, p: Vector2F) {
-            self.move_to(p.x(), p.y())
-        }
-    
-        fn line_to(&mut self, p: Vector2F) {
-            self.line_to(p.x(), p.y())
-        }
-    
-        fn quad_to(&mut self, p1: Vector2F, p2: Vector2F) {
-            self.quad_to(p1.x(), p1.y(), p2.x(), p2.y())
-        }
-    
-        fn cubic_to(&mut self, p1: Vector2F, p2: Vector2F, p3: Vector2F) {
-            self.cubic_to(p1.x(), p1.y(), p2.x(), p2.y(), p3.x(), p3.y())
-        }
-    
-        fn close(&mut self) {
-            self.close()
-        }
-    }
-}
-
 pub mod pathfinder_impl {
     use pathfinder_content::outline::{Outline, Contour};
     use pathfinder_geometry::vector::Vector2F;
