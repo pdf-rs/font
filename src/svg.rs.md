@@ -1,5 +1,11 @@
 # `src/svg.rs` — SVG table (colour/outline glyphs as SVG documents)
 
+## Fixed
+* **F39 (2026-11-02):** a gzip-compressed document (magic `1F 8B`) is decompressed before it
+  reaches `svg_dom`: the header is skipped (FEXTRA/FNAME/FCOMMENT/FHCRC included), the deflate
+  body inflated with `inflate::inflate_bytes`, the CRC32/ISIZE trailer dropped. Anything else is
+  passed through unchanged (`document_data`). Tests: `c26`, `c26b` in `tests/spec_cases.rs`.
+
 ## What it does
 Parses the `SVG ` table header (`version`, `svgDocumentListOffset`, reserved), then the document
 list: `(startGlyphID, endGlyphID, svgDocOffset, svgDocLength)` records. Each document is handed
@@ -7,9 +13,9 @@ to `svg_dom::Svg::from_data`, and for every gid in the range the element `glyph<
 and stored, so `Font::svg_glyph(gid)` can return `(document, element)`.
 
 ## Differences from the specifications
-* **F39 (OT §SVG, "SVG Document List"):** documents may be **gzip-compressed** (identified by the
-  0x1F 0x8B magic); `Svg::from_data` is given the raw bytes, so a gzipped document fails and (via
-  `error!`) aborts the whole table — and with it the font.
+* ~~**F39 (OT §SVG, "SVG Document List"):**~~ documents may be gzip-compressed — handled (see
+  "Fixed" above). The decompressed size is not capped, so a small gzip stream that expands to
+  gigabytes still allocates that much before `svg_dom` can reject it.
 * `version` is read and not checked (must be 0).
 * The `0x0000FFFF` "special" glyph ID reservation and the spec's rule that a document's range may
   be empty (`startGlyphID > endGlyphID`) are not handled: the loop `for gid in start_gid ..=

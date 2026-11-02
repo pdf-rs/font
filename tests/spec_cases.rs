@@ -886,3 +886,72 @@ fn c25b_hhea_metrics_without_use_typo_metrics() {
         (800.0, -200.0, 0.0)
     );
 }
+
+// ---------------------------- F39: gzip-compressed SVG documents ----------------------------
+
+/// `SVG ` (OT §SVG): version, document list offset, reserved, then the document list
+/// (one entry per document, offsets relative to the list start).
+#[cfg(feature = "svg")]
+pub fn svg_table(documents: &[&[u8]]) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_u16(&mut t, 0);  // version
+    push_u32(&mut t, 10); // svgDocumentListOffset
+    push_u32(&mut t, 0);  // reserved
+    push_u16(&mut t, documents.len() as u16);
+    let mut offset = (2 + 12 * documents.len()) as u32;
+    for document in documents {
+        push_u16(&mut t, 65);   // startGlyphID
+        push_u16(&mut t, 65);   // endGlyphID
+        push_u32(&mut t, offset);
+        push_u32(&mut t, document.len() as u32);
+        offset += document.len() as u32;
+    }
+    for document in documents {
+        t.extend_from_slice(document);
+    }
+    t
+}
+
+/// A gzip container around `data`, using a single *stored* (uncompressed) deflate block so
+/// the test needs no compressor. The CRC32/ISIZE trailer is not checked by the reader.
+#[cfg(feature = "svg")]
+pub fn gzip_stored(data: &[u8]) -> Vec<u8> {
+    assert!(data.len() <= u16::MAX as usize);
+    let mut g = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3]; // magic, CM=deflate, no flags
+    g.push(0x01); // BFINAL=1, BTYPE=00 (stored)
+    g.extend_from_slice(&(data.len() as u16).to_le_bytes());
+    g.extend_from_slice(&(!(data.len() as u16)).to_le_bytes());
+    g.extend_from_slice(data);
+    g.extend_from_slice(&[0; 8]); // CRC32, ISIZE
+    g
+}
+
+#[cfg(feature = "svg")]
+fn font_with_svg(document: &[u8]) -> Box<dyn Font + Send + Sync + 'static> {
+    let (glyf, loca) = glyf_and_loca(&[Vec::new(), Vec::new()]);
+    let mut tables = base_tables(2);
+    tables.push((*b"loca", loca));
+    tables.push((*b"glyf", glyf));
+    tables.push((*b"SVG ", svg_table(&[document])));
+    font::parse(&build_font(tables)).expect("font with an SVG table parses")
+}
+
+#[cfg(feature = "svg")]
+const SVG_DOC: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg"><g id="glyph65"><rect width="10" height="10"/></g></svg>"#;
+
+#[cfg(feature = "svg")]
+#[test]
+fn c26_gzip_svg_documents_are_decompressed() {
+    // F39: OT §SVG allows a gzip-compressed document; the raw stream went to the SVG parser
+    // and every gzip font failed to load.
+    let font = font_with_svg(&gzip_stored(SVG_DOC));
+    assert!(font.svg_glyph(GlyphId(65)).is_some(), "the document's glyph65 is reachable");
+}
+
+#[cfg(feature = "svg")]
+#[test]
+fn c26b_plain_svg_documents_still_parse() {
+    // Negative control: an uncompressed document is passed through untouched.
+    let font = font_with_svg(SVG_DOC);
+    assert!(font.svg_glyph(GlyphId(65)).is_some());
+}
