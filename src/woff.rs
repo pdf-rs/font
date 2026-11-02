@@ -121,7 +121,7 @@ pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
         let hhea = parse_hhea(tables.get(b"hhea").expect("no hhea"))?;
         let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp"))?;
         match entry_tables[b"hmtx"].flags {
-            0 => parse_hmtx(&hmtx_data, &hhea, &maxp).get(),
+            0 => parse_hmtx(&hmtx_data, &hhea, &maxp),
             1 => parse_hmtx_woff2_format1(&hmtx_data, &head, &hhea, &maxp).get(),
             f => error!("invalid flag for hmtx: {}", f)
         }

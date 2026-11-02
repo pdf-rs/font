@@ -184,12 +184,12 @@ impl OpenTypeFont {
             parse_shapes(&loca, data)
         }).transpose());
         
-        let hmtx = t!(tables.get(b"hmtx").map(|data| parse_hmtx(data, &hhea, &maxp).get()).transpose());
+        let hmtx = t!(tables.get(b"hmtx").map(|data| parse_hmtx(data, &hhea, &maxp)).transpose());
         
         OpenTypeFont::from_hmtx_glyf_and_tables(hmtx, glyf, tables)
     }
     pub fn glyph_metrics(&self, gid: u16) -> Option<HMetrics> {
-        self.hmtx.as_ref().map(|hmtx| hmtx.metrics_for_gid(gid))
+        self.hmtx.as_ref().and_then(|hmtx| hmtx.metrics_for_gid(gid))
     }
 }
 impl Font for OpenTypeFont {
@@ -203,7 +203,7 @@ impl Font for OpenTypeFont {
         self.outlines.get(gid.0 as usize).map(|outline| {
             Glyph {
                 path: outline.clone(),
-                metrics: self.hmtx.as_ref().map(|m| m.metrics_for_gid(gid.0 as u16)).unwrap_or_default()
+                metrics: self.hmtx.as_ref().and_then(|m| m.metrics_for_gid(gid.0 as u16)).unwrap_or_default()
             }
         })
     }
@@ -337,6 +337,11 @@ pub fn parse_head(i: &[u8]) -> Result<Head, FontError> {
     let (i, index_to_loc_format) = be_i16(i)?;
     let (i, glyph_data_format) = be_u16(i)?;
     require_eq!(glyph_data_format, 0);
+    // OT §head: `unitsPerEm` lies in 16..=16384. Zero would turn every coordinate into
+    // `inf` through `font_matrix()`.
+    require!(units_per_em >= 16 && units_per_em <= 16384);
+    // OT §head: 0 = short `loca` offsets (u16/2), 1 = long (u32).
+    require!(index_to_loc_format == 0 || index_to_loc_format == 1);
     
     Ok(Head {
         units_per_em,
@@ -349,16 +354,23 @@ pub struct Maxp {
     pub num_glyphs: u16
 }
 pub fn parse_maxp(i: &[u8]) -> Result<Maxp, FontError> {
-    let (i, _version) = be_i32(i)?;
+    let (i, version) = be_i32(i)?;
+    // OT §maxp: 0x00005000 (version 0.5) or 0x00010000 (1.0); nothing else exists.
+    require!(version == 0x0000_5000 || version == 0x0001_0000);
     let (i, num_glyphs) = be_u16(i)?;
+    // A font without glyphs cannot be indexed; `loca` has `numGlyphs + 1` entries.
+    require!(num_glyphs >= 1);
     Ok(Maxp { num_glyphs })
 }
 pub fn parse_loca<'a>(i: &'a [u8], head: &Head, maxp: &Maxp) -> Result<Vec<u32>, FontError> {
-    match head.index_to_loc_format {
+    let loca = match head.index_to_loc_format {
         0 => count(map(be_u16, |n| 2 * n as u32), maxp.num_glyphs as usize + 1)(i).get(),
         1 => count(be_u32, maxp.num_glyphs as usize + 1)(i).get(),
         _ => error!("invalid index_to_loc_format")
-    }
+    }?;
+    // OT §loca: the offsets are monotonically non-decreasing.
+    require!(loca.windows(2).all(|w| w[0] <= w[1]));
+    Ok(loca)
 }
 
 pub struct Hhea {
@@ -408,33 +420,50 @@ impl Into<VMetrics> for Hhea {
 pub struct Hmtx {
     metrics: Vec<(u16, i16)>, // (advance, lsb)
     lsbs: Vec<i16>,
-    last_advance: u16
+    last_advance: u16,
+    num_glyphs: u16
 }
 impl Hmtx {
-    pub fn metrics_for_gid(&self, gid: u16) -> HMetrics {
-        let (advance, lsb) = self.metrics.get(gid as usize).cloned().unwrap_or_else(|| {
-            (self.last_advance, self.lsbs.get(gid as usize - self.metrics.len()).cloned().unwrap_or(0))
-        });
-        HMetrics {
+    pub fn metrics_for_gid(&self, gid: u16) -> Option<HMetrics> {
+        // OT §hmtx: there is no metric for a glyph id at or beyond `numGlyphs`.
+        if gid >= self.num_glyphs {
+            return None;
+        }
+        let i = gid as usize;
+        let (advance, lsb) = match self.metrics.get(i) {
+            Some(&metric) => metric,
+            None => (self.last_advance, *self.lsbs.get(i - self.metrics.len())?)
+        };
+        Some(HMetrics {
             advance: advance as f32,
             lsb: lsb as f32,
-        }
+        })
     }
 }
-pub fn parse_hmtx<'a>(i: &'a [u8], hhea: &Hhea, _maxp: &Maxp) -> R<'a, Hmtx> {
+pub fn parse_hmtx(i: &[u8], hhea: &Hhea, maxp: &Maxp) -> Result<Hmtx, FontError> {
     let num_metrics = hhea.number_of_hmetrics;
+    // OT §hmtx: `numberOfHMetrics` is the number of glyphs with a full long metric and
+    // must lie in `1 ..= numGlyphs` (hhea lists the same value).
+    if num_metrics == 0 || num_metrics > maxp.num_glyphs {
+        return Err(FontError::Other(format!(
+            "hmtx: numberOfHMetrics {} outside 1..={}", num_metrics, maxp.num_glyphs)));
+    }
+    let n_metrics = num_metrics as usize;
     let (i, metrics) = count(
         tuple((be_u16, be_i16)),
-        num_metrics as usize
+        n_metrics
     )(i)?;
-    let (i, lsbs) = many0(be_i16)(i)?;
+    // Exactly `numGlyphs - numberOfHMetrics` left side bearings follow.
+    let n_lsbs = (maxp.num_glyphs - num_metrics) as usize;
+    let (i, lsbs) = count(be_i16, n_lsbs)(i)?;
     let last_advance = metrics.last().map(|&(advance, _)| advance).unwrap_or(0);
     
-    Ok((i, Hmtx {
+    Ok(Hmtx {
         metrics,
         lsbs,
-        last_advance
-    }))
+        last_advance,
+        num_glyphs: maxp.num_glyphs
+    })
 }
 pub fn parse_hmtx_woff2_format1<'a>(i: &'a [u8], head: &Head, hhea: &Hhea, maxp: &Maxp) -> R<'a, Hmtx> {
     let num_metrics = hhea.number_of_hmetrics as usize;
@@ -461,7 +490,8 @@ pub fn parse_hmtx_woff2_format1<'a>(i: &'a [u8], head: &Head, hhea: &Hhea, maxp:
     Ok((i, Hmtx {
         metrics,
         lsbs,
-        last_advance
+        last_advance,
+        num_glyphs: maxp.num_glyphs
     }))
 }
 

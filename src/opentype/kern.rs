@@ -67,10 +67,17 @@ pub fn parse_kern_apple(i: &[u8]) -> Result<KernTable, FontError> {
         let (i, format) = be_u8(i)?;
         let (i, tuple_index) = be_u16(i)?;
 
-        let (new_input, data) = take(length)(i)?;
+        let (new_input, data) = take(length as usize)(i)?;
+        // Apple §kern coverage: bit 7 (0x80) selects vertical; format 0 only carries
+        // horizontal pairs here.
+        if coverage & 0x80 != 0 {
+            warn!("kern: skipping vertical Apple subtable format={}", format);
+            input = new_input;
+            continue;
+        }
         match format {
-            0 => apple_kern_0(i, &mut table)?,
-            _ => error!("unimplemented apple kern format {}", format),
+            0 => apple_kern_0(data, &mut table)?,
+            f => warn!("kern: Apple subtable format {} is not implemented", f),
         }
         input = new_input;
     }
@@ -102,11 +109,22 @@ pub fn parse_kern_ms(i: &[u8]) -> Result<KernTable, FontError> {
     for _ in 0 .. n_tables {
         let (_version, length, format, coverage) = parse(&mut i, tuple((be_u16, be_u16, be_u8, be_u8)))?;
         debug!("format={}, coverage={:02x}", format, coverage);
+        // OT/MS `kern`: `length` covers the whole subtable including this 6-byte header.
+        require!(length >= 6);
         let data = parse(&mut i, take(length as usize - 6))?;
-        match (format, coverage) {
-            (0, 0x01) => parse_kern_format0(data, &mut table)?,
-            (2, 0x01) => parse_kern_format2(data, &mut table)?,
-            (f, _) => error!("invalid kern subtable format {}", f)
+        // Coverage is a bit field, not an enumeration: bit 0 horizontal, bit 1 minimum,
+        // bit 2 cross-stream, bit 3 override. Minimum and override do not change the
+        // interpretation of the pair data, so only vertical/cross-stream is unusable here.
+        let horizontal = coverage & 0x01 != 0;
+        let cross_stream = coverage & 0x04 != 0;
+        if !horizontal || cross_stream {
+            warn!("kern: skipping subtable format={} coverage={:02x} (vertical/cross-stream)", format, coverage);
+            continue;
+        }
+        match format {
+            0 => parse_kern_format0(data, &mut table)?,
+            2 => parse_kern_format2(data, &mut table)?,
+            f => warn!("kern: subtable format {} is not implemented", f),
         }
     }
     Ok(table)

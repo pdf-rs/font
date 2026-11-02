@@ -36,6 +36,7 @@ pub struct TrueTypeFont {
     pub cmap: Option<CMap>,
     encoding: Option<Encoding>,
     hmtx: Hmtx,
+    num_glyphs: u32,
     units_per_em: u16,
     bbox: RectF,
     kern: KernTable,
@@ -53,15 +54,22 @@ impl TrueTypeFont {
         let head = parse_head(expect!(tables.get(b"head"), "no head"))?;
         let maxp = parse_maxp(expect!(tables.get(b"maxp"), "no maxp"))?;
         let loca = parse_loca(expect!(tables.get(b"loca"), "no loca"), &head, &maxp)?;
+        let glyf = expect!(tables.get(b"glyf"), "no glyf");
         let hhea = parse_hhea(expect!(tables.get(b"hhea"), "no hhea"))?;
-        let hmtx = parse_hmtx(expect!(tables.get(b"hmtx"), "no hmtx"), &hhea, &maxp).get()?;
+        let hmtx = parse_hmtx(expect!(tables.get(b"hmtx"), "no hmtx"), &hhea, &maxp)?;
         
-        let shapes = parse_shapes(&loca, expect!(tables.get(b"glyf"), "no glyf"))?;
+        let shapes = parse_shapes(&loca, glyf)?;
         
         TrueTypeFont::from_shapes_and_metrics(tables, shapes, hmtx)
     }
     pub fn from_shapes_and_metrics(tables: Tables<impl Deref<Target=[u8]>>, shapes: Vec<Shape>, hmtx: Hmtx) -> Result<TrueTypeFont, FontError> {
         let head = parse_head(expect!(tables.get(b"head"), "no head"))?;
+        // OT §maxp: this is the authoritative glyph count; `loca` and `post` have to agree
+        // with it, and it must not silently differ from what the shapes contain.
+        let maxp = parse_maxp(expect!(tables.get(b"maxp"), "no maxp"))?;
+        if shapes.len() != maxp.num_glyphs as usize {
+            warn!("glyf/loca describe {} glyphs, maxp says {}", shapes.len(), maxp.num_glyphs);
+        }
         let (cmap, encoding) = match tables.get(b"cmap").map(|data| parse_cmap(data)).transpose()? {
             Some((cmap, encoding)) => (Some(cmap), Some(encoding)),
             None => (None, None)
@@ -80,6 +88,7 @@ impl TrueTypeFont {
             cmap,
             encoding,
             hmtx,
+            num_glyphs: maxp.num_glyphs as u32,
             units_per_em: head.units_per_em,
             bbox: head.bbox(),
             kern: tables.get(b"kern").map(|data| parse_kern(data)).transpose()?.unwrap_or_default(),
@@ -96,7 +105,9 @@ impl TrueTypeFont {
 }
 impl Font for TrueTypeFont {
     fn num_glyphs(&self) -> u32 {
-        self.shapes.len() as u32
+        // OT §maxp, not `shapes.len()`: both `OpenTypeFont` and `TrueTypeFont` must answer
+        // the same number for the same font.
+        self.num_glyphs
     }
     fn font_matrix(&self) -> Transform2F {
         let scale = 1.0 / self.units_per_em as f32;
@@ -109,7 +120,7 @@ impl Font for TrueTypeFont {
         
         debug!("get gid {:?}", id);
         let path = self.get_path(id.0)?;
-        let metrics = self.hmtx.metrics_for_gid(id.0 as u16);
+        let metrics = self.hmtx.metrics_for_gid(id.0 as u16)?;
         
         Some(Glyph {
             path,
@@ -175,11 +186,25 @@ fn fraction_i16(i: &[u8]) -> R<f32> {
 }
 
 pub fn parse_shapes(loca: &[u32], data: &[u8]) -> Result<Vec<Shape>, FontError> {
+    // OT §loca: the last offset is the length of `glyf`; anything larger points outside it.
+    require!(loca.last().map_or(true, |&end| end as usize <= data.len()));
     let mut shapes = Vec::with_capacity(loca.len() - 1);
     for (i, (start, end)) in loca.iter().cloned().tuple_windows().enumerate() {
-        let slice = expect!(data.get(start as usize .. end as usize), "out of bounds");
-        //debug!("gid {} : data[{} .. {}]", i, start, end);
-        let shape = parse_glyph_shape(slice)?;
+        // OT §glyf: one corrupt glyph record must not cost the whole font. `parse_glyph_shape`
+        // is allowed to read past its slice, so a bad record is just an empty glyph here.
+        let shape = match data.get(start as usize .. end as usize) {
+            Some(slice) => match parse_glyph_shape(slice) {
+                Ok(shape) => shape,
+                Err(e) => {
+                    warn!("glyph {}: {:?} — treated as an empty glyph", i, e);
+                    Shape::Empty
+                }
+            },
+            None => {
+                warn!("glyph {}: loca range {}..{} outside glyf — treated as an empty glyph", i, start, end);
+                Shape::Empty
+            }
+        };
         shapes.push(shape);
     }
     Ok(shapes)

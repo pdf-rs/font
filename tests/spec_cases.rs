@@ -108,12 +108,14 @@ pub fn build_font(tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
 }
 
 /// The tables every test font must carry to get through `OpenTypeFont::from_tables`.
+/// `hmtx` carries one full metric per glyph (`numberOfHMetrics == numGlyphs`), which is
+/// the only layout that is valid without trailing left side bearings.
 pub fn base_tables(num_glyphs: u16) -> Vec<([u8; 4], Vec<u8>)> {
     vec![
         (*b"head", head_table()),
-        (*b"hhea", hhea_table(1)),
+        (*b"hhea", hhea_table(num_glyphs)),
         (*b"maxp", maxp_table(num_glyphs)),
-        (*b"hmtx", hmtx_table(1)),
+        (*b"hmtx", hmtx_table(num_glyphs)),
     ]
 }
 
@@ -448,4 +450,154 @@ fn c12b_post_version_3_has_no_names() {
     let table = post_table(0x0003_0000);
     let post = font::opentype::post::parse_post(&table).expect("post parses");
     assert!(post.names.is_empty());
+}
+
+/// `kern` version 0 (OT/MS §kern) with one subtable; `data` is the body after the 6-byte header.
+pub fn kern_table_ms(format: u8, coverage: u8, data: &[u8]) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_u16(&mut t, 0);                        // version
+    push_u16(&mut t, 1);                        // nTables
+    push_u16(&mut t, 0);                        // subtable version
+    push_u16(&mut t, (6 + data.len()) as u16);  // length, header included
+    t.push(format);
+    t.push(coverage);
+    t.extend_from_slice(data);
+    t
+}
+
+/// Format 0 body: `n_pairs`, the (unused) search fields, then `(left, right, value)`.
+pub fn kern_pairs(pairs: &[(u16, u16, i16)]) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_u16(&mut t, pairs.len() as u16);
+    push_u16(&mut t, 0); // searchRange
+    push_u16(&mut t, 0); // entrySelector
+    push_u16(&mut t, 0); // rangeShift
+    for &(left, right, value) in pairs {
+        push_u16(&mut t, left);
+        push_u16(&mut t, right);
+        push_i16(&mut t, value);
+    }
+    t
+}
+
+/// `loca` with `indexToLocFormat = 0` (OT §loca): every offset is stored halved.
+pub fn loca_table_short(offsets: &[u32]) -> Vec<u8> {
+    let mut t = Vec::new();
+    for &off in offsets {
+        assert_eq!(off % 2, 0, "short loca stores offsets halved");
+        push_u16(&mut t, (off / 2) as u16);
+    }
+    t
+}
+
+#[test]
+fn c13_hmtx_rejects_zero_number_of_hmetrics() {
+    // F30: OT §hmtx requires `1 <= numberOfHMetrics <= numGlyphs`. With 0 the crate used to
+    // build an empty metric list and answer every glyph with advance 0.
+    let mut tables = base_tables(2);
+    tables[1].1 = hhea_table(0);
+    let err = OpenTypeFont::parse(&build_font(tables));
+    assert!(err.is_err(), "numberOfHMetrics = 0 must be rejected");
+}
+
+#[test]
+fn c13b_hmtx_rejects_missing_trailing_lsbs() {
+    // F30: `numGlyphs - numberOfHMetrics` left side bearings must be there; `many0` used to
+    // accept a short table and fill in 0.
+    let mut tables = base_tables(3);
+    tables[1].1 = hhea_table(2);
+    tables[3].1 = hmtx_table(2);
+    let err = OpenTypeFont::parse(&build_font(tables));
+    assert!(err.is_err(), "a short left-side-bearing array must be rejected");
+}
+
+#[test]
+fn c13c_hmtx_has_no_metric_for_gid_at_or_beyond_num_glyphs() {
+    // F30: `metrics_for_gid` used to invent (last_advance, 0) for any gid.
+    let tables = base_tables(2);
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("font parses");
+    assert!(font.glyph_metrics(2).is_none());
+    assert_eq!(font.glyph_metrics(1).map(|m| m.advance), Some(500.0));
+}
+
+#[test]
+fn c14_head_rejects_units_per_em_zero() {
+    // F31: OT §head allows 16..=16384; 0 turned `font_matrix()` into `1/0 = inf`.
+    let mut head = head_table();
+    head[18] = 0;
+    head[19] = 0;
+    let mut tables = base_tables(2);
+    tables[0].1 = head;
+    assert!(OpenTypeFont::parse(&build_font(tables)).is_err());
+}
+
+#[test]
+fn c14b_maxp_rejects_unknown_version() {
+    // F31: OT §maxp has exactly 0x00005000 and 0x00010000.
+    let mut maxp = maxp_table(2);
+    maxp[1] = 2; // 0x00020000
+    let mut tables = base_tables(2);
+    tables[2].1 = maxp;
+    assert!(OpenTypeFont::parse(&build_font(tables)).is_err());
+}
+
+#[test]
+fn c15_kern_horizontal_subtable_may_also_be_minimum() {
+    // F32: coverage is a bit field. 0x03 = horizontal + minimum, which is legal and still
+    // applies; the crate required exactly 0x01 and failed the whole font.
+    let mut tables = base_tables(2);
+    tables.push((*b"kern", kern_table_ms(0, 0x03, &kern_pairs(&[(0, 1, -50)]))));
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("kern coverage 0x03 must load");
+    assert_eq!(font.kerning(GlyphId(0), GlyphId(1)), -50.0);
+}
+
+#[test]
+fn c15b_vertical_kern_subtable_is_skipped_not_fatal() {
+    // F32: coverage bit 0 clear means vertical; this crate has no vertical kerning, so the
+    // subtable is skipped. It must not take the font down.
+    let mut tables = base_tables(2);
+    tables.push((*b"kern", kern_table_ms(0, 0x00, &kern_pairs(&[(0, 1, -50)]))));
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("vertical kern must load");
+    assert_eq!(font.kerning(GlyphId(0), GlyphId(1)), 0.0);
+}
+
+#[test]
+fn c16_one_corrupt_glyph_does_not_fail_the_font() {
+    // F31: a bad `glyf` record made `parse_shapes` return `Err` for the whole font; OT §glyf
+    // treats a glyph without contours as empty, and one broken glyph is just one empty glyph.
+    let mut glyf = Vec::new();
+    push_i16(&mut glyf, -5);        // numberOfContours: not a valid value
+    push_i16(&mut glyf, 0);         // xMin
+    push_i16(&mut glyf, 0);         // yMin
+    push_i16(&mut glyf, 100);       // xMax
+    push_i16(&mut glyf, 100);       // yMax
+    let end = glyf.len() as u32;
+    let loca = loca_table_short(&[0, 0, end]);
+    let mut tables = base_tables(2);
+    tables.push((*b"loca", loca));
+    tables.push((*b"glyf", glyf));
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("one bad glyph must not fail the font");
+    assert_eq!(font.num_glyphs(), 2);
+    assert!(font.is_empty_glyph(GlyphId(1)));
+}
+
+#[test]
+fn c16b_loca_must_be_monotonic() {
+    // F31: OT §loca offsets are non-decreasing; a decreasing pair used to fail deep inside
+    // `parse_shapes` with an out-of-bounds message.
+    let mut tables = base_tables(2);
+    tables.push((*b"loca", loca_table_short(&[0, 10, 4])));
+    let mut glyf = vec![0u8; 10];
+    glyf[1] = 0; // shape data is irrelevant, the offsets are wrong
+    tables.push((*b"glyf", glyf));
+    assert!(OpenTypeFont::parse(&build_font(tables)).is_err());
+}
+
+#[test]
+fn c16c_loca_may_not_point_past_glyf() {
+    // F31: the last offset is the length of `glyf`.
+    let mut tables = base_tables(2);
+    tables.push((*b"loca", loca_table_short(&[0, 0, 100])));
+    tables.push((*b"glyf", vec![0u8; 10]));
+    assert!(OpenTypeFont::parse(&build_font(tables)).is_err());
 }

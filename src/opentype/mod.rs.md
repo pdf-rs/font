@@ -1,5 +1,13 @@
 # `src/opentype/mod.rs` — table directory and the sfnt tables shared by glyf/CFF
 
+## Fixed
+* **F30/F31 (2026-11-02):** `parse_hmtx` requires `1 <= numberOfHMetrics <= numGlyphs` and
+  reads exactly `numGlyphs - numberOfHMetrics` left side bearings (was `many0`);
+  `Hmtx::metrics_for_gid` returns `None` at or beyond `numGlyphs`; `parse_head` checks
+  `unitsPerEm ∈ 16..=16384` and `indexToLocFormat ∈ {0,1}`; `parse_maxp` accepts only the
+  versions 0.5/1.0 and requires at least one glyph; `parse_loca` requires non-decreasing
+  offsets. Tests: `c13`, `c13b`, `c13c`, `c14`, `c14b`, `c16b`.
+
 ## What it does
 `parse_tables` reads the sfnt directory into a `HashMap<[u8;4], T>`; the rest of the file is the
 "base" table set: `Head`, `Maxp`, `Hhea`, `Hmtx`, `parse_loca`, `parse_name`, `parse_vhea`, plus
