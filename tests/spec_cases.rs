@@ -4,7 +4,7 @@
 //! Each case builds the smallest sfnt that still reaches the code under test, so a failure names
 //! exactly one finding. Run everything: `cargo test`; one group: `cargo test c01`.
 
-use font::opentype::{gdef::{GDef, MarkClass}, OpenTypeFont};
+use font::opentype::{cmap::parse_cmap, gdef::{GDef, MarkClass}, OpenTypeFont};
 use font::{Font, GlyphId};
 
 // ---------------------------------------------------------------------------------------------
@@ -311,4 +311,68 @@ fn c05_pair_pos_format_2_class_kerning() {
     let data = build_font(tables);
     assert_eq!(kerning_of(&data, 1, 2), -40.0);
     assert_eq!(kerning_of(&data, 1, 3), 0.0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// F13 — CMap::codepoints(): the last range, the merge loop
+
+/// A `cmap` (§cmap) with a single Unicode (platform 3, encoding 1) format 4 subtable.
+/// `segments` are `(first_code, last_code, first_glyph)` with consecutive glyph ids.
+pub fn cmap_format4(segments: &[(u16, u16, u16)]) -> Vec<u8> {
+    let seg_count = segments.len() as u16 + 1; // + the 0xFFFF terminator
+    let mut sub = Vec::new();
+    push_u16(&mut sub, 4);              // format
+    let len_pos = sub.len();
+    push_u16(&mut sub, 0);              // length, patched below
+    push_u16(&mut sub, 0);              // language
+    push_u16(&mut sub, seg_count * 2);  // segCountX2
+    push_u16(&mut sub, 4);              // searchRange
+    push_u16(&mut sub, 0);              // entrySelector
+    push_u16(&mut sub, 0);              // rangeShift (the crate recomputes nothing)
+    for &(_, last, _) in segments { push_u16(&mut sub, last); }
+    push_u16(&mut sub, 0xFFFF);         // endCode terminator
+    push_u16(&mut sub, 0);              // reservedPad
+    for &(first, _, _) in segments { push_u16(&mut sub, first); }
+    push_u16(&mut sub, 0xFFFF);         // startCode terminator
+    for &(first, _, start_gid) in segments { push_u16(&mut sub, start_gid.wrapping_sub(first)); }
+    push_u16(&mut sub, 0);              // idDelta terminator
+    for _ in 0 .. seg_count { push_u16(&mut sub, 0); } // idRangeOffset[]: use idDelta
+    let len = sub.len() as u16;
+    sub[len_pos .. len_pos + 2].copy_from_slice(&be16(len));
+
+    let mut t = Vec::new();
+    push_u16(&mut t, 0);        // version
+    push_u16(&mut t, 1);        // numTables
+    push_u16(&mut t, 3);        // platformID
+    push_u16(&mut t, 1);        // encodingID
+    push_u32(&mut t, 12);       // subtable offset
+    t.extend_from_slice(&sub);
+    t
+}
+
+fn codepoints_of(data: &[u8], max_ranges: usize) -> Vec<std::ops::RangeInclusive<u32>> {
+    parse_cmap(data).expect("cmap parses").0.codepoints(max_ranges)
+}
+
+#[test]
+fn c10_codepoints_keeps_the_last_range() {
+    // F13: the range being built at the end of the walk is never pushed, so a contiguous
+    // cmap yields an empty list.
+    let got = codepoints_of(&cmap_format4(&[(0x41, 0x43, 1)]), 10);
+    assert_eq!(got, vec![0x41 ..= 0x43]);
+}
+
+#[test]
+fn c10b_codepoints_merges_ranges_down_to_max_ranges() {
+    // F13: the simplify loop dropped `prev` and computed gaps as `b.start - a.end`.
+    let data = cmap_format4(&[(0x41, 0x42, 1), (0x61, 0x62, 3)]);
+    assert_eq!(codepoints_of(&data, 2), vec![0x41 ..= 0x42, 0x61 ..= 0x62]);
+    assert_eq!(codepoints_of(&data, 1), vec![0x41 ..= 0x62]);
+}
+
+#[test]
+fn c10c_codepoints_with_zero_max_ranges_does_not_panic() {
+    // F13: `tuple_windows().min().unwrap()` panicked when nothing was left to merge.
+    let got = codepoints_of(&cmap_format4(&[(0x41, 0x43, 1)]), 0);
+    assert_eq!(got, vec![0x41 ..= 0x43]);
 }

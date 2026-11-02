@@ -25,44 +25,31 @@ impl CMap {
         self.single_codepoint.iter().map(|(&cp, &gid)| (cp, GlyphId(gid)))
     }
     pub fn codepoints(&self, max_ranges: usize) -> Vec<RangeInclusive<u32>> {
-        use itertools::Itertools;
-
         let mut codepoints: Vec<u32> = self.single_codepoint.keys().cloned().collect();
-        codepoints.sort();
-        let num_gaps = codepoints.iter().cloned().tuple_windows().filter(|&(a, b)| a + 1 != b).count();
-        let mut ranges = Vec::with_capacity(num_gaps + 1);
-        let mut codepoints = codepoints.into_iter();
-        if let Some(mut start) = codepoints.next() {
-            let mut current = start;
-            for cp in codepoints {
-                if cp == current + 1 {
-                    current = cp;
-                    continue;
-                }
-                ranges.push(start ..= current);
-                start = cp;
-                current = cp;
+        codepoints.sort_unstable();
+        codepoints.dedup();
+
+        // Walk the sorted codepoints into maximal runs.
+        let mut ranges: Vec<RangeInclusive<u32>> = Vec::new();
+        for cp in codepoints {
+            match ranges.last_mut() {
+                Some(last) if last.end().checked_add(1) == Some(cp) => *last = *last.start() ..= cp,
+                _ => ranges.push(cp ..= cp),
             }
         }
 
-        let mut tmp = Vec::with_capacity(ranges.len());
+        // Reduce to `max_ranges` runs by repeatedly closing the smallest gap.
+        let max_ranges = max_ranges.max(1);
         while ranges.len() > max_ranges {
-            tmp.clear();
-            let min_gap = ranges.iter().tuple_windows().map(|(a, b)| *b.start() - *a.end()).min().unwrap();
-            let mut ranges_iter = ranges.iter().cloned();
-            if let Some(mut prev) = ranges_iter.next() {
-                for next in ranges_iter {
-                    if next.start() - prev.end() > min_gap * 2 {
-                        tmp.push(prev);
-                        prev = next;
-                    } else {
-                        prev = *prev.start() ..= *next.end();
-                    }
-                }
-            } else {
-                break;
-            }
-            std::mem::swap(&mut ranges, &mut tmp);
+            // `ranges` is sorted and disjoint, so merging neighbours is always possible.
+            let smallest = ranges
+                .windows(2)
+                .enumerate()
+                .map(|(ix, w)| (ix, w[1].start() - w[0].end() - 1))
+                .min_by_key(|&(_, gap)| gap);
+            let Some((ix, _)) = smallest else { break };
+            let merged = *ranges[ix].start() ..= *ranges[ix + 1].end();
+            ranges.splice(ix ..= ix + 1, std::iter::once(merged));
         }
 
         ranges
