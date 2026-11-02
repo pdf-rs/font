@@ -2,12 +2,23 @@
 
 ## What it does
 Parses the full GSUB skeleton — ScriptList → Script → LanguageSystem (default + per-language),
-FeatureList → Feature (tag + lookup indices), LookupList → single (type 1) and ligature
-(type 4) substitutions — and exposes them as `GSub::scripts()`, `default_language()`,
-`language(tag)`, `subs(lang, enabled)`, `lang_features(lang)`. Nothing in the crate applies them;
-`pdf` uses ligature lookup manually where it can.
+FeatureList → Feature (tag + lookup indices), LookupList → single (1), multiple (2),
+alternate (3) and ligature (4) substitutions — and exposes them as `GSub::scripts()`,
+`default_language()`, `language(tag)`, `subs(lang, enabled)`, `lang_features(lang)`. Nothing in
+the crate applies them; `pdf` uses ligature lookup manually where it can.
 
 ## Fixed
+* **F36 (2026-11-02):** Multiple (2) and Alternate (3) subtables are parsed and applied:
+  `parse_multiple_subst` reads one-glyph-to-sequence records (an empty sequence deletes the
+  glyph, as OT §GSUB allows) and `parse_alternate_subst` reads alternate sets. They live in the
+  new `LookupSubtable` enum (`Substitution` | `Multiple` | `Alternate`), which is what
+  `GSub::lookup` now stores — `Substitution` itself keeps its two variants because consumers
+  (`svg_text::apply_subs`) match it exhaustively. `LookupSubtable::apply` returns the glyphs
+  that replace the consumed ones, so `GSub::substitute` can splice a sequence; the glyphs a
+  lookup produces are not fed back into the same lookup. `apply_with(glyphs, n)` chooses the
+  nth alternate (OT leaves that to the application; the default is the first, an out-of-range
+  index falls back to it). `subs()` still yields `&Substitution` only. Tests:
+  `multiple_substitution_expands_and_deletes`, `alternate_substitution_picks_the_requested_alternate`.
 * **F36 (2026-11-02):** malformed tables no longer abort the process:
   `parse_ligatures` used `count(be_u16, component_count - 1)`, which underflowed (a panic in
   debug, a huge count in release) for `componentCount == 0`; such a ligature now warns and is
@@ -33,9 +44,8 @@ FeatureList → Feature (tag + lookup indices), LookupList → single (type 1) a
 
 ## Differences from the specifications
 * ~~**F36 (OT §GSUB):**~~ types 1 and 4 were the only ones collected and Extension (7) was
-  dropped — extensions are followed and 1/4 are applied now (see "Fixed" above). Multiple (2),
-  Alternate (3), Context (5), Chaining Context (6) and Reverse Chaining (8) are still logged with
-  `debug!` and dropped.
+  dropped — extensions are followed and 1/2/3/4 are applied now (see "Fixed" above). Context
+  (5), Chaining Context (6) and Reverse Chaining (8) are still logged with `debug!` and dropped.
 * `GSub::default_language()` (`:36-38`) returns `scripts.get(0)`, i.e. whichever script record
   happens to come first in the table. The spec has no "first script"; consumers want `DFLT`
   (then `latn`). `pdf` side-steps this by looking up `latn`/`DFLT` itself.
