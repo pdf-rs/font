@@ -11,6 +11,14 @@ pairs, `KernTable::get(left, right)`) filled from **PairPos** lookups (type 2), 
   gone: a zero or out-of-bounds coverage offset is an error, and a coverage table shorter than
   `pairSetCount` stops the loop instead of panicking.
 
+## Fixed
+* **F1 (2026-11-02):** the PairPos format 1 header no longer reads a phantom `pairSetOffsets`
+  field before the real array; the first pair set offset is the one the spec puts there, so
+  format 1 kerning works.
+* **F2 (2026-11-02):** PairPos format 2 parses `classDef1Offset`/`classDef2Offset` into
+  `KernTable::left_classes`/`right_classes` (via `parse_class_def`), so the class matrix is
+  reachable from `KernTable::get`.
+
 ## Differences from the specifications
 * **F1 (OT §GPOS, PairPos Format 1):** `:119` consumes one `PairSetOffset` before the loop, so
   pair set *i* is read from `pairSetOffsets[i+1]` and the last read runs past the array. Kerning

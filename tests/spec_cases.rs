@@ -5,6 +5,7 @@
 //! exactly one finding. Run everything: `cargo test`; one group: `cargo test c01`.
 
 use font::opentype::{gdef::{GDef, MarkClass}, OpenTypeFont};
+use font::{Font, GlyphId};
 
 // ---------------------------------------------------------------------------------------------
 // sfnt assembly
@@ -151,6 +152,96 @@ fn parse_gdef_of(data: &[u8]) -> GDef {
 }
 
 // ---------------------------------------------------------------------------------------------
+// F1/F2 — GPOS PairPos: the format 1 header, and format 2 class definitions
+
+/// Coverage format 1 (OT §"Coverage Table").
+fn coverage_1(glyphs: &[u16]) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_u16(&mut t, 1);
+    push_u16(&mut t, glyphs.len() as u16);
+    for &g in glyphs { push_u16(&mut t, g); }
+    t
+}
+
+/// A GPOS table with one lookup of `lookup_type` carrying a single subtable: 10-byte header,
+/// lookup list at 10, lookup at 14, subtable at 22.
+fn gpos_table(lookup_type: u16, subtable: &[u8]) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_u16(&mut t, 1);   // majorVersion
+    push_u16(&mut t, 0);   // minorVersion
+    push_u16(&mut t, 0);   // scriptListOffset (not read by the crate)
+    push_u16(&mut t, 0);   // featureListOffset (not read by the crate)
+    push_u16(&mut t, 10);  // lookupListOffset
+    push_u16(&mut t, 1);   // lookupCount
+    push_u16(&mut t, 4);   // lookup offset, from the lookup list
+    push_u16(&mut t, lookup_type);
+    push_u16(&mut t, 0);   // lookupFlag
+    push_u16(&mut t, 1);   // subtableCount
+    push_u16(&mut t, 8);   // subtable offset, from the lookup
+    assert_eq!(t.len(), 22);
+    t.extend_from_slice(subtable);
+    t
+}
+
+/// PairPos format 1 (OT §"Pair Adjustment Lookup"), `valueFormat1 = 0x0004` (xAdvance),
+/// `valueFormat2 = 0`.
+fn pair_pos_1(first_glyph: u16, pairs: &[(u16, i16)]) -> Vec<u8> {
+    let coverage = coverage_1(&[first_glyph]);
+    let mut pair_set = Vec::new();
+    push_u16(&mut pair_set, pairs.len() as u16);
+    for &(second, x_advance) in pairs {
+        push_u16(&mut pair_set, second);
+        push_i16(&mut pair_set, x_advance);
+    }
+
+    let header_len = 12; // format, coverageOffset, valueFormat1, valueFormat2, pairSetCount, 1 offset
+    let mut t = Vec::new();
+    push_u16(&mut t, 1);                                // format
+    push_u16(&mut t, header_len as u16);                // coverageOffset
+    push_u16(&mut t, 0x0004);                           // valueFormat1
+    push_u16(&mut t, 0);                                // valueFormat2
+    push_u16(&mut t, 1);                                // pairSetCount
+    push_u16(&mut t, (header_len + coverage.len()) as u16); // pairSetOffset[0]
+    t.extend_from_slice(&coverage);
+    t.extend_from_slice(&pair_set);
+    t
+}
+
+/// PairPos format 2 (OT §"Pair Adjustment Lookup"), `valueFormat1 = 0x0004`, `valueFormat2 = 0`.
+/// `x_advances` is the class matrix in row-major order, `class_1_count × class_2_count` entries;
+/// the matrix follows the header directly, the coverage and ClassDefs after it.
+fn pair_pos_2(covered: &[u16], class_def_1: &[u8], class_def_2: &[u8],
+              class_1_count: u16, class_2_count: u16, x_advances: &[i16]) -> Vec<u8> {
+    let coverage = coverage_1(covered);
+    let header_len = 16;
+    let class_1_records_off = header_len;
+    let coverage_off = class_1_records_off + 2 * x_advances.len();
+    let class_def_1_off = coverage_off + coverage.len();
+    let class_def_2_off = class_def_1_off + class_def_1.len();
+
+    let mut t = Vec::new();
+    push_u16(&mut t, 2);                        // format
+    push_u16(&mut t, coverage_off as u16);
+    push_u16(&mut t, 0x0004);                   // valueFormat1
+    push_u16(&mut t, 0);                        // valueFormat2
+    push_u16(&mut t, class_def_1_off as u16);
+    push_u16(&mut t, class_def_2_off as u16);
+    push_u16(&mut t, class_1_count);
+    push_u16(&mut t, class_2_count);
+    assert_eq!(t.len(), class_1_records_off);
+    for &x_advance in x_advances { push_i16(&mut t, x_advance); }
+    t.extend_from_slice(&coverage);
+    t.extend_from_slice(class_def_1);
+    t.extend_from_slice(class_def_2);
+    t
+}
+
+fn kerning_of(data: &[u8], left: u32, right: u32) -> f32 {
+    let font = OpenTypeFont::parse(data).expect("font parses");
+    font.kerning(GlyphId(left), GlyphId(right))
+}
+
+// ---------------------------------------------------------------------------------------------
 // F3/F4/F5/F27 — GDEF: tag case, glyphClassDef vs markAttachClassDef, optional subtables
 
 #[test]
@@ -187,4 +278,37 @@ fn c03_gdef_glyph_class_is_not_the_mark_attach_class() {
     let gdef = parse_gdef_of(&data);
     assert_eq!(gdef.mark_class(5), Some(MarkClass::Ligature));
     assert_eq!(gdef.mark_attach_class(5), Some(3));
+}
+
+// ---------------------------------------------------------------------------------------------
+// F1/F2 — GPOS PairPos
+
+#[test]
+fn c04_pair_pos_format_1_kerning() {
+    // F1: the format 1 header is format, coverageOffset, valueFormat1, valueFormat2,
+    // pairSetCount, pairSetOffsets[] — there is no extra field before the offsets.
+    let mut tables = base_tables(8);
+    tables.push((*b"GPOS", gpos_table(2, &pair_pos_1(1, &[(2, -50), (3, -20)]))));
+    let data = build_font(tables);
+    assert_eq!(kerning_of(&data, 1, 2), -50.0);
+    assert_eq!(kerning_of(&data, 1, 3), -20.0);
+    assert_eq!(kerning_of(&data, 1, 4), 0.0);
+}
+
+#[test]
+fn c05_pair_pos_format_2_class_kerning() {
+    // F2: format 2 indexes a class matrix through two ClassDefs; without parsing them the
+    // matrix can never be read and class kerning is always 0.
+    let mut tables = base_tables(8);
+    let subtable = pair_pos_2(
+        &[1],
+        &class_def_1(1, &[1]),      // gid 1 -> left class 1
+        &class_def_1(2, &[1]),      // gid 2 -> right class 1
+        2, 2,
+        &[0, 0, 0, -40],            // matrix[1][1]
+    );
+    tables.push((*b"GPOS", gpos_table(2, &subtable)));
+    let data = build_font(tables);
+    assert_eq!(kerning_of(&data, 1, 2), -40.0);
+    assert_eq!(kerning_of(&data, 1, 3), 0.0);
 }

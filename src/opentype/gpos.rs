@@ -6,7 +6,7 @@ use nom::{
 };
 use crate::{R, GlyphId, FontError};
 use crate::parsers::{*};
-use crate::opentype::{Maxp, parse_lookup_list, coverage_table};
+use crate::opentype::{Maxp, parse_lookup_list, coverage_table, parse_class_def};
 use itertools::{Itertools};
 
 
@@ -116,8 +116,7 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, _num_glyphs: 
             let (i, value_format_1) = be_u16(i)?;
             let (i, value_format_2) = be_u16(i)?;
             let (i, pair_set_count) = be_u16(i)?;
-            let (i, _pair_set_offsets) = be_u16(i)?;
-            
+
             let mut coverage = coverage_table(coverage_off.of(data)?)?;
             for offset in iterator_n(i, be_u16, pair_set_count) {
                 let first_glyph = match coverage.next() {
@@ -139,11 +138,16 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, _num_glyphs: 
             let (i, _coverage_off) = be_u16(i)?;
             let (i, value_format_1) = be_u16(i)?;
             let (i, value_format_2) = be_u16(i)?;
-            let (i, _class_def_1_offset) = be_u16(i)?;
-            let (i, _class_def_2_offset) = be_u16(i)?;
+            let (i, class_def_1_offset) = be_u16(i)?;
+            let (i, class_def_2_offset) = be_u16(i)?;
             let (i, class_1_count) = be_u16(i)?;
             let (i, class_2_count) = be_u16(i)?;
-            
+
+            // The class matrix is indexed by the two ClassDefs; without them no glyph ever gets a
+            // class and `KernTable::get` can never reach `class_pairs`.
+            parse_class_def(Offset(class_def_1_offset).of(data)?, &mut kern.left_classes)?;
+            parse_class_def(Offset(class_def_2_offset).of(data)?, &mut kern.right_classes)?;
+
             let iter = (0 .. class_1_count).cartesian_product(0 .. class_2_count)
                 .zip(iterator_n(i, tuple((value_record(value_format_1), value_record(value_format_2))), class_1_count * class_2_count));
             
