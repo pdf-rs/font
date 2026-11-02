@@ -22,12 +22,17 @@
 * `TRIPLET_LUT` and `Triplet` decode the WOFF2 point encoding: byte count in 2 bits, x/y bit
   widths in units of 4, 11-bit biases, and one sign bit each.
 
+## Fixed
+* **F46 (2026-11-02):** WOFF 1.0 tables are now read at the directory's `offset` (§5 "Table
+  Directory": "Offset to the (compressed) table data, from the beginning of the file") instead of
+  sequentially after the directory, so storage order and padding no longer matter. A table range
+  that leaves the file is an error, `totalSfntSize` must at least hold the directory
+  (`12 + 16 * numTables`), and a `length` larger than the file warns. Not checked: per-table
+  `origChecksum` and the metadata/private blocks. Tests: `c27`, `c27b` in `tests/woff_cases.rs`.
+
 ## Differences from the specifications
-* **F46 (W3C WOFF 1.0 §"WOFF Header"/"Table Directory"):** the directory `offset` field is read
-  into `WoffDirEntry` and then **ignored** — tables are read sequentially after the directory.
-  WOFF requires tables to be stored in the directory's order, so this works for conforming fonts,
-  but padding/gaps or a reordered directory silently shift every table. Also unvalidated:
-  `length`, `totalSfntSize`, per-table `origChecksum`, the metadata/private blocks.
+* ~~**F46 (W3C WOFF 1.0 §"WOFF Header"/"Table Directory"):**~~ the directory `offset` was ignored —
+  fixed above. Still unvalidated: `origChecksum`, `metaOffset`/`metaLength`/`privOffset`/`privLength`.
 * **F26:** (fixed above — the two decompression panics, the `ttcf` `unimplemented!()`, the
   `n_contour` panic and the WOFF2 stream-end panics.)
 * WOFF2 (`:100-160`): the table directory is stored in an `IndexMap` (`count_map`), so the

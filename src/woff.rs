@@ -26,10 +26,10 @@ use nom::{
 pub fn parse_woff(data: &[u8]) -> Result<OpenTypeFont, FontError> {
     let (i, _) = tag(b"wOFF")(data)?;
     let (i, flavor) = take(4usize)(i)?;
-    let (i, _length) = be_u32(i)?;
+    let (i, length) = be_u32(i)?;
     let (i, num_tables) = be_u16(i)?;
     let (i, _reserved) = be_u16(i)?;
-    let (i, _total_sfnt_size) = be_u32(i)?;
+    let (i, total_sfnt_size) = be_u32(i)?;
     let (i, _major_version) = be_u16(i)?;
     let (i, _minor_version) = be_u16(i)?;
     let (i, _meta_offset) = be_u32(i)?;
@@ -38,7 +38,19 @@ pub fn parse_woff(data: &[u8]) -> Result<OpenTypeFont, FontError> {
     let (i, _priv_offset) = be_u32(i)?;
     let (i, _priv_length) = be_u32(i)?;
     
-    let (mut i, tables_dir) = count(woff_dir_entry, num_tables as usize)(i)?;
+    let (_, tables_dir) = count(woff_dir_entry, num_tables as usize)(i)?;
+    
+    // WOFF §"WOFF Header": `length` is the size of the whole file and `totalSfntSize` the
+    // size of the equivalent uncompressed sfnt; neither is used to read the tables, but a
+    // file that cannot hold its own header is broken.
+    if (length as usize) > data.len() {
+        warn!("WOFF claims a length of {} bytes, the file has {}", length, data.len());
+    }
+    let min_sfnt_size = 12 + 16 * num_tables as u32;
+    if total_sfnt_size < min_sfnt_size {
+        return Err(FontError::Other(format!(
+            "WOFF: totalSfntSize {} cannot hold {} table directories", total_sfnt_size, num_tables)));
+    }
     
     if flavor == b"ttcf" {
         // WOFF §"WOFF Header": flavor `ttcf` marks a collection; there is no reader for those.
@@ -48,9 +60,21 @@ pub fn parse_woff(data: &[u8]) -> Result<OpenTypeFont, FontError> {
     let mut tables = HashMap::with_capacity(num_tables as usize);
     for entry in tables_dir {
         debug!("{}", String::from_utf8_lossy(&entry.tag));
-        let data = if entry.comp_length < entry.orig_length {
-            let compressed_data = parse(&mut i, take((entry.comp_length as usize + 3) & !3))?;
-            let orig_data = match inflate_bytes_zlib(slice!(compressed_data, .. entry.comp_length as usize)) {
+        // WOFF §"Table Directory": `offset` is the position of this table in the file.
+        // Tables are only required to be 4-byte aligned, not contiguous and not in the
+        // order the directory lists them.
+        let compressed = entry.comp_length < entry.orig_length;
+        let length = if compressed { entry.comp_length } else { entry.orig_length } as usize;
+        let start = entry.offset as usize;
+        let padded = (length + 3) & !3;
+        let chunk = match data.get(start .. start + padded) {
+            Some(chunk) => chunk,
+            None => return Err(FontError::Other(format!(
+                "WOFF: table {} at offset {} ({} bytes) runs past the end of the file",
+                String::from_utf8_lossy(&entry.tag), start, padded))),
+        };
+        let data = if compressed {
+            let orig_data = match inflate_bytes_zlib(slice!(chunk, .. entry.comp_length as usize)) {
                 Ok(data) => data,
                 // WOFF §"Table Directory": a table marked compressed must decompress.
                 Err(e) => return Err(FontError::Other(format!("can't decompress {}: {:?}", String::from_utf8_lossy(&entry.tag), e)))
@@ -58,7 +82,6 @@ pub fn parse_woff(data: &[u8]) -> Result<OpenTypeFont, FontError> {
             require_eq!(orig_data.len(), entry.orig_length as usize);
             Cow::Owned(orig_data)
         } else {
-            let chunk = parse(&mut i, take((entry.orig_length as usize + 3) & !3))?;
             Cow::Borrowed(slice!(chunk, .. entry.orig_length as usize))
         };
         tables.insert(entry.tag, data);
