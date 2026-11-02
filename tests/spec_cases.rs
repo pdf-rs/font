@@ -731,3 +731,48 @@ fn c17c_self_referencing_composite_terminates() {
     ]);
     assert!(outline_points(&font, 2).is_empty());
 }
+
+// ---------------------------------------------------------------------------------------------
+// F21 — an unknown GPOS/GSUB minor version must not abort the font
+
+/// `gpos_table` with an explicit `minorVersion` (OT §GPOS header).
+fn gpos_table_version(minor_version: u16, lookup_type: u16, subtable: &[u8]) -> Vec<u8> {
+    let mut t = gpos_table(lookup_type, subtable);
+    t[2..4].copy_from_slice(&minor_version.to_be_bytes());
+    t
+}
+
+/// A GSUB table with no scripts, no features and no lookups (OT §GSUB header).
+fn gsub_table(minor_version: u16) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_u16(&mut t, 1);            // majorVersion
+    push_u16(&mut t, minor_version);
+    push_u16(&mut t, 10);           // scriptListOffset
+    push_u16(&mut t, 12);           // featureListOffset
+    push_u16(&mut t, 14);           // lookupListOffset
+    push_u16(&mut t, 0);            // ScriptList: scriptCount
+    push_u16(&mut t, 0);            // FeatureList: featureCount
+    push_u16(&mut t, 0);            // LookupList: lookupCount
+    t
+}
+
+#[test]
+fn c18_unknown_gpos_minor_version_is_ignored() {
+    // F21: `v => panic!("unsupported GPOS version 1.{}")` killed the whole font. The tables we
+    // read sit at the same offsets in every 1.x version, so 1.2 must still yield its kerning.
+    let subtable = pair_pos_1(1, &[(2, -40)]);
+    let mut tables = base_tables(3);
+    tables.push((*b"GPOS", gpos_table_version(2, 2, &subtable)));
+    let data = build_font(tables);
+    assert_eq!(kerning_of(&data, 1, 2), -40.0);
+}
+
+#[test]
+fn c18b_unknown_gsub_minor_version_is_ignored() {
+    // F21: same panic in `parse_gsub`, where it is not even a GPOS table.
+    let mut tables = base_tables(2);
+    tables.push((*b"GSUB", gsub_table(2)));
+    let data = build_font(tables);
+    let font = OpenTypeFont::parse(&data).expect("GSUB 1.2 parses");
+    assert!(font.gsub.is_some());
+}

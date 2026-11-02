@@ -93,7 +93,11 @@ pub fn parse_gsub(data: &[u8]) -> Result<GSub, FontError> {
     let (i, _feature_variations_offset) = match minor_version {
         0 => (i, 0),
         1 => be_u32(i)?,
-        v => panic!("unsupported GPOS version 1.{}", v)
+        // See parse_gpos: unknown minor versions are skipped, not fatal.
+        v => {
+            warn!("unsupported GSUB version 1.{}, ignoring the rest of the header", v);
+            (i, 0)
+        }
     };
     
     let mut lookup = Vec::new();

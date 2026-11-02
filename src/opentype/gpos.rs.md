@@ -10,8 +10,9 @@ pairs, `KernTable::get(left, right)`) filled from **PairPos** lookups (type 2), 
 * **F27 (2026-11-02):** the two `.unwrap()`s on the PairPos format 1 coverage offset/iterator are
   gone: a zero or out-of-bounds coverage offset is an error, and a coverage table shorter than
   `pairSetCount` stops the loop instead of panicking.
-
-## Fixed
+* **F21 (2026-11-02):** an unknown `minorVersion` (`v => panic!("unsupported GPOS version
+  1.{}")`) is now a warning: the header fields before the feature variations offset are the same
+  in every 1.x version, so the table is still read. Tests: `c18`, `c18b`.
 * **F1 (2026-11-02):** the PairPos format 1 header no longer reads a phantom `pairSetOffsets`
   field before the real array; the first pair set offset is the one the spec puts there, so
   format 1 kerning works.
@@ -20,13 +21,6 @@ pairs, `KernTable::get(left, right)`) filled from **PairPos** lookups (type 2), 
   reachable from `KernTable::get`.
 
 ## Differences from the specifications
-* **F1 (OT §GPOS, PairPos Format 1):** `:119` consumes one `PairSetOffset` before the loop, so
-  pair set *i* is read from `pairSetOffsets[i+1]` and the last read runs past the array. Kerning
-  lands on the wrong left glyph. (Test: two pairs with different values.)
-* **F2 (OT §GPOS, PairPos Format 2):** `_class_def_1_offset`/`_class_def_2_offset` (`:138-139`)
-  are parsed and dropped, so `KernTable::left_classes`/`right_classes` stay empty and
-  `KernTable::get` can never reach `class_pairs`. Class-based kerning — the normal case for large
-  fonts — is silently zero.
 * Only the **first** `ValueRecord`'s `xAdvance` is used (`:130`, `:158`); `ValueRecord2`
   (the second glyph's advance/placement) and `xPlacement`/`yPlacement` are discarded. For PDF
   text that is defensible (you only need the advance delta), but it is not what GPOS says.

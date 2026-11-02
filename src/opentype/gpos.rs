@@ -61,7 +61,12 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> Result<GPos, FontError> {
     let (i, _feature_variations_offset) = match minor_version {
         0 => (i, 0),
         1 => be_u32(i)?,
-        v => panic!("unsupported GPOS version 1.{}", v)
+        // OT §GPOS: a minor version we do not know may carry fields we cannot skip, but the
+        // tables we do read are laid out the same way, so ignore the rest instead of failing.
+        v => {
+            warn!("unsupported GPOS version 1.{}, ignoring the rest of the header", v);
+            (i, 0)
+        }
     };
     
     let mut gpos = GPos::default();

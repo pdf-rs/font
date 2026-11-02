@@ -7,6 +7,11 @@ FeatureList → Feature (tag + lookup indices), LookupList → single (type 1) a
 `language(tag)`, `subs(lang, enabled)`, `lang_features(lang)`. Nothing in the crate applies them;
 `pdf` uses ligature lookup manually where it can.
 
+## Fixed
+* **F21 (2026-11-02):** an unknown `minorVersion` no longer panics (`panic!("unsupported GPOS
+  version 1.{}")` here was a copy-paste of the GPOS message); it warns and the table is read.
+  Tests: `c18`, `c18b`.
+
 ## Differences from the specifications
 * **F36 (OT §GSUB):** only types 1 and 4 are collected. Multiple (2), Alternate (3), Context (5),
   Chaining Context (6), **Extension (7)** and Reverse Chaining (8) are logged with `debug!` and
@@ -27,8 +32,7 @@ FeatureList → Feature (tag + lookup indices), LookupList → single (type 1) a
 * `parse_feature_table` (`:270-276`) reads `featureParamsOffset` and drops it; for `size`
   features and `ss01`-style parameters that is the whole point of the feature, so this is
   "structure only".
-* **F21:** `panic!("unsupported GPOS version 1.{}")` (`:96`, copy-paste in GSUB) for a minor
-  version > 1.
+* **F21:** (fixed above) the GSUB copy of the GPOS version panic.
 * The version-1.1 `featureVariationsOffset` is read and ignored.
 
 ## Cross references
