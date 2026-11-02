@@ -9,6 +9,13 @@ substitutions — and exposes them as `GSub::scripts()`, `default_language()`, `
 through `Font::substitute`) applies them to a glyph run.
 
 ## Fixed
+* **F36 (2026-11-02):** each lookup's `lookupFlag` is kept (`GSub::flags`) and honoured:
+  `substitute_with(glyphs, enabled, gdef)` asks `gdef::glyph_ignored` before applying a lookup at
+  a glyph, so IgnoreBaseGlyphs / IgnoreLigatures / IgnoreMarks and `markAttachmentType` work for
+  both the lookups themselves and the runs their contextual rules match (`Context::matches`
+  skips the glyphs the flag hides when it looks at input, backtrack and lookahead).
+  `substitute` is the same call with no `GDEF`. Test:
+  `gpos::tests::ignore_marks_lookup_flag_skips_a_mark` (shares the code path).
 * **F36 (2026-11-02):** `parse_feature_table` keeps `featureParamsOffset`: the `size` feature's
   five values land in `SizeParams`, readable through `GSub::size_params()`. And
   `default_language()` no longer returns whichever script record comes first — it prefers
@@ -65,10 +72,9 @@ through `Font::substitute`) applies them to a glyph run.
 
 ## Differences from the specifications
 * ~~**F36 (OT §GSUB):**~~ types 1 and 4 were the only ones collected and Extension (7) was
-  dropped — extensions are followed and 1-8 are applied now (see "Fixed" above). What is still
-  missing: lookup flags (IgnoreBaseGlyphs / IgnoreLigatures / IgnoreMarks / MarkFilteringSet)
-  are read and dropped, so contextual rules match consecutive glyphs rather than skipping
-  marks, and Reverse Chaining runs after all forward lookups instead of in table position.
+  dropped — extensions are followed and 1-8 are applied now (see "Fixed" above). Lookup flags
+  are honoured as well (see "Fixed", F36); `MarkFilteringSet` is still only read, and Reverse
+  Chaining runs after all forward lookups instead of in table position.
 * ~~`GSub::default_language()` (`:36-38`) returns `scripts.get(0)`, i.e. whichever script record
   happens to come first in the table.~~ Fixed (see "Fixed", F36): `DFLT`, then `latn`, then the
   first script; `language_system_for_script(tag)` for everything else.

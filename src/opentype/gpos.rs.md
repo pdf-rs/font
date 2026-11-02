@@ -1,15 +1,39 @@
 # `src/opentype/gpos.rs` — GPOS: adjustments, kerning and mark attachment
 
 ## What it does
-`parse_gpos` walks the lookup list and keeps what the rest of the crate can use: a `KernTable`
-(glyph pairs + class pairs, `KernTable::get(left, right)`) filled from **PairPos** lookups
-(type 2), a `HashMap<(base_gid, mark_gid), (dx, dy)>` from **MarkBasePos** lookups (type 4) and
-**MarkMarkPos** (type 6, `GPos::mark_to_mark`), `GPos::single` with the full `ValueRecord` of
-each glyph from **SinglePos** (type 1), `GPos::cursive` with the entry/exit anchors from
-**CursivePos** (3) and `GPos::mark_to_ligature` from **MarkLigPos** (5, first component).
-`GPos::from_kern` lets a `kern` table stand in when GPOS is absent (`mod.rs:110-117`).
+`parse_gpos` reads the script list, the feature list and the lookup list, and keeps every
+lookup's subtables in file order (`GPos::lookups`, plus each lookup's `lookupFlag` in
+`GPos::flags`) as a `PosSubtable`: **SinglePos** (1) with its `ValueRecord`, **PairPos** (2,
+glyph pairs and the class matrix), **CursivePos** (3), **MarkBasePos** (4),
+**MarkLigPos** (5, first component), **MarkMarkPos** (6) and the contextual lookups (7, 8),
+whose rule tables are the ones `GSUB` uses (`gsub::Context`). `Extension` (9) is followed to the
+lookup it wraps.
+
+`GPos::position` / `position_with` is the positioning engine behind `Font::position`: it runs
+the lookups of the enabled features over a glyph run and returns one `GlyphPosition` per glyph
+(offset and advance deltas). Contextual lookups recurse into the lookups their records name
+(depth capped at `gsub::MAX_NESTING`), and a lookup's `lookupFlag` skips the glyph classes
+`GDEF` says it ignores. The flat accessors (`get_single`, `get_pair`, `get_cursive`,
+`get_mark_to_base`, `get_mark_to_ligature`, `get_mark_to_mark`) and the `KernTable`
+(`KernTable::get(left, right)`, glyph pairs + class pairs) are still filled for callers that
+want the tables rather than a run; `GPos::from_kern` lets a legacy `kern` table stand in when
+GPOS is absent (`mod.rs`).
 
 ## Fixed
+* **F36 (2026-11-02):** there is a positioning engine now, and the last two lookup types it was
+  missing are parsed: `GPos::position` / `position_with` applies the enabled features' lookups to
+  a glyph run and returns a `GlyphPosition` per glyph (`Font::position`), and contextual (7) and
+  chaining contextual (8) positioning reuse `gsub::Context` and recurse through the lookups
+  their `SequenceLookupRecord`s name, with the same depth cap as `GSUB`. The lookup `lookupFlag`
+  is honoured through `GDEF` (`GDef::ignored`): IgnoreBaseGlyphs / IgnoreLigatures / IgnoreMarks
+  and `markAttachmentType`. Value records add up per glyph (saturating), so a single, a pair and
+  a mark attachment on the same glyph combine. Tests:
+  `single_adjustment_moves_the_advance_of_the_run`, `pair_adjustment_moves_both_glyphs`,
+  `mark_to_base_offsets_the_mark`, `contextual_lookup_runs_the_lookup_it_names`,
+  `ignore_marks_lookup_flag_skips_a_mark`.
+* **F36 (2026-11-02):** `parse_gpos` reads the script list and the feature list instead of
+  skipping their offsets, which is what makes the engine reachable: without them no feature is
+  ever enabled. A zero offset still means "absent" and leaves the run unpositioned.
 * **F36 (2026-11-02):** PairPos keeps both value records of a pair: `GPos::pair` (glyph pairs,
   format 1) and `GPos::class_pair` (class pairs, format 2) hold `(ValueRecord, ValueRecord)`,
   reachable through `GPos::get_pair(left, right)` — glyph pairs first, then the class pair the
@@ -60,11 +84,18 @@ each glyph from **SinglePos** (type 1), `GPos::cursive` with the entry/exit anch
   dispatch (`parse_positioning`) now unwraps it and parses the wrapped pair adjustment or
   mark-to-base subtable; an extension wrapping an extension warns and is dropped. Unit test:
   `extension_lookup_reaches_pair_adjustment`.
-* Contextual positioning (7) and chaining contextual positioning (8) are still skipped without a
-  warning — the crate has no positioning engine that could run the lookups their rules name.
+* ~~Contextual positioning (7) and chaining contextual positioning (8) are still skipped without a
+  warning — the crate has no positioning engine that could run the lookups their rules name.~~
+  Both are parsed and applied now (see "Fixed", F36).
 * ~~Lookup types 1 (single), 3 (cursive), 5/6 (mark-to-ligature, mark-to-mark), 7 (context),
-  8 (chaining context) are skipped without a warning.~~ 1, 3, 5 and 6 are parsed now (see
-  "Fixed"); 7 and 8 are not.
+  8 (chaining context) are skipped without a warning.~~ 1, 3, 5 and 6 are parsed (see "Fixed");
+  7 and 8 are parsed and applied as well.
+* The mark attachment lookups attach a mark to the nearest preceding glyph the table names as its
+  base. OT wants the *last preceding glyph that is not itself a mark* (which `GDEF` identifies);
+  without `GDEF` the two differ only for runs with several marks in a row, where the search
+  picks the one that actually has an entry.
+* Pair positioning applies the second glyph's value record to the next glyph the lookup does not
+  skip, which is what OT §GPOS "Pair Adjustment" means by the second glyph of a pair.
 * `ValueRecord` correctly skips the device-table offsets (`(flags & 0x00F0).count_ones() * 2`) but
   does not read them — hinting-only, fine for outlines.
 * MarkBasePos: format must be 1 ✓; mark/base coverage, `markClassCount`, mark array

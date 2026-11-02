@@ -7,6 +7,7 @@ use nom::{
 use crate::{R, GlyphId, FontError};
 use crate::parsers::{iterator_n, Offset};
 use crate::opentype::{parse_extension, parse_lookup_list, coverage_table, parse_class_def, tag, Tag};
+use crate::opentype::gdef::{GDef, glyph_ignored};
 
 #[derive(Debug, Clone)]
 pub struct GlyphList(Vec<u16>);
@@ -27,14 +28,46 @@ pub struct GSub {
     scripts: Vec<Script>,
     features: Vec<Feature>,
     lookup: Vec<Vec<LookupSubtable>>,
+    /// Per lookup: its `lookupFlag` (OT §"Lookup Flags"), which says which glyphs it skips.
+    flags: Vec<u16>,
 }
+
+/// The language system a run of text uses: `DFLT` first, then `latn`, then whatever the font
+/// lists first. OT has no "first script" rule; this is what a PDF has to mean when it does not
+/// name a language.
+pub(crate) fn default_language_of(scripts: &[Script]) -> Option<&LanguageSystem> {
+    let for_tag = |tag: Tag| {
+        scripts.iter()
+            .find(|script| script.tag == tag)
+            .and_then(|script| script.default_language.as_ref())
+    };
+    for_tag(Tag(*b"DFLT"))
+        .or_else(|| for_tag(Tag(*b"latn")))
+        .or_else(|| scripts.get(0).and_then(|script| script.default_language.as_ref()))
+}
+
+/// The lookups to run for a run of text: the ones named by the enabled features of the default
+/// language system, in lookup-list order (OT §"Lookups": lookups are applied in that order).
+pub(crate) fn enabled_lookups(scripts: &[Script], features: &[Feature], enabled: &dyn Fn(Tag) -> bool) -> Vec<u16> {
+    let language = match default_language_of(scripts) {
+        Some(language) => language,
+        None => return Vec::new(),
+    };
+    // Feature and lookup indices come from the file: one past the end of a list is a
+    // malformed font, not something to panic on.
+    let mut indices: Vec<u16> = language.feature_list.iter()
+        .filter_map(|&FeatureIdx(idx)| features.get(idx as usize))
+        .filter(|feature| enabled(feature.tag))
+        .flat_map(|feature| feature.lookup_indices.iter().copied())
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+}
+
 impl GSub {
     pub fn default_language(&self) -> Option<&LanguageSystem> {
-        // OT has no "first script": a text run means `DFLT`, then `latn`, then whatever the
-        // font happens to list first.
-        self.language_system_for_script(Tag(*b"DFLT"))
-            .or_else(|| self.language_system_for_script(Tag(*b"latn")))
-            .or_else(|| self.scripts.get(0).and_then(|script| script.default_language.as_ref()))
+        default_language_of(&self.scripts)
     }
     /// The default language system of the script with `tag`, if the font has one.
     pub fn language_system_for_script(&self, tag: Tag) -> Option<&LanguageSystem> {
@@ -172,7 +205,7 @@ impl LookupSubtable {
 
 /// What one glyph of a rule's backtrack, input or lookahead sequence has to be.
 #[derive(Debug, Clone)]
-enum GlyphMatch {
+pub(crate) enum GlyphMatch {
     /// Exactly this glyph id (context and chaining context format 1).
     Glyph(u16),
     /// A glyph of this class (format 2), looked up in the class definition that belongs to the
@@ -202,7 +235,7 @@ fn class_of(classes: &HashMap<u16, u16>, glyph: u16) -> u16 {
 /// One rule of a context (5) or chaining context (6) subtable. All six formats are normalised
 /// to this shape: what the run starts with, what surrounds it, and which lookups to apply.
 #[derive(Debug, Clone)]
-struct SequenceRule {
+pub(crate) struct SequenceRule {
     /// The glyph the run starts with (format 1); `None` when the subtable's coverage
     /// (format 3) or `first_class` (format 2) decides.
     first_glyph: Option<u16>,
@@ -219,6 +252,17 @@ struct SequenceRule {
     records: Vec<(u16, u16)>,
 }
 
+impl SequenceRule {
+    /// `(sequenceIndex, lookupListIndex)` records, in table order.
+    pub(crate) fn records(&self) -> &[(u16, u16)] {
+        &self.records
+    }
+    /// How many glyphs the run has after its first one.
+    pub(crate) fn input_len(&self) -> usize {
+        self.input.len()
+    }
+}
+
 /// OT §GSUB "Context Substitution" (lookup type 5) and "Chaining Context Substitution"
 /// (lookup type 6), every format, flattened into rules.
 #[derive(Debug, Clone)]
@@ -233,7 +277,7 @@ pub struct Context {
     rules: Vec<SequenceRule>,
 }
 
-fn empty_context() -> Context {
+pub(crate) fn empty_context() -> Context {
     Context {
         coverage: Vec::new(),
         input_classes: HashMap::new(),
@@ -245,12 +289,16 @@ fn empty_context() -> Context {
 
 impl Context {
     /// Whether `rule` matches the glyph run starting at `position`, with its backtrack and
-    /// lookahead around it.
-    fn matches(&self, rule: &SequenceRule, glyphs: &[GlyphId], position: usize) -> bool {
+    /// lookahead around it. `skip` names the glyphs the lookup's flag tells it to ignore
+    /// (marks, ligatures, …); those take no part in the match.
+    fn matches(&self, rule: &SequenceRule, glyphs: &[GlyphId], position: usize, skip: &dyn Fn(u16) -> bool) -> bool {
         let first = match glyphs.get(position).and_then(|&glyph| first_glyph_of(glyph)) {
             Some(first) => first,
             None => return false,
         };
+        if skip(first) {
+            return false;
+        }
         if self.coverage.binary_search(&first).is_err() {
             return false;
         }
@@ -266,31 +314,70 @@ impl Context {
         }
         // Input sequence: the glyphs after the first one.
         for (n, matcher) in rule.input.iter().enumerate() {
-            match glyphs.get(position + 1 + n).and_then(|&glyph| first_glyph_of(glyph)) {
+            match visible_after(glyphs, position, n + 1, skip).and_then(|index| first_glyph_of(glyphs[index])) {
                 Some(glyph) if matcher.matches(&self.input_classes, glyph) => {}
                 _ => return false,
             }
         }
         // Backtrack: the glyph immediately before the run first.
         for (n, matcher) in rule.backtrack.iter().enumerate() {
-            match position.checked_sub(n + 1)
-                .and_then(|before| glyphs.get(before))
-                .and_then(|&glyph| first_glyph_of(glyph))
-            {
+            match visible_before(glyphs, position, n, skip).and_then(|index| first_glyph_of(glyphs[index])) {
                 Some(glyph) if matcher.matches(&self.backtrack_classes, glyph) => {}
                 _ => return false,
             }
         }
         // Lookahead: right after the run.
-        let after = position + 1 + rule.input.len();
         for (n, matcher) in rule.lookahead.iter().enumerate() {
-            match glyphs.get(after + n).and_then(|&glyph| first_glyph_of(glyph)) {
+            match visible_after(glyphs, position, rule.input.len() + n + 1, skip)
+                .and_then(|index| first_glyph_of(glyphs[index]))
+            {
                 Some(glyph) if matcher.matches(&self.lookahead_classes, glyph) => {}
                 _ => return false,
             }
         }
         true
     }
+
+    /// The first rule that matches at `position`, if any.
+    pub(crate) fn matched_rule<'a>(&'a self, glyphs: &[GlyphId], position: usize, skip: &dyn Fn(u16) -> bool) -> Option<&'a SequenceRule> {
+        self.rules.iter().find(|rule| self.matches(rule, glyphs, position, skip))
+    }
+}
+
+/// The index of the `n`th glyph at or after `start` that `skip` does not hide (0 is `start`
+/// itself if it counts).
+pub(crate) fn visible_after(glyphs: &[GlyphId], start: usize, n: usize, skip: &dyn Fn(u16) -> bool) -> Option<usize> {
+    let mut seen = 0;
+    for index in start .. glyphs.len() {
+        if let Some(glyph) = first_glyph_of(glyphs[index]) {
+            if skip(glyph) {
+                continue;
+            }
+            if seen == n {
+                return Some(index);
+            }
+            seen += 1;
+        }
+    }
+    None
+}
+
+/// The index of the `n`th glyph before `start` that `skip` does not hide (0 is the nearest
+/// one).
+pub(crate) fn visible_before(glyphs: &[GlyphId], start: usize, n: usize, skip: &dyn Fn(u16) -> bool) -> Option<usize> {
+    let mut seen = 0;
+    for index in (0 .. start).rev() {
+        if let Some(glyph) = first_glyph_of(glyphs[index]) {
+            if skip(glyph) {
+                continue;
+            }
+            if seen == n {
+                return Some(index);
+            }
+            seen += 1;
+        }
+    }
+    None
 }
 
 /// OT §GSUB "Reverse Chaining Contextual Single Substitution" (lookup type 8), format 1.
@@ -364,7 +451,7 @@ fn to_glyph_ids(ids: &[u16]) -> Vec<GlyphId> {
 /// Context lookups may name other context lookups. OT has no depth limit, but a font that
 /// points a lookup at itself would recurse until the stack ran out; no real font nests more
 /// than a handful deep.
-const MAX_NESTING: u8 = 8;
+pub(crate) const MAX_NESTING: u8 = 8;
 
 impl GSub {
     /// Applies the lookups of the default language system whose feature tag `enabled`
@@ -374,26 +461,24 @@ impl GSub {
     /// lookups their rules name; Reverse Chaining (8) runs in its own right-to-left pass at
     /// the end; unrecognised glyphs pass through.
     pub fn substitute(&self, glyphs: &[GlyphId], enabled: &dyn Fn(Tag) -> bool) -> Vec<GlyphId> {
-        let language = match self.default_language() {
-            Some(language) => language,
-            None => return glyphs.to_vec(),
-        };
+        self.substitute_with(glyphs, enabled, None)
+    }
 
+    /// `substitute`, with the `GDEF` table the font carries: it tells a lookup which glyphs to
+    /// skip (OT §"Lookup Flags"), which needs the glyph classes only `GDEF` has.
+    pub fn substitute_with(&self, glyphs: &[GlyphId], enabled: &dyn Fn(Tag) -> bool, gdef: Option<&GDef>) -> Vec<GlyphId> {
         // OT §"Lookups": lookups are applied in lookup-list order.
-        let mut lookup_indices: Vec<u16> = language.feature_list.iter()
-            .filter_map(|&FeatureIdx(idx)| self.features.get(idx as usize))
-            .filter(|feature| enabled(feature.tag))
-            .flat_map(|feature| feature.lookup_indices.iter().copied())
-            .collect();
-        lookup_indices.sort_unstable();
-        lookup_indices.dedup();
+        let lookup_indices = enabled_lookups(&self.scripts, &self.features, enabled);
+        if lookup_indices.is_empty() && self.lookup.is_empty() {
+            return glyphs.to_vec();
+        }
 
         let mut out: Vec<GlyphId> = glyphs.to_vec();
         let mut position = 0;
         while position < out.len() {
             let mut applied = false;
             for &lookup_idx in &lookup_indices {
-                if let Some(grown) = self.apply_lookup_at(lookup_idx, &mut out, position, 0) {
+                if let Some(grown) = self.apply_lookup_at(lookup_idx, &mut out, position, 0, gdef) {
                     // OT §"Lookups": what a lookup produces is not fed back into it. A lookup
                     // that deletes the glyphs at `position` still has to move on, or the same
                     // rule would delete them again forever.
@@ -427,12 +512,19 @@ impl GSub {
     /// Applies one lookup at `position`. `Some(grown)` is how much the glyph run at and after
     /// `position` grew by (zero, or negative when the rule deleted glyphs); `None` if no
     /// subtable of the lookup applies there.
-    fn apply_lookup_at(&self, lookup_idx: u16, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8) -> Option<isize> {
+    fn apply_lookup_at(&self, lookup_idx: u16, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8, gdef: Option<&GDef>) -> Option<isize> {
         let subtables = self.lookup.get(lookup_idx as usize)?;
+        let flag = self.flags.get(lookup_idx as usize).copied().unwrap_or(0);
+        // OT §"Lookup Flags": a lookup skips the glyph classes its flag names (marks,
+        // ligatures, …). Nothing at an ignored position applies.
+        let glyph = first_glyph_of(*glyphs.get(position)?)?;
+        if glyph_ignored(gdef, flag, glyph) {
+            return None;
+        }
         for subtable in subtables {
             let applied = match subtable {
                 // The rule names other lookups to run, so these need the whole table.
-                LookupSubtable::Context(context) => self.apply_context(context, glyphs, position, depth),
+                LookupSubtable::Context(context) => self.apply_context(context, glyphs, position, depth, flag, gdef),
                 // Applied in the right-to-left pass of `substitute`.
                 LookupSubtable::ReverseChain(_) => None,
                 substitution => {
@@ -456,27 +548,30 @@ impl GSub {
 
     /// Applies the first rule of `context` that matches at `position`, which means running the
     /// lookups its records name at the glyphs of the run.
-    fn apply_context(&self, context: &Context, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8) -> Option<isize> {
+    fn apply_context(&self, context: &Context, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8, flag: u16, gdef: Option<&GDef>) -> Option<isize> {
         if depth >= MAX_NESTING {
             debug!("GSUB: not following context lookups nested deeper than {}", MAX_NESTING);
             return None;
         }
-        let rule = match context.rules.iter().find(|rule| context.matches(rule, glyphs, position)) {
-            Some(rule) => rule,
-            None => return None,
-        };
+        let skip = |gid: u16| glyph_ignored(gdef, flag, gid);
+        let rule = context.matched_rule(glyphs, position, &skip)?;
+        // The glyphs of the run, resolved before any record runs: a record that inserted or
+        // deleted glyphs moves the ones behind it, which `shift` tracks.
+        let targets: Vec<usize> = (0 ..= rule.input_len())
+            .filter_map(|n| visible_after(glyphs, position, n, &skip))
+            .collect();
         let before = glyphs.len();
-        // A record that inserted or deleted glyphs shifts the glyphs after it, so the next
-        // record's sequenceIndex has to move by the same amount.
         let mut shift = 0isize;
-        for &(sequence_index, lookup_index) in &rule.records {
-            let target = position as isize + sequence_index as isize + shift;
+        for &(sequence_index, lookup_index) in rule.records() {
+            // OT §"Sequence Lookup Records": an index outside the run has nothing to apply to.
+            let target = match targets.get(sequence_index as usize) {
+                Some(&index) => index as isize + shift,
+                None => continue,
+            };
             if target < 0 || target as usize >= glyphs.len() {
-                // OT §"Sequence Lookup Records": the index has to be inside the run; a font
-                // that points outside it has nothing to apply to.
                 continue;
             }
-            if let Some(grown) = self.apply_lookup_at(lookup_index, glyphs, target as usize, depth + 1) {
+            if let Some(grown) = self.apply_lookup_at(lookup_index, glyphs, target as usize, depth + 1, gdef) {
                 shift += grown;
             }
         }
@@ -528,11 +623,14 @@ pub fn parse_gsub(data: &[u8]) -> Result<GSub, FontError> {
     };
     
     let mut lookup = Vec::new();
+    let mut flags: Vec<u16> = Vec::new();
     
-    parse_lookup_list(slice!(data, lookup_list_off as usize ..), |lookup_idx, data, lookup_type, _lookup_flag| {
+    parse_lookup_list(slice!(data, lookup_list_off as usize ..), |lookup_idx, data, lookup_type, lookup_flag| {
         while lookup_idx >= lookup.len() {
             lookup.push(Vec::new());
+            flags.push(0);
         }
+        flags[lookup_idx] = lookup_flag;
         let mut push = |sub| lookup[lookup_idx].push(sub);
 
         if let Some(sub) = parse_substitution(data, lookup_type)? {
@@ -543,6 +641,7 @@ pub fn parse_gsub(data: &[u8]) -> Result<GSub, FontError> {
     
     Ok(GSub {
         lookup,
+        flags,
         scripts: script_list,
         features: feature_list,
     })
@@ -670,7 +769,7 @@ fn coverage_lists(data: &[u8], offsets: Vec<u16>) -> Result<Vec<Vec<u16>>, FontE
 }
 
 /// OT §GSUB "Context Substitution" (lookup type 5), formats 1, 2 and 3.
-fn parse_context_subst(data: &[u8]) -> Result<Context, FontError> {
+pub(crate) fn parse_context_subst(data: &[u8]) -> Result<Context, FontError> {
     let (i, format) = be_u16(data)?;
     match format {
         1 => parse_context_format1(data, i),
@@ -866,7 +965,7 @@ fn parse_chain_sequence(i: &[u8]) -> Result<Option<ChainSequence>, FontError> {
 }
 
 /// OT §GSUB "Chaining Context Substitution" (lookup type 6), formats 1, 2 and 3.
-fn parse_chain_context_subst(data: &[u8]) -> Result<Context, FontError> {
+pub(crate) fn parse_chain_context_subst(data: &[u8]) -> Result<Context, FontError> {
     let (i, format) = be_u16(data)?;
     match format {
         1 => parse_chain_format1(data, i),
@@ -1075,7 +1174,7 @@ struct StateMachine {
 impl StateMachine {
 */
 
-fn parse_script_list(data: &[u8]) -> Result<Vec<Script>, FontError> {
+pub(crate) fn parse_script_list(data: &[u8]) -> Result<Vec<Script>, FontError> {
     let (i, script_count) = be_u16(data)?;
     let mut scripts = Vec::with_capacity(script_count as usize);
     for (script_tag, offset) in iterator_n(i, tuple((tag, be_u16)), script_count) {
@@ -1109,9 +1208,9 @@ struct FeatureIdx(u16);
 
 #[derive(Debug, Clone)]
 pub struct Script {
-    tag: Tag,
-    default_language: Option<LanguageSystem>,
-    languages: Vec<(Tag, LanguageSystem)>
+    pub(crate) tag: Tag,
+    pub(crate) default_language: Option<LanguageSystem>,
+    pub(crate) languages: Vec<(Tag, LanguageSystem)>
 }
 
 impl Script {
@@ -1123,8 +1222,19 @@ impl Script {
 
 #[derive(Debug, Clone)]
 pub struct LanguageSystem {
-    feature_list: Vec<FeatureIdx>,
+    pub(crate) feature_list: Vec<FeatureIdx>,
     required_feature: Option<FeatureIdx>,
+}
+
+impl LanguageSystem {
+    /// A default language system with these feature indices (used by the tests of both layout
+    /// tables, which build their tables by hand).
+    pub(crate) fn with_features(feature_list: Vec<u16>) -> LanguageSystem {
+        LanguageSystem {
+            feature_list: feature_list.into_iter().map(FeatureIdx).collect(),
+            required_feature: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1146,10 +1256,17 @@ pub enum FeatureParams {
 }
 
 #[derive(Debug, Clone)]
-struct Feature {
-    tag: Tag,
-    lookup_indices: Vec<u16>,
+pub(crate) struct Feature {
+    pub(crate) tag: Tag,
+    pub(crate) lookup_indices: Vec<u16>,
     params: Option<FeatureParams>,
+}
+
+impl Feature {
+    /// A feature with no parameters.
+    pub(crate) fn new(tag: &[u8; 4], lookup_indices: Vec<u16>) -> Feature {
+        Feature { tag: Tag(*tag), lookup_indices, params: None }
+    }
 }
 // returns (requiredFeatureIndex, FeatureList)
 fn parse_language_system_table(i: &[u8]) -> Result<LanguageSystem, FontError> {
@@ -1164,7 +1281,7 @@ fn parse_language_system_table(i: &[u8]) -> Result<LanguageSystem, FontError> {
     })
 }
 
-fn parse_feature_list(data: &[u8]) -> Result<Vec<Feature>, FontError> {
+pub(crate) fn parse_feature_list(data: &[u8]) -> Result<Vec<Feature>, FontError> {
     let (i, feature_count) = be_u16(data)?;
     let mut features = Vec::with_capacity(feature_count as usize);
     for (feature_tag, feature_offset) in iterator_n(i, tuple((tag, be_u16)), feature_count) {
@@ -1235,6 +1352,7 @@ mod tests {
                 languages: Vec::new(),
             }],
             features,
+            flags: vec![0; lookup.len()],
             lookup,
         }
     }
@@ -1339,6 +1457,7 @@ mod tests {
             }],
             features: vec![feature(b"liga", vec![7])],
             lookup: vec![Vec::new()],
+            flags: vec![0],
         };
         let lang = gsub.default_language().expect("default language");
         assert_eq!(gsub.lang_features(lang).collect::<Vec<_>>(), vec![Tag(*b"liga")]);
@@ -1516,7 +1635,7 @@ mod tests {
         }
         let features = parse_feature_list(&data).expect("feature list parses");
         assert_eq!(features.len(), 1);
-        let gsub = GSub { scripts: Vec::new(), features, lookup: Vec::new() };
+        let gsub = GSub { scripts: Vec::new(), features, lookup: Vec::new(), flags: Vec::new() };
         assert_eq!(gsub.size_params(), Some(SizeParams {
             design_size: 600,
             subfamily_id: 1,
@@ -1538,6 +1657,7 @@ mod tests {
             scripts: vec![script(b"cyrl", 0), script(b"latn", 1), script(b"DFLT", 2)],
             features: Vec::new(),
             lookup: Vec::new(),
+            flags: Vec::new(),
         };
         let first_feature = |gsub: &GSub| gsub.default_language().map(|lang| lang.feature_list[0].0);
 

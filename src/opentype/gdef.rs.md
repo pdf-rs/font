@@ -7,6 +7,11 @@ attachment* class definition into `GDef::mark_classes` and exposes
 `GDef::mark_class(gid) -> Option<MarkClass>`.
 
 ## Fixed
+* **F36 (2026-11-02):** the classes are used: `GDef::ignored(lookupFlag, gid)` answers OT
+  §"Lookup Flags" — IgnoreBaseGlyphs (0x0002), IgnoreLigatures (0x0004), IgnoreMarks (0x0008) by
+  glyph class, and a non-zero `markAttachmentType` (flag >> 8) hiding every mark that is not of
+  that `markAttachClassDef` class. `GSUB` and `GPOS` both ask it through `glyph_ignored` before
+  applying a lookup at a glyph. Test: `gpos::tests::ignore_marks_lookup_flag_skips_a_mark`.
 * **F3/F4/F5/F27 (2026-11-02):** the table is now looked up as `GDEF` (`opentype/mod.rs`), both
   class definitions are parsed independently (glyphClassDef drives `mark_class()`,
   markAttachClassDef is exposed as `mark_attach_class()`), offset 0 is treated as "subtable
@@ -14,8 +19,8 @@ attachment* class definition into `GDef::mark_classes` and exposes
   `tests/spec_cases.rs`.
 
 ## Differences from the specifications
-* **F3:** the table is looked up as `b"gdef"` in `opentype/mod.rs:139`; the real tag is `GDEF`,
-  so `OpenTypeFont::gdef` is always `None`. Everything here is dead code today.
+* **F3:** fixed 2026-11-02 — the tag lookup in `opentype/mod.rs` reads `b"GDEF"`, so
+  `OpenTypeFont::gdef` is filled and the table is reachable (`GSUB`/`GPOS` lookup flags use it).
 * **F4 (OT §GDEF, "Glyph Class Definition table"):** `mark_class()` maps the stored values
   1-4 to `Base`/`Ligature`/`Mark`/`Component`, but the values come from
   `markAttachClassDef`, whose classes are font-defined and carry no such meaning. The mapping

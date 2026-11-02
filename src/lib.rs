@@ -27,6 +27,22 @@ pub struct Glyph {
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct GlyphId(pub u32);
 
+/// Where one glyph of a run has to go: the adjustments a `GPOS` lookup applied to it (OT §GPOS).
+///
+/// All four values are in font units and are added to the glyph's own metrics and origin;
+/// `Default` — all zeros — is "unmoved", which is also what a font without `GPOS` produces.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlyphPosition {
+    /// Added to the glyph's horizontal advance.
+    pub x_advance: i16,
+    /// Added to the glyph's vertical advance.
+    pub y_advance: i16,
+    /// Added to the glyph's horizontal origin.
+    pub x_offset: i16,
+    /// Added to the glyph's vertical origin.
+    pub y_offset: i16,
+}
+
 #[derive(Copy, Clone)]
 pub struct VMetrics {
     pub line_gap: f32,
@@ -129,16 +145,28 @@ pub trait Font: 'static {
         None
     }
 
-    /// Apply the font's `GSUB` substitutions (ligatures, single substitutions) to a run of
-    /// glyphs, in the font's default language system.
+    /// Apply the font's `GSUB` substitutions to a run of glyphs, in the font's default
+    /// language system.
     ///
     /// `features` lists the OpenType feature tags to enable, e.g. `b"liga"` for the standard
     /// f-ligatures and `b"rlig"` for required ligatures; an empty list enables nothing.
-    /// Backends without `GSUB` (and lookups this crate does not implement — contextual,
-    /// alternate, multiple) return the run unchanged.
+    /// Lookup types 1–6 and 8 are applied — single, multiple, alternate, ligature and both
+    /// kinds of contextual substitution, including the lookups those rules call. Only the
+    /// OpenType lookups' own glyph filtering (`GDEF` mark attachment classes) is left out.
+    /// Backends without `GSUB` return the run unchanged.
     fn substitute(&self, glyphs: &[GlyphId], features: &[&[u8; 4]]) -> Vec<GlyphId> {
         let _ = features;
         glyphs.to_vec()
+    }
+
+    /// Apply the font's `GPOS` positioning to a run of glyphs, in the font's default language
+    /// system: one `GlyphPosition` per input glyph, in input order.
+    ///
+    /// `features` is the same list of feature tags as [`Font::substitute`]. A backend without
+    /// `GPOS`, or a run no enabled feature touches, yields all-default positions.
+    fn position(&self, glyphs: &[GlyphId], features: &[&[u8; 4]]) -> Vec<GlyphPosition> {
+        let _ = features;
+        vec![GlyphPosition::default(); glyphs.len()]
     }
     
     /// Kerning distance for the given glyph pair

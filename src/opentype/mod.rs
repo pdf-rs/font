@@ -3,7 +3,7 @@
 use std::convert::TryInto;
 use std::collections::HashMap;
 use std::ops::Deref;
-use crate::{Font, R, IResultExt, VMetrics, HMetrics, Glyph, GlyphId, Name, FontInfo, FontType, Info, FontError, ParseResult};
+use crate::{Font, R, IResultExt, VMetrics, HMetrics, Glyph, GlyphId, GlyphPosition, Name, FontInfo, FontType, Info, FontError, ParseResult};
 use crate::truetype::{Shape, parse_shapes, get_outline};
 #[cfg(feature="cff")]
 use crate::cff::read_cff;
@@ -254,9 +254,16 @@ impl Font for OpenTypeFont {
     }
     fn substitute(&self, glyphs: &[GlyphId], features: &[&[u8; 4]]) -> Vec<GlyphId> {
         match self.gsub.as_ref() {
-            // OT §GSUB: a feature is enabled by its tag in the default language system.
-            Some(gsub) => gsub.substitute(glyphs, &|tag| features.iter().any(|&feature| tag.0 == *feature)),
+            // OT §GSUB: a feature is enabled by its tag in the default language system. The
+            // `GDEF` table tells each lookup which glyph classes it skips.
+            Some(gsub) => gsub.substitute_with(glyphs, &|tag| features.iter().any(|&feature| tag.0 == *feature), self.gdef.as_ref()),
             None => glyphs.to_vec(),
+        }
+    }
+    fn position(&self, glyphs: &[GlyphId], features: &[&[u8; 4]]) -> Vec<GlyphPosition> {
+        match self.gpos.as_ref() {
+            Some(gpos) => gpos.position_with(glyphs, &|tag| features.iter().any(|&feature| tag.0 == *feature), self.gdef.as_ref()),
+            None => vec![GlyphPosition::default(); glyphs.len()],
         }
     }
     fn name(&self) -> &Name {

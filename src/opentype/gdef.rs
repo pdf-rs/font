@@ -57,6 +57,34 @@ impl GDef {
     pub fn mark_attach_class(&self, gid: u16) -> Option<u16> {
         self.mark_classes.get(&gid).cloned().filter(|&class| class != 0)
     }
+
+    /// Whether `lookup_flag` (OT §"Lookup Flags") tells the lookup to skip `gid`.
+    ///
+    /// The `IgnoreBaseGlyphs` / `IgnoreLigatures` / `IgnoreMarks` bits skip by glyph class, and a
+    /// non-zero `markAttachmentType` (the high byte) skips every mark that is not of exactly that
+    /// font-defined `markAttachClassDef` class.
+    pub fn ignored(&self, lookup_flag: u16, gid: u16) -> bool {
+        let class = match self.mark_class(gid) {
+            Some(class) => class,
+            None => return false
+        };
+        match class {
+            MarkClass::Base if lookup_flag & 0x0002 != 0 => true,
+            MarkClass::Ligature if lookup_flag & 0x0004 != 0 => true,
+            MarkClass::Mark if lookup_flag & 0x0008 != 0 => true,
+            MarkClass::Mark => {
+                let attach_type = lookup_flag >> 8;
+                attach_type != 0 && self.mark_attach_class(gid) != Some(attach_type)
+            }
+            _ => false
+        }
+    }
+}
+
+/// `GDef::ignored` for a font that may have no `GDEF` table at all: without one, every glyph
+/// counts as a base glyph, so no lookup flag can skip it.
+pub(crate) fn glyph_ignored(gdef: Option<&GDef>, lookup_flag: u16, gid: u16) -> bool {
+    gdef.map_or(false, |gdef| gdef.ignored(lookup_flag, gid))
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]

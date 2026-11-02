@@ -4,30 +4,63 @@ use nom::{
     number::complete::{be_i16, be_u16, be_u32},
     sequence::{tuple},
 };
-use crate::{R, GlyphId, FontError};
+use crate::{R, GlyphId, GlyphPosition, FontError};
 use crate::parsers::{*};
-use crate::opentype::{Maxp, parse_extension, parse_lookup_list, coverage_table, parse_class_def};
+use crate::opentype::{Maxp, Tag, parse_extension, parse_lookup_list, coverage_table, parse_class_def};
+use crate::opentype::gdef::{GDef, glyph_ignored};
+use crate::opentype::gsub::{
+    Context, Feature, Script, MAX_NESTING, enabled_lookups, parse_chain_context_subst,
+    parse_context_subst, parse_feature_list, parse_script_list, visible_after, visible_before,
+};
 use itertools::{Itertools};
 
 
+/// OT §GPOS: the positioning table. It keeps its lookups in the file's order, because that is
+/// the order they are applied in, plus the flattened maps the accessors and `Font::kerning` read.
 #[derive(Default, Clone)]
 pub struct GPos {
+    /// The advance adjustments of pair positioning, keyed by glyph ids — what `Font::kerning`
+    /// uses.
     pub kern: KernTable,
-    pub mark_to_base: HashMap<(u16, u16), (i16, i16)>,
-    /// OT §GPOS "Single Adjustment" (lookup type 1): the value record of one glyph.
-    pub single: HashMap<u16, ValueRecord>,
-    /// OT §GPOS "Cursive Attachment" (3): entry and exit anchor of one glyph, in font units.
-    pub cursive: HashMap<u16, ((i16, i16), (i16, i16))>,
-    /// OT §GPOS "Mark-to-Ligature Attachment" (5): (ligature, mark) -> offset, taken from the
-    /// first component of the ligature.
-    pub mark_to_ligature: HashMap<(u16, u16), (i16, i16)>,
-    /// OT §GPOS "Mark-to-Mark Attachment" (6): (base mark, mark) -> offset.
-    pub mark_to_mark: HashMap<(u16, u16), (i16, i16)>,
-    /// OT §GPOS "Pair Adjustment" (2), format 1: both value records of a glyph pair.
-    pub pair: HashMap<(u16, u16), (ValueRecord, ValueRecord)>,
-    /// OT §GPOS "Pair Adjustment" (2), format 2: both value records of a class pair.
-    pub class_pair: HashMap<(u16, u16), (ValueRecord, ValueRecord)>,
+    scripts: Vec<Script>,
+    features: Vec<Feature>,
+    lookups: Vec<Vec<PosSubtable>>,
+    /// Per lookup: its `lookupFlag` (OT §"Lookup Flags"), which says which glyphs it skips.
+    flags: Vec<u16>,
 }
+
+/// One subtable of a `GPOS` lookup.
+///
+/// Lookup lines 1-6 all fix one or two anchors or values; the last two forms (7, 8) are the
+/// contextual ones and only say *which* lookups to apply inside a matched run — the
+/// `Context` type is shared with `GSUB`, which has the same rule tables.
+#[derive(Debug, Clone)]
+enum PosSubtable {
+    /// OT §GPOS "Single Adjustment" (1): the value record of one glyph.
+    Single(HashMap<u16, ValueRecord>),
+    /// OT §GPOS "Pair Adjustment" (2): both value records of a glyph or class pair.
+    Pair(PairSets),
+    /// OT §GPOS "Cursive Attachment" (3): entry and exit anchor of one glyph.
+    Cursive(HashMap<u16, ((i16, i16), (i16, i16))>),
+    /// OT §GPOS "Mark-to-Base Attachment" (4): (base, mark) -> offset.
+    MarkToBase(HashMap<(u16, u16), (i16, i16)>),
+    /// OT §GPOS "Mark-to-Ligature Attachment" (5): (ligature, mark) -> offset, from the first
+    /// component of the ligature.
+    MarkToLigature(HashMap<(u16, u16), (i16, i16)>),
+    /// OT §GPOS "Mark-to-Mark Attachment" (6): (base mark, mark) -> offset.
+    MarkToMark(HashMap<(u16, u16), (i16, i16)>),
+    /// OT §GPOS "Context Positioning" (7) and "Chaining Context Positioning" (8).
+    Context(Context),
+}
+
+/// The two halves of pair positioning: explicit glyph pairs (format 1) and the class matrix
+/// (format 2). The class definitions themselves live in the `KernTable`.
+#[derive(Debug, Clone, Default)]
+struct PairSets {
+    pairs: HashMap<(u16, u16), (ValueRecord, ValueRecord)>,
+    class_pairs: HashMap<(u16, u16), (ValueRecord, ValueRecord)>,
+}
+
 impl GPos {
     pub fn from_kern(kern: KernTable) -> GPos {
         GPos {
@@ -35,37 +68,241 @@ impl GPos {
             ..GPos::default()
         }
     }
+    /// Every subtable of every lookup, in lookup order.
+    fn subtables(&self) -> impl Iterator<Item=&PosSubtable> {
+        self.lookups.iter().flatten()
+    }
     pub fn get_mark_to_base(&self, base: GlyphId, mark: GlyphId) -> Option<(i16, i16)> {
-        self.mark_to_base.get(&(glyph_key(base)?, glyph_key(mark)?)).cloned()
+        let key = (glyph_key(base)?, glyph_key(mark)?);
+        self.subtables().find_map(|subtable| match subtable {
+            PosSubtable::MarkToBase(marks) => marks.get(&key).cloned(),
+            _ => None,
+        })
     }
     /// OT §GPOS "Single Adjustment": placement and advance adjustment of one glyph.
     pub fn get_single(&self, glyph: GlyphId) -> Option<ValueRecord> {
-        self.single.get(&glyph_key(glyph)?).cloned()
+        let key = glyph_key(glyph)?;
+        self.subtables().find_map(|subtable| match subtable {
+            PosSubtable::Single(values) => values.get(&key).cloned(),
+            _ => None,
+        })
     }
     /// OT §GPOS "Cursive Attachment": `(entry, exit)` anchors of one glyph.
     pub fn get_cursive(&self, glyph: GlyphId) -> Option<((i16, i16), (i16, i16))> {
-        self.cursive.get(&glyph_key(glyph)?).cloned()
+        let key = glyph_key(glyph)?;
+        self.subtables().find_map(|subtable| match subtable {
+            PosSubtable::Cursive(anchors) => anchors.get(&key).cloned(),
+            _ => None,
+        })
     }
     /// OT §GPOS "Mark-to-Ligature Attachment": where the mark is placed relative to the first
     /// component of the ligature.
     pub fn get_mark_to_ligature(&self, ligature: GlyphId, mark: GlyphId) -> Option<(i16, i16)> {
-        self.mark_to_ligature.get(&(glyph_key(ligature)?, glyph_key(mark)?)).cloned()
+        let key = (glyph_key(ligature)?, glyph_key(mark)?);
+        self.subtables().find_map(|subtable| match subtable {
+            PosSubtable::MarkToLigature(marks) => marks.get(&key).cloned(),
+            _ => None,
+        })
     }
     /// OT §GPOS "Mark-to-Mark Attachment": where a mark is placed relative to another mark.
     pub fn get_mark_to_mark(&self, base: GlyphId, mark: GlyphId) -> Option<(i16, i16)> {
-        self.mark_to_mark.get(&(glyph_key(base)?, glyph_key(mark)?)).cloned()
+        let key = (glyph_key(base)?, glyph_key(mark)?);
+        self.subtables().find_map(|subtable| match subtable {
+            PosSubtable::MarkToMark(marks) => marks.get(&key).cloned(),
+            _ => None,
+        })
     }
     /// OT §GPOS "Pair Adjustment": both value records of `left` followed by `right` — the
     /// glyph pairs first, then the class pair the two glyphs fall into.
     pub fn get_pair(&self, left: GlyphId, right: GlyphId) -> Option<(ValueRecord, ValueRecord)> {
         let left_key = glyph_key(left)?;
         let right_key = glyph_key(right)?;
-        if let Some(pair) = self.pair.get(&(left_key, right_key)) {
-            return Some(pair.clone());
+        let classes = self.kern.left_classes.get(&left_key)
+            .and_then(|left_class| self.kern.right_classes.get(&right_key).map(|right_class| (*left_class, *right_class)));
+        let mut class_pair = None;
+        for subtable in self.subtables() {
+            if let PosSubtable::Pair(sets) = subtable {
+                if let Some(pair) = sets.pairs.get(&(left_key, right_key)) {
+                    return Some(pair.clone());
+                }
+                if class_pair.is_none() {
+                    class_pair = classes.and_then(|classes| sets.class_pairs.get(&classes).cloned());
+                }
+            }
         }
-        let left_class = *self.kern.left_classes.get(&left_key)?;
-        let right_class = *self.kern.right_classes.get(&right_key)?;
-        self.class_pair.get(&(left_class, right_class)).cloned()
+        class_pair
+    }
+
+    /// Applies the positioning of the default language system whose feature tag `enabled`
+    /// accepts to a run of glyphs, in the font's default language system: one `GlyphPosition`
+    /// per glyph, all-default for a feature that touches nothing.
+    pub fn position(&self, glyphs: &[GlyphId], enabled: &dyn Fn(Tag) -> bool) -> Vec<GlyphPosition> {
+        self.position_with(glyphs, enabled, None)
+    }
+
+    /// `position`, with the `GDEF` table the font carries: it tells a lookup which glyphs to
+    /// skip (OT §"Lookup Flags"), which needs the glyph classes only `GDEF` has.
+    pub fn position_with(&self, glyphs: &[GlyphId], enabled: &dyn Fn(Tag) -> bool, gdef: Option<&GDef>) -> Vec<GlyphPosition> {
+        let mut out = vec![GlyphPosition::default(); glyphs.len()];
+        let lookup_indices = enabled_lookups(&self.scripts, &self.features, enabled);
+        if lookup_indices.is_empty() {
+            return out;
+        }
+        // OT §"Lookups": every lookup runs, in lookup-list order; unlike a substitution a
+        // positioning lookup never changes the length of the run, so nothing moves under us.
+        for position in 0 .. glyphs.len() {
+            for &lookup_idx in &lookup_indices {
+                self.apply_lookup_at(lookup_idx, glyphs, &mut out, position, 0, gdef);
+            }
+        }
+        out
+    }
+
+    /// Applies one lookup at `position`; `true` if one of its subtables applied there.
+    fn apply_lookup_at(&self, lookup_idx: u16, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, depth: u8, gdef: Option<&GDef>) -> bool {
+        let subtables = match self.lookups.get(lookup_idx as usize) {
+            Some(subtables) => subtables,
+            None => return false,
+        };
+        let flag = self.flags.get(lookup_idx as usize).copied().unwrap_or(0);
+        let glyph = match glyphs.get(position).and_then(|&glyph| glyph_key(glyph)) {
+            Some(glyph) => glyph,
+            None => return false,
+        };
+        // OT §"Lookup Flags": a lookup skips the glyph classes its flag names.
+        if glyph_ignored(gdef, flag, glyph) {
+            return false;
+        }
+        let skip = |gid: u16| glyph_ignored(gdef, flag, gid);
+        // OT §"Lookups": only the first subtable of a lookup that matches is used.
+        for subtable in subtables {
+            let applied = match subtable {
+                PosSubtable::Single(values) => match values.get(&glyph) {
+                    Some(value) => {
+                        add(positions, position, value);
+                        true
+                    }
+                    None => false,
+                },
+                PosSubtable::Pair(sets) => self.apply_pair(sets, glyphs, positions, position, glyph, &skip),
+                PosSubtable::Cursive(anchors) => self.apply_cursive(anchors, glyphs, positions, position, glyph, &skip),
+                PosSubtable::MarkToBase(marks) | PosSubtable::MarkToLigature(marks) | PosSubtable::MarkToMark(marks) =>
+                    self.apply_mark_attachment(marks, glyphs, positions, position, glyph, &skip),
+                PosSubtable::Context(context) => self.apply_context(context, glyphs, positions, position, depth, flag, gdef),
+            };
+            if applied {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// OT §GPOS "Pair Adjustment": the value records of the pair starting at `position` go on
+    /// the first glyph and on the second one.
+    fn apply_pair(&self, sets: &PairSets, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, glyph: u16, skip: &dyn Fn(u16) -> bool) -> bool {
+        let second_index = match visible_after(glyphs, position, 1, skip) {
+            Some(index) => index,
+            None => return false,
+        };
+        let second = match glyphs.get(second_index).and_then(|&glyph| glyph_key(glyph)) {
+            Some(glyph) => glyph,
+            None => return false,
+        };
+        let (first_value, second_value) = match sets.pairs.get(&(glyph, second)) {
+            Some(pair) => pair.clone(),
+            None => {
+                let classes = self.kern.left_classes.get(&glyph)
+                    .and_then(|left_class| self.kern.right_classes.get(&second).map(|right_class| (*left_class, *right_class)));
+                match classes.and_then(|classes| sets.class_pairs.get(&classes)) {
+                    Some(pair) => pair.clone(),
+                    None => return false,
+                }
+            }
+        };
+        add(positions, position, &first_value);
+        add(positions, second_index, &second_value);
+        true
+    }
+
+    /// OT §GPOS "Cursive Attachment": the entry anchor of a glyph is laid onto the exit anchor
+    /// of the glyph before it, which moves the glyph by the difference.
+    fn apply_cursive(&self, anchors: &HashMap<u16, ((i16, i16), (i16, i16))>, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, glyph: u16, skip: &dyn Fn(u16) -> bool) -> bool {
+        let (entry, _exit) = match anchors.get(&glyph) {
+            Some(anchors) => *anchors,
+            None => return false,
+        };
+        let previous = match visible_before(glyphs, position, 0, skip).and_then(|index| glyphs.get(index)).and_then(|&glyph| glyph_key(glyph)) {
+            Some(previous) => previous,
+            None => return false,
+        };
+        let (_entry, exit) = match anchors.get(&previous) {
+            Some(anchors) => *anchors,
+            None => return false,
+        };
+        if let Some(slot) = positions.get_mut(position) {
+            slot.x_offset = slot.x_offset.saturating_add(exit.0.saturating_sub(entry.0));
+            slot.y_offset = slot.y_offset.saturating_add(exit.1.saturating_sub(entry.1));
+        }
+        true
+    }
+
+    /// OT §GPOS "Mark Attachment" (4, 5, 6): a mark moves to the anchor its base — base glyph,
+    /// ligature or another mark — carries for its class. The maps hold that difference already.
+    fn apply_mark_attachment(&self, marks: &HashMap<(u16, u16), (i16, i16)>, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, glyph: u16, skip: &dyn Fn(u16) -> bool) -> bool {
+        let mut n = 0;
+        while let Some(index) = visible_before(glyphs, position, n, skip) {
+            let base = match glyphs.get(index).and_then(|&glyph| glyph_key(glyph)) {
+                Some(base) => base,
+                None => return false,
+            };
+            if let Some(&(dx, dy)) = marks.get(&(base, glyph)) {
+                if let Some(slot) = positions.get_mut(position) {
+                    slot.x_offset = slot.x_offset.saturating_add(dx);
+                    slot.y_offset = slot.y_offset.saturating_add(dy);
+                }
+                return true;
+            }
+            n += 1;
+        }
+        false
+    }
+
+    /// OT §GPOS "Context Positioning" (7, 8): run the lookups the first matching rule names at
+    /// the glyphs of the run. Positioning never changes the length of the run.
+    fn apply_context(&self, context: &Context, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, depth: u8, flag: u16, gdef: Option<&GDef>) -> bool {
+        if depth >= MAX_NESTING {
+            debug!("GPOS: not following context lookups nested deeper than {}", MAX_NESTING);
+            return false;
+        }
+        let skip = |gid: u16| glyph_ignored(gdef, flag, gid);
+        let rule = match context.matched_rule(glyphs, position, &skip) {
+            Some(rule) => rule,
+            None => return false,
+        };
+        let targets: Vec<usize> = (0 ..= rule.input_len())
+            .filter_map(|n| visible_after(glyphs, position, n, &skip))
+            .collect();
+        let mut applied = false;
+        for &(sequence_index, lookup_index) in rule.records() {
+            // OT §"Sequence Lookup Records": an index outside the run has nothing to apply to.
+            let target = match targets.get(sequence_index as usize) {
+                Some(&target) => target,
+                None => continue,
+            };
+            applied |= self.apply_lookup_at(lookup_index, glyphs, positions, target, depth + 1, gdef);
+        }
+        applied
+    }
+}
+
+/// Adds a value record to the position of one glyph, saturating: a font may pile adjustments
+/// up, and a sum that does not fit an `i16` should not take the process down.
+fn add(positions: &mut [GlyphPosition], position: usize, value: &ValueRecord) {
+    if let Some(slot) = positions.get_mut(position) {
+        slot.x_advance = slot.x_advance.saturating_add(value.x_advance);
+        slot.y_advance = slot.y_advance.saturating_add(value.y_advance);
+        slot.x_offset = slot.x_offset.saturating_add(value.x_placement);
+        slot.y_offset = slot.y_offset.saturating_add(value.y_placement);
     }
 }
 
@@ -101,8 +338,8 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> Result<GPos, FontError> {
     require_eq!(major_version, 1);
     let (i, minor_version) = be_u16(i)?;
     
-    let (i, _script_list_off) = be_u16(i)?;
-    let (i, _feature_list_off) = be_u16(i)?;
+    let (i, script_list_off) = be_u16(i)?;
+    let (i, feature_list_off) = be_u16(i)?;
     let (i, lookup_list_off) = be_u16(i)?;
     
     let (i, _feature_variations_offset) = match minor_version {
@@ -118,9 +355,22 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> Result<GPos, FontError> {
     
     let mut gpos = GPos::default();
     
-    parse_lookup_list(slice!(data, lookup_list_off as usize ..), |lookup_idx, data, lookup_type, _lookup_flag| {
+    // OT §GPOS: script and feature lists are optional (offset 0 means "absent"); without them
+    // no feature is enabled, so `position` leaves the run alone.
+    if script_list_off != 0 {
+        gpos.scripts = parse_script_list(slice!(data, script_list_off as usize ..))?;
+    }
+    if feature_list_off != 0 {
+        gpos.features = parse_feature_list(slice!(data, feature_list_off as usize ..))?;
+    }
+    
+    parse_lookup_list(slice!(data, lookup_list_off as usize ..), |lookup_idx, data, lookup_type, lookup_flag| {
         debug!("lookup type {}", lookup_type);
-        let _ = lookup_idx;
+        while lookup_idx >= gpos.lookups.len() {
+            gpos.lookups.push(Vec::new());
+            gpos.flags.push(0);
+        }
+        gpos.flags[lookup_idx] = lookup_flag;
         parse_positioning(data, lookup_type, &mut gpos, maxp.num_glyphs)
     })?;
     
@@ -128,17 +378,24 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> Result<GPos, FontError> {
 }
 
 /// One subtable of a `GPOS` lookup. Single adjustment (1), pair adjustment (2), cursive (3),
-/// mark-to-base (4), mark-to-ligature (5) and mark-to-mark (6) are read; the contextual
-/// lookups (7, 8) are not, and `Extension` (9) wraps the ones that are, which is what large
-/// fonts use.
+/// mark-to-base (4), mark-to-ligature (5), mark-to-mark (6) and the contextual lookups (7, 8)
+/// are read; `Extension` (9) wraps the ones that are, which is what large fonts use.
 fn parse_positioning(data: &[u8], lookup_type: u16, gpos: &mut GPos, num_glyphs: u16) -> Result<(), FontError> {
-    match lookup_type {
-        1 => parse_single_adjustment(data, gpos)?,
-        2 => parse_pair_adjustment(data, gpos, num_glyphs)?,
-        3 => parse_cursive(data, gpos)?,
-        4 => parse_mark_attachment(data, &mut gpos.mark_to_base)?,
-        5 => parse_mark_to_ligature_attachment(data, gpos)?,
-        6 => parse_mark_attachment(data, &mut gpos.mark_to_mark)?,
+    // A subtable belongs to the lookup `parse_gpos` has just opened a slot for.
+    if gpos.lookups.is_empty() {
+        gpos.lookups.push(Vec::new());
+        gpos.flags.push(0);
+    }
+    let subtable = match lookup_type {
+        2 => PosSubtable::Pair(parse_pair_adjustment(data, gpos)?),
+        3 => PosSubtable::Cursive(parse_cursive(data)?),
+        4 => PosSubtable::MarkToBase(parse_mark_attachment(data)?),
+        5 => PosSubtable::MarkToLigature(parse_mark_to_ligature_attachment(data)?),
+        6 => PosSubtable::MarkToMark(parse_mark_attachment(data)?),
+        // Context · Apply a lookup inside a matched glyph run
+        7 => PosSubtable::Context(parse_context_subst(data)?),
+        // Chaining context · the same, with backtrack and lookahead
+        8 => PosSubtable::Context(parse_chain_context_subst(data)?),
         // OT §GPOS "Extension Positioning": a wrapper around another lookup type.
         9 => {
             let (inner_type, inner) = parse_extension(data)?;
@@ -147,9 +404,13 @@ fn parse_positioning(data: &[u8], lookup_type: u16, gpos: &mut GPos, num_glyphs:
                 warn!("GPOS: an Extension lookup may not point at another Extension lookup");
                 return Ok(());
             }
-            parse_positioning(inner, inner_type, gpos, num_glyphs)?;
+            return parse_positioning(inner, inner_type, gpos, num_glyphs);
         }
-        _ => {}
+        1 => PosSubtable::Single(parse_single_adjustment(data)?),
+        _ => return Ok(()),
+    };
+    if let Some(lookup) = gpos.lookups.last_mut() {
+        lookup.push(subtable);
     }
     Ok(())
 }
@@ -186,10 +447,11 @@ fn value_record(flags: u16) -> impl Fn(&[u8]) -> R<ValueRecord> {
     }
 }
 
-fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos, _num_glyphs: u16) -> Result<(), FontError> {
-    // Filled side by side: the plain `i16` maps are what `Font::kerning` uses, the value
-    // records keep the placements the advance-only map cannot hold.
-    let (kern, pairs, class_pairs) = (&mut gpos.kern, &mut gpos.pair, &mut gpos.class_pair);
+/// OT §GPOS "Pair Adjustment" (lookup type 2), formats 1 and 2. Fills the flat `i16` maps that
+/// `Font::kerning` uses side by side with the value records, which keep the placements the
+/// advance-only maps cannot hold.
+fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<PairSets, FontError> {
+    let mut pairs = PairSets::default();
     let (i, format) = be_u16(data)?;
     match format {
         1 => {
@@ -210,8 +472,8 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos, _num_glyphs: u16) 
                 
                 let iter = iterator_n(i, tuple((be_u16, value_record(value_format_1), value_record(value_format_2))), pair_value_count);
                 for (second_glyph, value_record_1, value_record_2) in iter {
-                    kern.glyph_pairs.insert((first_glyph, second_glyph), value_record_1.x_advance);
-                    pairs.insert((first_glyph, second_glyph), (value_record_1, value_record_2));
+                    gpos.kern.glyph_pairs.insert((first_glyph, second_glyph), value_record_1.x_advance);
+                    pairs.pairs.insert((first_glyph, second_glyph), (value_record_1, value_record_2));
                 }
             }
         },
@@ -226,8 +488,8 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos, _num_glyphs: u16) 
 
             // The class matrix is indexed by the two ClassDefs; without them no glyph ever gets a
             // class and `KernTable::get` can never reach `class_pairs`.
-            parse_class_def(Offset(class_def_1_offset).of(data)?, &mut kern.left_classes)?;
-            parse_class_def(Offset(class_def_2_offset).of(data)?, &mut kern.right_classes)?;
+            parse_class_def(Offset(class_def_1_offset).of(data)?, &mut gpos.kern.left_classes)?;
+            parse_class_def(Offset(class_def_2_offset).of(data)?, &mut gpos.kern.right_classes)?;
 
 
             // `class_1_count * class_2_count` overflows u16 (300 x 300 classes is a panic in
@@ -236,23 +498,23 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos, _num_glyphs: u16) 
             // than the subtable has bytes.
             let total = usize::from(class_1_count) * usize::from(class_2_count);
             let total = total.min(data.len());
-            kern.class_pairs.reserve(total.min(1 << 16));
+            gpos.kern.class_pairs.reserve(total.min(1 << 16));
 
             let iter = (0 .. class_1_count).cartesian_product(0 .. class_2_count)
                 .zip(iterator_n(i, tuple((value_record(value_format_1), value_record(value_format_2))), total));
 
             for ((class_1, class_2), (value_record_1, value_record_2)) in iter {
                 if value_record_1 != ValueRecord::default() || value_record_2 != ValueRecord::default() {
-                    class_pairs.insert((class_1, class_2), (value_record_1.clone(), value_record_2));
+                    pairs.class_pairs.insert((class_1, class_2), (value_record_1.clone(), value_record_2));
                 }
                 if value_record_1.x_advance != 0 {
-                    kern.class_pairs.insert((class_1, class_2), value_record_1.x_advance);
+                    gpos.kern.class_pairs.insert((class_1, class_2), value_record_1.x_advance);
                 }
             }
         }
-        n => error!("unsupported pair adjustment format {}", n)
+        n => return error!("unsupported pair adjustment format {}", n)
     }
-    Ok(())
+    Ok(pairs)
 }
 
 parser!(int16 : be_i16 -> i16);
@@ -282,7 +544,8 @@ fn parse_mark_array_table(data: &[u8]) -> Result<impl Array<Item=(u16, AnchorTab
 
 /// OT §GPOS "Mark-to-Base Attachment" (4) and "Mark-to-Mark Attachment" (6), format 1: the two
 /// subtables have the same layout, so this fills either map with `base`/`mark` anchor deltas.
-fn parse_mark_attachment(data: &[u8], marks: &mut HashMap<(u16, u16), (i16, i16)>) -> Result<(), FontError> {
+fn parse_mark_attachment(data: &[u8]) -> Result<HashMap<(u16, u16), (i16, i16)>, FontError> {
+    let mut marks = HashMap::new();
     let (i, format) = be_u16(data)?;
     require_eq!(format, 1);
     let (i, mark_coverage_offset) = be_u16(i)?;
@@ -318,7 +581,7 @@ fn parse_mark_attachment(data: &[u8], marks: &mut HashMap<(u16, u16), (i16, i16)
         }
     }
 
-    Ok(())
+    Ok(marks)
 }
 
 fn parse_base_array(data: &[u8], mark_class_count: u16) -> Result<impl Array<Item=AnchorTable> + '_, FontError> {
@@ -330,7 +593,8 @@ fn parse_base_array(data: &[u8], mark_class_count: u16) -> Result<impl Array<Ite
 
 /// OT §GPOS "Single Adjustment" (lookup type 1), formats 1 and 2: one value record per glyph,
 /// either the same for every covered glyph or one each.
-fn parse_single_adjustment(data: &[u8], gpos: &mut GPos) -> Result<(), FontError> {
+fn parse_single_adjustment(data: &[u8]) -> Result<HashMap<u16, ValueRecord>, FontError> {
+    let mut values = HashMap::new();
     let (i, format) = be_u16(data)?;
     let (i, coverage_offset) = be_u16(i)?;
     let (i, value_format) = be_u16(i)?;
@@ -339,23 +603,24 @@ fn parse_single_adjustment(data: &[u8], gpos: &mut GPos) -> Result<(), FontError
         1 => {
             let (_, value) = value_record(value_format)(i)?;
             for glyph in coverage {
-                gpos.single.insert(glyph, value.clone());
+                values.insert(glyph, value.clone());
             }
         }
         2 => {
             let (i, value_count) = be_u16(i)?;
             for (glyph, value) in coverage.zip(iterator_n(i, value_record(value_format), value_count)) {
-                gpos.single.insert(glyph, value);
+                values.insert(glyph, value);
             }
         }
         n => warn!("GPOS: unsupported single adjustment format {}, ignoring it", n),
     }
-    Ok(())
+    Ok(values)
 }
 
 /// OT §GPOS "Cursive Attachment" (lookup type 3), format 1: an entry and an exit anchor per
 /// glyph. A NULL offset means the glyph has no such anchor, which is stored as `(0, 0)`.
-fn parse_cursive(data: &[u8], gpos: &mut GPos) -> Result<(), FontError> {
+fn parse_cursive(data: &[u8]) -> Result<HashMap<u16, ((i16, i16), (i16, i16))>, FontError> {
+    let mut anchors = HashMap::new();
     let (i, format) = be_u16(data)?;
     require_eq!(format, 1);
     let (i, coverage_offset) = be_u16(i)?;
@@ -370,9 +635,9 @@ fn parse_cursive(data: &[u8], gpos: &mut GPos) -> Result<(), FontError> {
             Some(anchor) => anchor_coordinates(anchor)?,
             None => (0, 0),
         };
-        gpos.cursive.insert(glyph, (entry, exit));
+        anchors.insert(glyph, (entry, exit));
     }
-    Ok(())
+    Ok(anchors)
 }
 
 /// OT §GPOS "Anchor Tables": only the `(x, y)` pair is used. Formats 2 and 3 carry a contour
@@ -385,7 +650,8 @@ fn anchor_coordinates(data: &[u8]) -> Result<(i16, i16), FontError> {
 /// OT §GPOS "Mark-to-Ligature Attachment" (lookup type 5), format 1. A ligature can carry an
 /// anchor per component; this crate keeps the first component's, which is where a mark after
 /// the whole ligature goes.
-fn parse_mark_to_ligature_attachment(data: &[u8], gpos: &mut GPos) -> Result<(), FontError> {
+fn parse_mark_to_ligature_attachment(data: &[u8]) -> Result<HashMap<(u16, u16), (i16, i16)>, FontError> {
+    let mut marks_to_ligatures = HashMap::new();
     let (i, format) = be_u16(data)?;
     require_eq!(format, 1);
     let (i, mark_coverage_offset) = be_u16(i)?;
@@ -437,13 +703,13 @@ fn parse_mark_to_ligature_attachment(data: &[u8], gpos: &mut GPos) -> Result<(),
                 },
                 Err(_) => continue,
             };
-            gpos.mark_to_ligature.insert(
+            marks_to_ligatures.insert(
                 (ligature_gid, mark_gid),
                 (anchor.x - mark_x, anchor.y - mark_y),
             );
         }
     }
-    Ok(())
+    Ok(marks_to_ligatures)
 }
 
 #[cfg(test)]
@@ -494,8 +760,9 @@ mod tests {
         ];
         let data = words_to_bytes(&words);
         let mut gpos = GPos::default();
-        parse_pair_adjustment(&data, &mut gpos, 1000).expect("pair adjustment parses");
+        let pairs = parse_pair_adjustment(&data, &mut gpos).expect("pair adjustment parses");
         assert!(gpos.kern.class_pairs.is_empty());
+        assert!(pairs.class_pairs.is_empty());
     }
 
     #[test]
@@ -618,5 +885,153 @@ mod tests {
         let mut gpos = GPos::default();
         parse_positioning(&data, 5, &mut gpos, 100).expect("mark-to-ligature parses");
         assert_eq!(gpos.get_mark_to_ligature(GlyphId(200), GlyphId(100)), Some((20, 30)));
+    }
+
+    /// The default language system of a hand-built table: script `latn`, one feature `kern`
+    /// that names `lookups`.
+    fn gpos_with(mut gpos: GPos, lookups: Vec<u16>) -> GPos {
+        gpos.scripts = vec![Script {
+            tag: Tag(*b"latn"),
+            default_language: Some(crate::opentype::gsub::LanguageSystem::with_features(vec![0])),
+            languages: Vec::new(),
+        }];
+        gpos.features = vec![Feature::new(b"kern", lookups)];
+        gpos
+    }
+
+    fn kern_enabled(tag: Tag) -> bool {
+        tag.0 == *b"kern"
+    }
+
+    #[test]
+    fn single_adjustment_moves_the_advance_of_the_run() {
+        // OT §GPOS "Single Adjustment": glyph 30 gets xAdvance -10, glyph 31 +25.
+        let words: [u16; 10] = [
+            2, 12, 4, 2,
+            (-10i16) as u16, 25,
+            1, 2, 30, 31,
+        ];
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 1, &mut gpos, 100).expect("single adjustment parses");
+        let gpos = gpos_with(gpos, vec![0]);
+
+        let positions = gpos.position(&[GlyphId(30), GlyphId(31), GlyphId(32)], &kern_enabled);
+        assert_eq!(positions[0].x_advance, -10);
+        assert_eq!(positions[1].x_advance, 25);
+        // A glyph the coverage does not list keeps its default position.
+        assert_eq!(positions[2], GlyphPosition::default());
+        // Nothing enabled: nothing moves.
+        let positions = gpos.position(&[GlyphId(30)], &|_| false);
+        assert_eq!(positions[0], GlyphPosition::default());
+    }
+
+    #[test]
+    fn pair_adjustment_moves_both_glyphs() {
+        // OT §GPOS "Pair Adjustment" (2), format 1: 20 followed by 21 gets xPlacement 3 and
+        // xAdvance -40 on the first glyph and xAdvance 5 on the second.
+        let words: [u16; 14] = [
+            1, 22,
+            5, 4,
+            1, 12,
+            1, 21,
+            3, (-40i16) as u16,
+            5,
+            1, 1, 20,
+        ];
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 2, &mut gpos, 100).expect("pair adjustment parses");
+        let gpos = gpos_with(gpos, vec![0]);
+
+        let positions = gpos.position(&[GlyphId(20), GlyphId(21)], &kern_enabled);
+        assert_eq!(positions[0].x_offset, 3);
+        assert_eq!(positions[0].x_advance, -40);
+        assert_eq!(positions[1].x_advance, 5);
+    }
+
+    #[test]
+    fn mark_to_base_offsets_the_mark() {
+        // Base 200 carries the class-0 anchor (30,40), mark 100 its own at (10,10): the mark
+        // has to move by (20,30). Mark 101 claims class 5, which has no anchor, so it does not
+        // move at all.
+        let words: [u16; 29] = [
+            1, 44, 52, 1, 12, 34, // format, markCov, baseCov, markClassCount, markArray, baseArray
+            2, 0, 10, 5, 16,      // MarkArray: class 0 -> +10, class 5 -> +16
+            1, 10, 10,            // mark anchor (10,10)
+            1, 20, 20,            // mark anchor (20,20)
+            1, 4,                 // BaseArray: one base, anchor at +4
+            1, 30, 40,            // base anchor (30,40)
+            1, 2, 100, 101,       // mark coverage
+            1, 1, 200,            // base coverage
+        ];
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 4, &mut gpos, 100).expect("mark-to-base parses");
+        let gpos = gpos_with(gpos, vec![0]);
+
+        let positions = gpos.position(&[GlyphId(200), GlyphId(100), GlyphId(101)], &kern_enabled);
+        // The base itself stays where it is; the class-0 mark moves.
+        assert_eq!(positions[0], GlyphPosition::default());
+        assert_eq!(positions[1].x_offset, 20);
+        assert_eq!(positions[1].y_offset, 30);
+        // The mark in the class the base array does not have is not attached.
+        assert_eq!(positions[2], GlyphPosition::default());
+    }
+
+    #[test]
+    fn contextual_lookup_runs_the_lookup_it_names() {
+        // Lookup 0 is a single adjustment for glyph 41 (xAdvance -7); lookup 1 is a context
+        // positioning subtable that, for "40 41", applies lookup 0 at the second glyph.
+        let single: [u16; 8] = [2, 10, 4, 1, (-7i16) as u16, 1, 1, 41];
+        let context: [u16; 14] = [
+            1, 8, 1, 14,          // format 1, coverageOffset, ruleSetCount, ruleSetOffset[0]
+            1, 1, 40,             // coverage
+            1, 4,                 // rule set: one rule at +4
+            2, 1,                 // glyphCount 2, posCount 1
+            41,                   // input sequence
+            1, 0,                 // sequenceIndex 1, lookupListIndex 0
+        ];
+        let mut gpos = GPos::default();
+        parse_positioning(&words_to_bytes(&single), 1, &mut gpos, 100).expect("single parses");
+        gpos.lookups.push(Vec::new());
+        gpos.flags.push(0);
+        parse_positioning(&words_to_bytes(&context), 7, &mut gpos, 100).expect("context parses");
+        let gpos = gpos_with(gpos, vec![1]);
+
+        let positions = gpos.position(&[GlyphId(40), GlyphId(41)], &kern_enabled);
+        assert_eq!(positions[1].x_advance, -7);
+        // The context rule needs the glyph it covers in front: alone, 41 is not touched (the
+        // feature only names the context lookup, not the single adjustment).
+        let positions = gpos.position(&[GlyphId(41)], &kern_enabled);
+        assert_eq!(positions[0], GlyphPosition::default());
+    }
+
+    #[test]
+    fn ignore_marks_lookup_flag_skips_a_mark() {
+        // OT §"Lookup Flags": a lookup with IgnoreMarks leaves mark glyphs alone. Glyph 100 is
+        // a mark in the GDEF table and gets xAdvance -5 from the single adjustment.
+        let words: [u16; 10] = [2, 12, 4, 2, (-5i16) as u16, (-5i16) as u16, 1, 2, 100, 101];
+        let data = words_to_bytes(&words);
+        let gdef_words: [u16; 11] = [
+            1, 0, 12, 0, 0, 0,    // GDEF 1.0, glyphClassDefOffset 12
+            2, 1, 100, 100, 3,    // classDef format 2: glyphs 100..100 -> class 3 (mark)
+        ];
+        let gdef = crate::opentype::gdef::parse_gdef(&words_to_bytes(&gdef_words)).expect("GDEF parses");
+
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 1, &mut gpos, 100).expect("single adjustment parses");
+        gpos.flags = vec![0x0008];
+        let gpos = gpos_with(gpos, vec![0]);
+
+        // Without the flag the mark moves.
+        let positions = gpos.position(&[GlyphId(100)], &kern_enabled);
+        assert_eq!(positions[0].x_advance, -5);
+        // With it, the lookup skips the glyph.
+        let positions = gpos.position_with(&[GlyphId(100)], &kern_enabled, Some(&gdef));
+        assert_eq!(positions[0], GlyphPosition::default());
+        // Glyph 101 is not a mark (no GDEF class), so IgnoreMarks does not hide it.
+        let positions = gpos.position_with(&[GlyphId(101)], &kern_enabled, Some(&gdef));
+        assert_eq!(positions[0].x_advance, -5);
     }
 }
