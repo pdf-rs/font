@@ -319,6 +319,12 @@ fn c05_pair_pos_format_2_class_kerning() {
 /// A `cmap` (§cmap) with a single Unicode (platform 3, encoding 1) format 4 subtable.
 /// `segments` are `(first_code, last_code, first_glyph)` with consecutive glyph ids.
 pub fn cmap_format4(segments: &[(u16, u16, u16)]) -> Vec<u8> {
+    cmap_multi(&[(3, 1, format4_subtable(segments))])
+}
+
+/// A format 4 subtable (§cmap format 4) for `(first_code, last_code, first_glyph)` segments,
+/// mapped through `idDelta` with consecutive glyph ids.
+fn format4_subtable(segments: &[(u16, u16, u16)]) -> Vec<u8> {
     let seg_count = segments.len() as u16 + 1; // + the 0xFFFF terminator
     let mut sub = Vec::new();
     push_u16(&mut sub, 4);              // format
@@ -339,14 +345,22 @@ pub fn cmap_format4(segments: &[(u16, u16, u16)]) -> Vec<u8> {
     for _ in 0 .. seg_count { push_u16(&mut sub, 0); } // idRangeOffset[]: use idDelta
     let len = sub.len() as u16;
     sub[len_pos .. len_pos + 2].copy_from_slice(&be16(len));
+    sub
+}
 
+/// A `cmap` with one encoding record per `(platform, encoding, subtable)`.
+fn cmap_multi(records: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
     let mut t = Vec::new();
-    push_u16(&mut t, 0);        // version
-    push_u16(&mut t, 1);        // numTables
-    push_u16(&mut t, 3);        // platformID
-    push_u16(&mut t, 1);        // encodingID
-    push_u32(&mut t, 12);       // subtable offset
-    t.extend_from_slice(&sub);
+    push_u16(&mut t, 0);                        // version
+    push_u16(&mut t, records.len() as u16);
+    let mut offset = 4 + 8 * records.len();
+    for (platform, encoding, sub) in records {
+        push_u16(&mut t, *platform);
+        push_u16(&mut t, *encoding);
+        push_u32(&mut t, offset as u32);
+        offset += sub.len();
+    }
+    for (_, _, sub) in records { t.extend_from_slice(sub); }
     t
 }
 
@@ -375,4 +389,63 @@ fn c10c_codepoints_with_zero_max_ranges_does_not_panic() {
     // F13: `tuple_windows().min().unwrap()` panicked when nothing was left to merge.
     let got = codepoints_of(&cmap_format4(&[(0x41, 0x43, 1)]), 0);
     assert_eq!(got, vec![0x41 ..= 0x43]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// F12 — an unsupported cmap subtable must not hide the supported ones
+
+#[test]
+fn c11_unsupported_format_does_not_hide_other_subtables() {
+    // OT §cmap: subtables of different formats coexist; a reader skips the ones it does not
+    // implement.  Format 2 (high-byte mapping, CJK legacy) comes first here.
+    let format2 = be16(2).to_vec(); // header only: the crate never gets as far as the body
+    let data = cmap_multi(&[
+        (0, 3, format2),
+        (3, 1, format4_subtable(&[(0x41, 0x43, 1)])),
+    ]);
+    assert_eq!(codepoints_of(&data, 10), vec![0x41 ..= 0x43]);
+}
+
+#[test]
+fn c11b_unsupported_format_alone_yields_an_empty_map() {
+    // Skipping, not aborting: a font whose only subtable is format 2 still parses, with no
+    // codepoints, instead of failing to load.
+    let data = cmap_multi(&[(3, 1, be16(2).to_vec())]);
+    assert!(codepoints_of(&data, 10).is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// F15 — `post` version 1.0 is the standard Macintosh order
+
+/// `post` (OT §post) header, 32 bytes, up to and including version 3.0.
+pub fn post_table(version: u32) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_u32(&mut t, version);
+    push_u32(&mut t, 0);        // italicAngle
+    push_i16(&mut t, 0);        // underlinePosition
+    push_i16(&mut t, 0);        // underlineThickness
+    push_u32(&mut t, 0);        // isFixedPitch
+    for _ in 0 .. 4 { push_u32(&mut t, 0); } // min/maxMemType42, min/maxMemType1
+    assert_eq!(t.len(), 32);
+    t
+}
+
+#[test]
+fn c12_post_version_1_uses_the_standard_mac_order() {
+    // F15: version 1.0 has no glyphNameIndex array; the names *are* the 258 standard
+    // Macintosh names, in order.
+    let table = post_table(0x0001_0000);
+    let post = font::opentype::post::parse_post(&table).expect("post parses");
+    assert_eq!(post.names.len(), 258);
+    assert_eq!(post.names[0], ".notdef");
+    assert_eq!(post.names[3], "space");
+    assert_eq!(post.names[36], "A");
+}
+
+#[test]
+fn c12b_post_version_3_has_no_names() {
+    // Version 3.0 means "no glyph names"; an empty list is correct and must stay that way.
+    let table = post_table(0x0003_0000);
+    let post = font::opentype::post::parse_post(&table).expect("post parses");
+    assert!(post.names.is_empty());
 }

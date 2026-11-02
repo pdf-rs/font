@@ -11,12 +11,13 @@ Formats implemented: 0, 4, 6, 12, 14. The platform/encoding filter
 OT §cmap's "platform/encoding priority" intent.
 
 ## Differences from the specifications
-* **F12 (OT §cmap, "Subtable formats"):** any format other than the five above aborts the whole
-  table with `error!("cmap format {}", n)` (`:239-241`). Format 2 (high-byte mapping, all CJK
-  legacy fonts), 8 (mixed 16/32-bit) and 13 (last resort) are legal and common enough that a
-  font containing them *and* a good format-4 subtable becomes unloadable, because the loop walks
-  the encoding records in file order and dies on the first unsupported one. The spec asks for
-  unsupported formats to be skipped and the best supported subtable to be used.
+* **F12 (fixed 2026-11-02):** an unsupported subtable format aborted the whole table with
+  `error!("cmap format {}", n)` (the crate's own `error!` returns `Err`). Format 2 (high-byte
+  mapping, all CJK legacy fonts), 8 (mixed 16/32-bit) and 13 (last resort) are legal and common,
+  so a font carrying one of them *and* a good format-4 subtable became unloadable. The format is
+  now read and checked before the encoding bookkeeping, an unsupported one is skipped
+  (`continue`) with a `warn!`, and the catch-all arm is a `warn!` too.
+  Tests: `c11`, `c11b`.
 * **F13 (fixed 2026-11-02):** `CMap::codepoints()` never pushed the final run, so a contiguous
   cmap yielded an empty list; the merging loop dropped `prev` the same way, computed gaps as
   `b.start - a.end` instead of the number of codepoints missing between the runs, and

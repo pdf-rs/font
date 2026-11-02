@@ -89,6 +89,16 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
             None => continue
         };
         
+        let (i, format) = be_u16(table)?;
+        debug!("cmap format {}", format);
+        if !matches!(format, 0 | 4 | 6 | 12 | 14) {
+            // OT §cmap: a font may carry several subtables of different formats and the reader
+            // picks the best one it understands.  An unsupported format must not hide the
+            // others, so skip this encoding record and keep looking.
+            warn!("unsupported cmap format {}, skipping this subtable", format);
+            continue;
+        }
+
         match (cmap_encoding, encoding) {
             (None, e) => cmap_encoding = Some(e),
             (Some(c), e) => {
@@ -99,8 +109,6 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
             }
         }
 
-        let (i, format) = be_u16(table)?;
-        debug!("cmap format {}", format);
         match format {
             0 => {
                 let (i, len) = be_u16(i)?;
@@ -224,7 +232,7 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
                     }
                 }
             }
-            n => error!("cmap format {}", n),
+            n => warn!("cmap format {} is not implemented", n),
         }
     }
 

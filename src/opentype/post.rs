@@ -19,6 +19,11 @@ pub fn parse_post<'i>(input: &'i [u8]) -> Result<PostTable<'i>, FontError> {
     let (i, max_mem_type1) = be_u32(i)?;
 
     match version {
+        0x0001_0000 => {
+            // Version 1.0 carries no name data at all: the names are, by definition, the
+            // standard Macintosh glyph order (OT §post, "Version 1.0").
+            Ok(PostTable { names: MAC_NAMES[..].to_vec() })
+        }
         0x0002_0000 => {
             let (i, num_glyphs) = be_u16(i)?;
             let (i, glyph_name_index) = array::<Offset, _>(num_glyphs)(i)?;
