@@ -1,5 +1,12 @@
 # `src/parsers.rs` — shared nom helpers, offsets, arrays, PostScript tokens
 
+## Fixed
+* **F28 (2026-11-02):** `array_iter` did `input.split_at(P::SIZE * count)` and `array` the same
+  product unchecked, so a count taken from the file either panicked in `split_at` or wrapped
+  around on 32-bit. Both now go through `P::SIZE.checked_mul(count)` and return
+  `Failure(Complete)` when the product does not fit or exceeds the remaining input; unit test
+  `array_iter_rejects_counts_past_the_end` in `mod array_iter_tests` (4 lib tests now).
+
 ## What it does
 Two parse conventions coexist:
 * `R<T> = IResult<&[u8], T, VerboseError<&[u8]>>` — nom-style, used for untrusted table data.

@@ -776,3 +776,41 @@ fn c18b_unknown_gsub_minor_version_is_ignored() {
     let font = OpenTypeFont::parse(&data).expect("GSUB 1.2 parses");
     assert!(font.gsub.is_some());
 }
+
+// ---------------------------------------------------------------------------------------------
+// F28 — counts taken from the file must not wrap around or index past the end
+
+#[test]
+fn c24_woff2_hmtx_rejects_more_metrics_than_glyphs() {
+    // F28: `maxp.numGlyphs as usize - number_of_hmetrics` wrapped around to a huge number (a
+    // panic in debug builds) when a WOFF2 font claims more metrics than it has glyphs. The
+    // three streams are long enough that the count is the first thing that can go wrong.
+    let head = font::opentype::parse_head(&head_table()).expect("head parses");
+    let maxp = font::opentype::parse_maxp(&maxp_table(1)).expect("maxp parses");
+    let hhea = font::opentype::parse_hhea(&hhea_table(2)).expect("hhea parses");
+    // flags, 2 x (advanceWidth, lsb), then the trailing lsb array.
+    let hmtx = [0u8; 13];
+    assert!(font::opentype::parse_hmtx_woff2_format1(&hmtx, &head, &hhea, &maxp).is_err());
+
+    // OT §hhea: `numberOfHMetrics` is at least 1.
+    let hhea = font::opentype::parse_hhea(&hhea_table(0)).expect("hhea parses");
+    assert!(font::opentype::parse_hmtx_woff2_format1(&hmtx, &head, &hhea, &maxp).is_err());
+}
+
+#[test]
+fn c24b_woff2_hmtx_reads_a_consistent_table() {
+    // Positive control: one glyph, one metric, no trailing lsbs (flags & 2), as WOFF2 §5.4
+    // prescribes when the lsb stream is omitted.
+    let head = font::opentype::parse_head(&head_table()).expect("head parses");
+    let maxp = font::opentype::parse_maxp(&maxp_table(1)).expect("maxp parses");
+    let hhea = font::opentype::parse_hhea(&hhea_table(1)).expect("hhea parses");
+    // flags = 1 (bearings are all `head.xMin`), advanceWidth = 500, one glyph so no trailing
+    // lsb array.
+    let hmtx = [1u8, 0x01, 0xf4];
+    let (rest, parsed) = font::opentype::parse_hmtx_woff2_format1(&hmtx, &head, &hhea, &maxp)
+        .expect("one metric for one glyph");
+    assert!(rest.is_empty());
+    let m = parsed.metrics_for_gid(0).expect("metric for glyph 0");
+    assert_eq!((m.advance, m.lsb), (500.0, head.x_min as f32));
+    assert!(parsed.metrics_for_gid(1).is_none());
+}

@@ -1,6 +1,11 @@
 # `src/opentype/mod.rs` — table directory and the sfnt tables shared by glyf/CFF
 
 ## Fixed
+* **F28 (2026-11-02):** `parse_hmtx_woff2_format1` computed `maxp.numGlyphs - numberOfHMetrics`
+  as `usize` and wrapped to a huge count when the WOFF2 hmtx transform claimed more metrics
+  than glyphs (debug: "attempt to subtract with overflow"). It now uses `checked_sub` and
+  rejects `numberOfHMetrics == 0` with `Failure(Complete)` before reading any stream; test
+  `c24`/`c24b` in `tests/spec_cases.rs`.
 * **F30/F31 (2026-11-02):** `parse_hmtx` requires `1 <= numberOfHMetrics <= numGlyphs` and
   reads exactly `numGlyphs - numberOfHMetrics` left side bearings (was `many0`);
   `Hmtx::metrics_for_gid` returns `None` at or beyond `numGlyphs`; `parse_head` checks

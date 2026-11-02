@@ -15,6 +15,7 @@ use nom::{
     combinator::map,
     bytes::complete::take,
     sequence::tuple,
+    error::ParseError,
 };
 use pathfinder_content::outline::Outline;
 use pathfinder_geometry::{vector::Vector2F, transform2d::Transform2F, rect::RectF};
@@ -467,6 +468,13 @@ pub fn parse_hmtx(i: &[u8], hhea: &Hhea, maxp: &Maxp) -> Result<Hmtx, FontError>
 }
 pub fn parse_hmtx_woff2_format1<'a>(i: &'a [u8], head: &Head, hhea: &Hhea, maxp: &Maxp) -> R<'a, Hmtx> {
     let num_metrics = hhea.number_of_hmetrics as usize;
+    // WOFF2 §5.4: the transformed `hmtx` omits the trailing bearings whose count is
+    // `numGlyphs - numberOfHMetrics`; a larger `numberOfHMetrics` must not wrap around.
+    let n_lsbs = match (maxp.num_glyphs as usize).checked_sub(num_metrics) {
+        Some(n) if num_metrics != 0 => n,
+        _ => return Err(nom::Err::Failure(
+            nom::error::VerboseError::from_error_kind(i, nom::error::ErrorKind::Complete)))
+    };
     let (i, flags) = be_u8(i)?; 
     let (mut i, advance_stream) = take(num_metrics * 2)(i)?;
     
@@ -480,7 +488,7 @@ pub fn parse_hmtx_woff2_format1<'a>(i: &'a [u8], head: &Head, hhea: &Hhea, maxp:
     };
     
     let lsbs = if flags & 2 == 0 {
-        parse(&mut i, count(be_i16, maxp.num_glyphs as usize - num_metrics))?
+        parse(&mut i, count(be_i16, n_lsbs))?
     } else {
         vec![]
     };
