@@ -126,7 +126,14 @@ impl Type1Font {
             global_subrs: ()
         };
 
-        let encoding = font_dict.get("Encoding").expect("no /Encoding").as_array().expect("/Encoding is not an array");
+        // PLRM §5.6: `/Encoding` is optional, and it may be a name (`/StandardEncoding`)
+        // instead of an array. This VM does not resolve such a name back to an array, so
+        // "no encoding" means the glyphs are only reachable by name — it must not abort
+        // the font.
+        let encoding = font_dict.get("Encoding").and_then(|item| item.as_array());
+        if encoding.is_none() {
+            warn!("Type 1 font has no /Encoding array; codepoint lookup is empty");
+        }
         
         let mut glyphs = IndexMap::with_capacity(char_strings.len());
         let mut unicode_map = HashMap::with_capacity(char_strings.len());
@@ -167,27 +174,29 @@ impl Type1Font {
             }
         }
         
-        let mut codepoints = HashMap::with_capacity(encoding.len());
-        let mut codepoint = 0;
-        for item in encoding.iter() {
-            match item {
-                RefItem::Null => {},
-                RefItem::Literal(b".notdef") => {},
-                RefItem::Literal(name) => {
-                    match std::str::from_utf8(name) {
-                        Ok(name) => {
-                            if let Some((index, _, _)) = glyphs.get_full(name) {
-                                codepoints.insert(codepoint, index as u32);
+        let mut codepoints = HashMap::with_capacity(encoding.map(|e| e.len()).unwrap_or(0));
+        if let Some(encoding) = encoding {
+            let mut codepoint = 0;
+            for item in encoding.iter() {
+                match item {
+                    RefItem::Null => {},
+                    RefItem::Literal(b".notdef") => {},
+                    RefItem::Literal(name) => {
+                        match std::str::from_utf8(name) {
+                            Ok(name) => {
+                                if let Some((index, _, _)) = glyphs.get_full(name) {
+                                    codepoints.insert(codepoint, index as u32);
+                                }
+                            }
+                            Err(_) => {
+                                warn!("name not utf8: {:?}", name);
                             }
                         }
-                        Err(_) => {
-                            warn!("name not utf8: {:?}", name);
-                        }
                     }
+                    _ => {}
                 }
-                _ => {}
+                codepoint += 1;
             }
-            codepoint += 1;
         }
 
         let font_matrix = expect!(font_dict.get("FontMatrix"), "no FontMatrix");
@@ -202,9 +211,8 @@ impl Type1Font {
                 Ok(RectF::from_points(Vector2F::new(a, b), Vector2F::new(c, d)))
             }).transpose()?;
         
-        let (a, b, c, d, e, f) = TupleElements::from_iter(
-                font_matrix.iter().map(|item| item.as_f32().unwrap())
-        ).unwrap();
+        let matrix: Vec<f32> = font_matrix.iter().filter_map(|item| item.as_f32()).collect();
+        let (a, b, c, d, e, f) = expect!(TupleElements::from_iter(matrix.into_iter()), "FontMatrix needs 6 numbers");
         
         Ok(Type1Font {
             font_matrix: Transform2F::row_major(a, b, e, c, d, f),
@@ -247,7 +255,7 @@ fn parse_pfb(mut vm: &mut Vm, i: &[u8]) -> Result<(), FontError> {
         match block_type {
             1 | 2 => {} // continue
             3 => break,
-            n => panic!("unknown block type {}", n)
+            n => error!("unknown PFB block type {}", n)
         }
         
         let (i, block_len) = le_u32(i)?;
@@ -423,7 +431,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     }
                     17 => { // – pop (12 17) number
                         trace!("pop");
-                        let n = ps_stack.pop().expect("PS stack is empty");
+                        let n = expect!(ps_stack.pop(), "PS stack is empty");
                         s.push(n);
                     }
                     33 => { // ⊦ x y setcurrentpoint (12 33) ⊦
@@ -433,7 +441,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         s.current = p;
                         s.stack.clear();
                     },
-                    _ => panic!("invalid operator")
+                    n => error!("invalid Type 1 charstring operator (12 {})", n)
                 }
             }
             13 => { // ⊦ sbx wx hsbw (13) ⊦
