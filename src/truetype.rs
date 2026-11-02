@@ -23,10 +23,29 @@ use crate::opentype::{
 use pathfinder_geometry::{transform2d::Matrix2x2F};
 use itertools::Itertools;
 
+/// Where one component of a composite glyph (OT §glyf, "Composite glyph description") sits.
+#[derive(Copy, Clone, Debug)]
+pub enum ComponentOffset {
+    /// `ARGS_ARE_XY_VALUES` is set: the two arguments are an x/y offset.
+    Vector(Vector2F),
+    /// Otherwise the arguments are point numbers (§glyf): the component's point `child` is
+    /// moved onto point `parent` of the outline built from the preceding components.
+    MatchPoints { parent: u16, child: u16 },
+}
+
+/// One component of a composite glyph: glyph id, the 2×2 transform that applies to its
+/// coordinates, and where the component is placed.
+#[derive(Copy, Clone, Debug)]
+pub struct Component {
+    pub gid: u32,
+    pub matrix: Matrix2x2F,
+    pub offset: ComponentOffset,
+}
+
 #[derive(Clone)]
 pub enum Shape {
     Simple(Outline),
-    Compound(Vec<(u32, Transform2F)>),
+    Compound(Vec<Component>),
     Empty
 }
 
@@ -232,18 +251,24 @@ pub fn compound(mut input: &[u8]) -> R<Shape> {
     let mut parts = Vec::new();
     loop {
         let (flags, gidx) = parse(&mut input, tuple((be_u16, be_u16)))?;
-        let mut transform = Transform2F::default();
-        if flags & 2 != 0 {
-            // XY values
+        // OT §glyf: with ARGS_ARE_XY_VALUES the two arguments are an x/y offset, otherwise they
+        // are unsigned point numbers (one into the composite built so far, one into the
+        // component) and the component is placed by matching them.
+        let offset = if flags & 2 != 0 {
             if flags & 1 != 0 {
                 // shorts
-                transform.vector = parse(&mut input, vec_i16)?
+                ComponentOffset::Vector(parse(&mut input, vec_i16)?)
             } else {
-                transform.vector = parse(&mut input, vec_i8)?
+                ComponentOffset::Vector(parse(&mut input, vec_i8)?)
             }
+        } else if flags & 1 != 0 {
+            let (parent, child) = parse(&mut input, tuple((be_u16, be_u16)))?;
+            ComponentOffset::MatchPoints { parent, child }
         } else {
-            panic!("Matching points not supported.");
+            let (parent, child) = parse(&mut input, tuple((be_u8, be_u8)))?;
+            ComponentOffset::MatchPoints { parent: parent as u16, child: child as u16 }
         };
+        let mut transform = Transform2F::default();
         if flags & (1 << 3) != 0 {
             // WE_HAVE_A_SCALE
             let scale = parse(&mut input, fraction_i16)?;
@@ -260,7 +285,7 @@ pub fn compound(mut input: &[u8]) -> R<Shape> {
         }
 
         // Get indexed glyph.
-        parts.push((gidx as u32, transform));
+        parts.push(Component { gid: gidx as u32, matrix: transform.matrix, offset });
         // More components ?
         if flags & 0x20 == 0 {
             break;
@@ -269,22 +294,85 @@ pub fn compound(mut input: &[u8]) -> R<Shape> {
     Ok((input, Shape::Compound(parts)))
 }
 
+/// The points of a contour without the explicit closing point that `contour()` appends, i.e.
+/// the numbering OT §glyf uses for point matching.
+fn spec_points(contour: &Contour) -> &[Vector2F] {
+    let points = contour.points();
+    if points.len() > 1 && points[0] == points[points.len() - 1] {
+        &points[.. points.len() - 1]
+    } else {
+        points
+    }
+}
+
+/// Point `index` of an outline, counting continuously over its contours (§glyf point numbers).
+fn point_at(outline: &Outline, index: u16) -> Option<Vector2F> {
+    let mut n = index as usize;
+    for contour in outline.contours() {
+        let points = spec_points(contour);
+        if n < points.len() {
+            return Some(points[n]);
+        }
+        n -= points.len();
+    }
+    None
+}
+
+/// A composite glyph may nest; the spec also forbids a glyph that contains itself. Both are
+/// bounded here so a malformed font cannot loop or overflow the stack.
+const MAX_COMPONENT_DEPTH: usize = 16;
+
 pub fn get_outline(shapes: &[Shape], idx: u32) -> Option<Outline> {
-    match shapes.get(idx as usize)? {
-        &Shape::Simple(ref path) => Some(path.clone()),
-        &Shape::Compound(ref parts) => {
+    expand_outline(shapes, idx, &mut Vec::new())
+}
+
+fn expand_outline(shapes: &[Shape], idx: u32, stack: &mut Vec<u32>) -> Option<Outline> {
+    if stack.contains(&idx) {
+        warn!("glyf: composite glyph {} contains itself", idx);
+        return Some(Outline::new());
+    }
+    if stack.len() >= MAX_COMPONENT_DEPTH {
+        warn!("glyf: composite glyphs nested deeper than {}", MAX_COMPONENT_DEPTH);
+        return Some(Outline::new());
+    }
+    stack.push(idx);
+    let result = match shapes.get(idx as usize) {
+        None => None,
+        Some(&Shape::Empty) => Some(Outline::new()),
+        Some(&Shape::Simple(ref path)) => Some(path.clone()),
+        Some(&Shape::Compound(ref parts)) => {
             let mut outline = Outline::new();
-            for &(gid, tr) in parts {
-                if let Some(Shape::Simple(ref path)) = shapes.get(gid as usize) {
-                    let mut path = path.clone();
-                    path.transform(&tr);
-                    outline.push_outline(path);
-                }
+            for part in parts {
+                let mut child = match expand_outline(shapes, part.gid, stack) {
+                    Some(child) => child,
+                    None => {
+                        warn!("glyf: glyph {} references missing glyph {}", idx, part.gid);
+                        continue;
+                    }
+                };
+                // The 2×2 part applies before the placement offset.
+                child.transform(&Transform2F { matrix: part.matrix, vector: Vector2F::zero() });
+                let offset = match part.offset {
+                    ComponentOffset::Vector(v) => v,
+                    ComponentOffset::MatchPoints { parent, child: child_point } => {
+                        match (point_at(&outline, parent), point_at(&child, child_point)) {
+                            (Some(p), Some(c)) => p - c,
+                            _ => {
+                                warn!("glyf: glyph {} matches points {} and {} that do not exist",
+                                      idx, parent, child_point);
+                                Vector2F::zero()
+                            }
+                        }
+                    }
+                };
+                child.transform(&Transform2F::from_translation(offset));
+                outline.push_outline(child);
             }
             Some(outline)
         }
-        &Shape::Empty => Some(Outline::new())
-    }
+    };
+    stack.pop();
+    result
 }
 
 #[derive(Copy, Clone, Debug)]

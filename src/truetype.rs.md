@@ -1,6 +1,14 @@
 # `src/truetype.rs` — `glyf`/`loca` outlines and composite glyphs
 
 ## Fixed
+* **F19/F20 (2026-11-02):** `compound()` no longer panics when `ARGS_ARE_XY_VALUES` is clear —
+  the arguments are stored as `ComponentOffset::MatchPoints { parent, child }` and resolved in
+  `get_outline` once the component outline exists (`spec_points`/`point_at` count §glyf point
+  numbers, ignoring the explicit closing point `contour()` appends). `get_outline` is now a
+  recursive `expand_outline` with a stack, so nested composites are expanded, missing children
+  and self-references produce an empty or partial outline with a warning, and nesting is capped
+  at `MAX_COMPONENT_DEPTH` (16). `Shape::Compound` holds `Vec<Component>` (glyph id, 2×2 matrix,
+  `ComponentOffset`). Tests: `c17a`, `c17b`, `c17c`.
 * **F31 (2026-11-02):** `parse_shapes` checks that the last `loca` offset stays inside `glyf`
   and turns an unparseable or out-of-range glyph record into `Shape::Empty` (with a warning)
   instead of failing the whole font. `TrueTypeFont::num_glyphs()` answers `maxp.numGlyphs`,
@@ -8,8 +16,8 @@
 
 ## What it does
 Parses the `glyf` table from a `loca` offset array into `Shape::{Simple(Outline),
-Compound(Vec<(gid, Transform2F)>), Empty}`, resolves composites one level deep in
-`get_outline`, and implements `Font` for a pure-TrueType font (`head`, `maxp`, `hhea`, `hmtx`,
+Compound(Vec<Component>), Empty}`, resolves composites recursively in `get_outline`, and
+implements `Font` for a pure-TrueType font (`head`, `maxp`, `hhea`, `hmtx`,
 `cmap`, `post`, `kern`, `OS/2`).
 
 The simple-glyph decoder is derived from stb_truetype and is correct in the parts that matter:
@@ -19,12 +27,7 @@ midpoint insertion, and closing the contour with a quadratic back to the start p
 (OT §glyf "Simple glyph description").
 
 ## Differences from the specifications
-* **F20 (OT §glyf "Composite glyph description"):** `get_outline` (`:266-283`) only expands
-  children of type `Shape::Simple`; a nested composite child is dropped silently. The spec
-  explicitly allows nesting ("a composite glyph parent may include other composite glyphs as
-  child components … must be acyclic, depth ≤ maxComponentDepth").
-* **F19:** `compound()` (`:220`) does `panic!("Matching points not supported.")` when the
-  `ARGS_ARE_XY_VALUES` bit (0x0002) is clear. Point matching is legal, if rare.
+* **F19/F20** (panic on point matching; nested composites dropped) — fixed above.
 * Composite flags handled: `ARGS_ARE_WORDS` (0x0001) ✓, `WE_HAVE_A_SCALE` (0x0008) ✓,
   `MORE_COMPONENTS` (0x0020) ✓, `WE_HAVE_AN_X_AND_Y_SCALE` (0x0040) ✓, `WE_HAVE_A_TWO_BY_TWO`
   (0x0080) ✓ with the spec's `xscale, scale01, scale10, yscale` order. Ignored:

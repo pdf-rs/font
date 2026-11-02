@@ -601,3 +601,133 @@ fn c16c_loca_may_not_point_past_glyf() {
     tables.push((*b"glyf", vec![0u8; 10]));
     assert!(OpenTypeFont::parse(&build_font(tables)).is_err());
 }
+
+// ---------------------------------------------------------------------------------------------
+// glyf / loca: simple glyphs, composite glyphs and their placement
+
+/// A simple glyph record (OT §glyf) with one contour through `points`, all points on-curve.
+pub fn simple_glyph(points: &[(i16, i16)]) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_i16(&mut t, 1);                        // numberOfContours
+    push_i16(&mut t, 0);                        // xMin
+    push_i16(&mut t, 0);                        // yMin
+    push_i16(&mut t, 1000);                     // xMax
+    push_i16(&mut t, 1000);                     // yMax
+    push_u16(&mut t, points.len() as u16 - 1);  // endPtsOfContours[0]
+    push_u16(&mut t, 0);                        // instructionLength
+    for _ in points { t.push(0x01); }           // ON_CURVE, i16 deltas
+    let (mut px, mut py) = (0i16, 0i16);
+    for &(x, _) in points { push_i16(&mut t, x - px); px = x; }
+    for &(_, y) in points { push_i16(&mut t, y - py); py = y; }
+    t
+}
+
+/// How one component of a composite glyph is placed (OT §glyf).
+#[derive(Copy, Clone, Debug)]
+pub enum Placement {
+    /// `ARGS_ARE_XY_VALUES`: an x/y offset.
+    Offset(i16, i16),
+    /// Point matching: `parent` in the composite so far, `child` in the component.
+    Points(u16, u16),
+}
+
+/// A composite glyph record (OT §glyf), every argument stored as a word.
+pub fn composite_glyph(components: &[(u16, Placement)]) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_i16(&mut t, -1);                       // numberOfContours
+    for _ in 0 .. 4 { push_i16(&mut t, 0); }    // xMin, yMin, xMax, yMax
+    for (n, &(gid, placement)) in components.iter().enumerate() {
+        let mut flags = 0x0001;                 // ARG_1_AND_2_ARE_WORDS
+        if n + 1 < components.len() { flags |= 0x0020; }  // MORE_COMPONENTS
+        if let Placement::Offset(..) = placement { flags |= 0x0002; }
+        push_u16(&mut t, flags);
+        push_u16(&mut t, gid);
+        match placement {
+            Placement::Offset(dx, dy) => { push_i16(&mut t, dx); push_i16(&mut t, dy); }
+            Placement::Points(parent, child) => { push_u16(&mut t, parent); push_u16(&mut t, child); }
+        }
+    }
+    t
+}
+
+/// Assemble `glyf` and a matching short `loca` from the glyph records, each padded to 2 bytes.
+pub fn glyf_and_loca(glyphs: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
+    let mut glyf = Vec::new();
+    let mut offsets = vec![0u32];
+    for glyph in glyphs {
+        glyf.extend_from_slice(glyph);
+        while glyf.len() % 2 != 0 { glyf.push(0); }
+        offsets.push(glyf.len() as u32);
+    }
+    (glyf, loca_table_short(&offsets))
+}
+
+/// A TrueType font carrying exactly these glyph records.
+pub fn font_with_glyphs(glyphs: &[Vec<u8>]) -> OpenTypeFont {
+    let (glyf, loca) = glyf_and_loca(glyphs);
+    let mut tables = base_tables(glyphs.len() as u16);
+    tables.push((*b"loca", loca));
+    tables.push((*b"glyf", glyf));
+    OpenTypeFont::parse(&build_font(tables)).expect("font parses")
+}
+
+/// Every point of a glyph's outline, in contour order, without the closing point that
+/// `contour()` appends (so the indices are the ones OT §glyf uses).
+pub fn outline_points(font: &OpenTypeFont, gid: u16) -> Vec<(f32, f32)> {
+    let glyph = font.glyph(GlyphId(gid as u32)).expect("glyph exists");
+    let mut out = Vec::new();
+    for contour in glyph.path.contours() {
+        let points = contour.points();
+        let points = if points.len() > 1 && points[0] == points[points.len() - 1] {
+            &points[.. points.len() - 1]
+        } else {
+            points
+        };
+        for point in points {
+            out.push((point.x(), point.y()));
+        }
+    }
+    out
+}
+
+#[test]
+fn c17a_composite_point_matching() {
+    // F19: without ARGS_ARE_XY_VALUES the arguments are point numbers, not offsets. The
+    // second copy of gid 1 must move so that its point 0 lands on point 2 of the first copy.
+    let font = font_with_glyphs(&[
+        Vec::new(),
+        simple_glyph(&[(0, 0), (100, 0), (0, 100)]),
+        composite_glyph(&[(1, Placement::Offset(0, 0)), (1, Placement::Points(2, 0))]),
+    ]);
+    assert_eq!(
+        outline_points(&font, 2),
+        vec![(0.0, 0.0), (100.0, 0.0), (0.0, 100.0),
+             (0.0, 100.0), (100.0, 100.0), (0.0, 200.0)]
+    );
+}
+
+#[test]
+fn c17b_nested_composite_glyphs_are_expanded() {
+    // F20: a composite may reference another composite.
+    let font = font_with_glyphs(&[
+        Vec::new(),
+        simple_glyph(&[(0, 0), (100, 0), (0, 100)]),
+        composite_glyph(&[(1, Placement::Offset(10, 0))]),
+        composite_glyph(&[(2, Placement::Offset(0, 20))]),
+    ]);
+    assert_eq!(
+        outline_points(&font, 3),
+        vec![(10.0, 20.0), (110.0, 20.0), (10.0, 120.0)]
+    );
+}
+
+#[test]
+fn c17c_self_referencing_composite_terminates() {
+    // OT §glyf forbids a glyph that contains itself; reading one must not recurse forever.
+    let font = font_with_glyphs(&[
+        Vec::new(),
+        simple_glyph(&[(0, 0), (100, 0), (0, 100)]),
+        composite_glyph(&[(2, Placement::Offset(0, 0))]),
+    ]);
+    assert!(outline_points(&font, 2).is_empty());
+}
