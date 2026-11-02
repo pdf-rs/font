@@ -1,0 +1,53 @@
+# `src/cff.rs` — Compact Font Format: INDEX/DICT parsing, charsets, encodings, outlines
+
+## What it does
+* `read_cff`: header (major=1, hdrSize, offSize), the four leading INDEXes (Name, TopDICT,
+  String, GlobalSubr).
+* `Cff::slot(idx)`: one TopDICT → `CharStrings` INDEX, `Private`/`Subrs`, `FDArray`/`FDSelect`
+  for CID fonts, `FontMatrix` (default `0.001`), per-glyph Private DICT + local Subrs.
+* `CffSlot::outlines()`: runs each charstring (Type 1 or Type 2 dialect per
+  `CharstringType`) through `type1::charstring`/`type2::charstring` and derives
+  `(outline, width, lsb)` using `defaultWidthX`/`nominalWidthX` and the `deltaWidth` from the
+  first stack-clearing operator.
+* `CffSlot::parse_font()`: charset (predefined ISOAdobe/Expert/ExpertSubset, formats 0/1/2),
+  SID→gid and name→gid maps, the 8-bit built-in encoding (Standard/Expert/custom + supplements),
+  and a glyph-name→Unicode map via `pdf_encoding::glyphname_to_unicode`.
+* `dict`/`value`/`float`/`operator`: the DICT operand syntax including the 5-nibble real format.
+
+The SID tables (`STANDARD_STRINGS`, `ISO_ADOBE_CHARSET`, `EXPERT_CHARSET`,
+`EXPERT_SUBSET_CHARSET`, `STANDARD_ENCODING`, `EXPERT_ENCODING`) match TN5176 Appendix A/B.
+
+## Differences from the specifications
+* **F35:** `require_eq!(major, 1)` (`:105`) — CFF2 (variable fonts) is rejected.
+* **F42 (TN5176 §"Name INDEX"):** the Name INDEX is parsed and thrown away, so `CffFont::name()`
+  is `Name::default()` and `info.weight` is always `None` (**F47**) — a bare CFF font reports no
+  name at all.
+* **F17:** the glyph-name→Unicode map (`:463-467`) loops `0..glyphs.len()-1` and inserts
+  `(n+1)`; the last glyph is never mapped and an empty font underflows.
+* **F18:** encoding supplements do `sid_map[&sid]` (`:428-430`) — a supplement SID that is not in
+  the charset panics (legal per TN5176, a supplement may name a glyph the font lacks).
+* **F22/F23:** `Private` is treated as mandatory (`.expect("no private dict entry")`, `:205`) and
+  the charstring/charset/FDSelect paths use `panic!` for anything unexpected (`:299`, `:343`,
+  `:787`, `:809`). `index()` subtracts 1 from every offset (`:504-517`) without checking that the
+  offset is >= 1, so a zero offset underflows.
+* **F42 (TN5177/TN5176 §"Charstring width"):** width derivation is right — `(Some(w), None)` uses
+  the charstring width, `(None, None)` `defaultWidthX`, `(None, Some(d))` `nominalWidthX + d` —
+  but `(Some(_), Some(_))` panics instead of preferring the explicit width.
+* `dict()` (`:481-497`) uses `while let Ok(...) = value(input)` to collect operands; an invalid
+  operand byte (22-27, 31, 255 = reserved) silently ends the operand list and the next byte is
+  then parsed as an operator, so a malformed DICT desynchronises instead of failing.
+* `float()` (`:529-586`) indexes `data[pos/2]` directly — a truncated real operand panics
+  (index out of bounds) rather than returning `Err`.
+* `charset` format 0 uses `num_glyphs - 1` (`:779`), underflowing when the CharStrings INDEX is
+  empty; `ranges()` (`:767`) has the same `num_glyphs - 1` pattern.
+* `fd_select` format 3 (`:255-275`) validates that the first range starts at gid 0 ✓ but does not
+  validate that the sentinel equals `numGlyphs`; format 4 (CFF2) is not handled.
+* `parse_font_matrix` (`:156-162`) reads the six values as `row_major(a, b, e, c, d, f)`, i.e.
+  the spec's `[a b c d e f]` → `[[a b][c d]]` plus translation `(e, f)`. Correct.
+* `CharstringType` 1 (Type 1 charstrings inside CFF) is supported via `type1::charstring`, but the
+  Type 1 *width* (`hsbw`, opcode 13) is the only source there, so `delta_width` handling differs.
+* No subr-bias validation and no recursion depth limit — see `type2.rs.md`.
+
+## Cross references
+`type1.rs.md`, `type2.rs.md`, `lib.rs.md` (`State`/`Context`), `opentype/mod.rs.md`
+(`OpenTypeFont::from_hmtx_glyf_and_tables` calls `read_cff` for `CFF `).
