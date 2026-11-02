@@ -17,21 +17,17 @@ Implemented: all path operators (1, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24
   in `tests/cff_cases.rs`.
 * **F9 (2026-11-02):** `roll` rotates the last `N` operands (`&mut s.stack[len - n .. len]`) and
   accepts `N == stack.len()` (`require!(n <= len)`). Tests: `c07`, `c07b`.
+* **F8 (2026-11-02):** `hflex1` no longer uses the generic `bezier!` pattern. The last segment's
+  delta is `(dx6, -(dy1 + dy2 + dy5))`, so the curve ends on the starting y as the operator's
+  precondition requires (TN5177 §4.1: "the starting and ending points have the same y value").
+  Tests: `c08c`, `c08d`, `c08e` (the `hflex` control is unchanged).
 
 ## Differences from the specifications
-* **F6 (TN5177 §3.1 + §4.3):** `hstem`/`vstem` decide "is there a width argument?" with
-  `maybe_width(s, |n| n == 2)` (`:90`, `:98`). The rule is "width present iff the argument count
-  is odd", so with two or more stem pairs the first stem coordinate becomes `deltaWidth` and the
-  glyph's advance is wrong. `hstemhm`/`vstemhm` (`:460`, `:475`) use the correct `n % 2 == 0`;
-  `rmoveto`/`hmoveto`/`vmoveto`/`endchar` use the correct per-operator counts.
-* **F7 (TN5177 §4.1 `flex1`):** `:352-370` wants 16 arguments for an 11-argument operator and
-  errors out with "stack empty" on the 3rd/4th `point!`. Every glyph using `flex1` fails, and
-  because `CffSlot::outlines()` propagates the error, the **entire font** fails to load.
-* **F8 (TN5177 §4.1 `hflex1`):** `:345-350` builds the last segment as `(dx6, 0)`; the spec's
-  end point returns to the starting y, i.e. the final delta is `dy6 = -dy5`. (`hflex` at `:335`
-  is correct: there all y deltas are zero.)
-* **F9 (TN5177 §4.4 `roll`):** `:294` rotates `stack[len-n-1 .. len-1]`; the operand group is
-  `stack[len-n .. len]`. The window is shifted by one element.
+* **F7 — withdrawn (2026-11-02):** `flex1` consumes exactly 11 arguments (6 for the first curve,
+  10 for the `(dx, dy)` decision — read from the start of the stack, which is the same 10 values —
+  and 5 for the second curve) and picks `(d6, 0)` vs `(0, d6)` correctly. The original finding
+  counted the decision loop as consuming new operands. `c08`/`c08b` pin the horizontal and
+  vertical cases.
 * **F11 (TN5177 Appendix C):** `endchar` with four arguments is the deprecated accent composition
   (`adx ady bchar achar`); `:462-468` treats the first argument as a width and drops the rest, so
   those glyphs are empty.

@@ -321,7 +321,30 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     36 => { // |- dx1 dy1 dx2 dy2 dx3 dx4 dx5 dy5 dx6 hflex1 (12 36) |-
                         trace!("hflex1");
                         let slice = s.stack.as_slice();
-                        bezier!(s, slice, xy xy x  x xy x);
+                        require!(slice.len() >= 9);
+
+                        // `hflex1` is only legal when the starting and ending points
+                        // share their y-value, so the last delta is not 0 but the one
+                        // that brings the curve back: dy6 = -(dy1 + dy2 + dy5).
+                        let dy6 = -(slice[1].to_float()
+                            + slice[3].to_float()
+                            + slice[7].to_float());
+
+                        let mut iter = slice.iter();
+                        let c1 = s.current + point!(iter, xy);
+                        let c2 = c1 + point!(iter, xy);
+                        let join = c2 + point!(iter, x);
+                        s.contour.push_cubic(c1, c2, join);
+
+                        let c3 = join + point!(iter, x);
+                        let c4 = c3 + point!(iter, xy);
+                        let dx6 = {
+                            let &dx6 = expect!(iter.next(), "stack empty");
+                            dx6.to_float()
+                        };
+                        let end = c4 + v(dx6, dy6);
+                        s.contour.push_cubic(c3, c4, end);
+                        s.current = end;
                         s.stack.clear();
                         i
                     }

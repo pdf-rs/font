@@ -192,3 +192,124 @@ fn c07b_roll_may_cover_the_whole_stack() {
     let got = points(&glyph(&data, 1));
     assert_eq!(&got[..2], &[(30.0, 40.0), (40.0, 60.0)]);
 }
+
+/// `flex1`: dx1 dy1 dx2 dy2 dx3 dy3 dx4 dy4 dx5 dy5 d6 (TN5177 §4.1, op 12 37).
+fn flex1_charstring(args: [i32; 11]) -> Vec<u8> {
+    let mut cs = Vec::new();
+    for v in args {
+        push_int(v, &mut cs);
+    }
+    cs.push(12);
+    cs.push(37); // flex1
+    cs.push(14); // endchar
+    cs
+}
+
+#[test]
+fn c08_flex1_horizontal_end_point() {
+    // F7 is a false positive: 11 arguments are exactly what the code consumes.
+    // Sum of the first ten arguments is (50, 25), |dx| > |dy|, so the end point's
+    // y-value is the starting y and d6 is a dx.
+    let cs = flex1_charstring([10, 5, 10, 5, 10, 5, 10, 5, 10, 5, 10]);
+    let got = points(&glyph(&build_cff(&[14], &cs), 1));
+    assert_eq!(
+        &got[..6],
+        &[
+            (10.0, 5.0),
+            (20.0, 10.0),
+            (30.0, 15.0),
+            (40.0, 20.0),
+            (50.0, 25.0),
+            (60.0, 25.0)
+        ],
+        "flex1, horizontal: dx=50 dominates dy=25, end = (d5.x + d6, y)"
+    );
+}
+
+#[test]
+fn c08b_flex1_vertical_end_point() {
+    // Same operator, dy dominant: d6 is a dy and the end point keeps the starting x.
+    let cs = flex1_charstring([10, 5, 5, 10, 5, 10, 5, 10, 5, 10, 40]);
+    let got = points(&glyph(&build_cff(&[14], &cs), 1));
+    assert_eq!(
+        &got[..6],
+        &[
+            (10.0, 5.0),
+            (15.0, 15.0),
+            (20.0, 25.0),
+            (25.0, 35.0),
+            (30.0, 45.0),
+            (30.0, 85.0)
+        ],
+        "flex1, vertical: dy=45 dominates dx=35, end = (x, d5.y + d6)"
+    );
+}
+
+/// `hflex1`: dx1 dy1 dx2 dy2 dx3 dx4 dx5 dy5 dx6 (TN5177 §4.1, op 12 36).
+fn hflex1_charstring(args: [i32; 9]) -> Vec<u8> {
+    let mut cs = Vec::new();
+    for v in args {
+        push_int(v, &mut cs);
+    }
+    cs.push(12);
+    cs.push(36); // hflex1
+    cs.push(14); // endchar
+    cs
+}
+
+#[test]
+fn c08c_hflex1_ends_on_the_starting_y() {
+    // F8: `hflex1` is only legal when the starting and ending points share their
+    // y-value, so the last delta is dy6 = -(dy1 + dy2 + dy5), not 0.
+    let cs = hflex1_charstring([10, 5, 10, 5, 10, 10, 10, 5, 10]);
+    let got = points(&glyph(&build_cff(&[14], &cs), 1));
+    assert_eq!(
+        &got[..6],
+        &[
+            (10.0, 5.0),
+            (20.0, 10.0),
+            (30.0, 10.0),
+            (40.0, 10.0),
+            (50.0, 15.0),
+            (60.0, 0.0)
+        ],
+        "hflex1: dy1=dy2=dy5=5, so the end point is back at y = 0"
+    );
+}
+
+#[test]
+fn c08d_hflex1_with_no_y_excursion_is_unchanged() {
+    // Control: with dy1 = dy2 = dy5 = 0 the correction is a no-op, which is the
+    // only case the old `x xy x` reading got right.
+    let cs = hflex1_charstring([10, 0, 10, 0, 10, 10, 10, 0, 10]);
+    let got = points(&glyph(&build_cff(&[14], &cs), 1));
+    assert_eq!(&got[..6], &[
+        (10.0, 0.0),
+        (20.0, 0.0),
+        (30.0, 0.0),
+        (40.0, 0.0),
+        (50.0, 0.0),
+        (60.0, 0.0)
+    ]);
+}
+
+#[test]
+fn c08e_hflex_still_ends_flat() {
+    // `hflex` (12 34) is correct in the original code: every y-delta but dy2 is 0.
+    let mut cs = Vec::new();
+    for v in [10, 10, 5, 10, 10, 10, 10] {
+        push_int(v, &mut cs);
+    }
+    cs.push(12);
+    cs.push(34); // hflex
+    cs.push(14); // endchar
+    let got = points(&glyph(&build_cff(&[14], &cs), 1));
+    assert_eq!(&got[..6], &[
+        (10.0, 0.0),
+        (20.0, 5.0),
+        (30.0, 5.0),
+        (40.0, 5.0),
+        (50.0, 5.0),
+        (60.0, 5.0)
+    ]);
+}
