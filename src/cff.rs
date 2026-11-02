@@ -5,7 +5,7 @@ use std::iter::once;
 use std::borrow::Cow;
 use std::rc::Rc;
 use crate::{
-    Font, Glyph, Value, Context, State, type1, type2, IResultExt, R,
+    Font, Glyph, Value, Context, State, Seac, type1, type2, IResultExt, R,
     VMetrics, HMetrics, GlyphId, Name, Info, FontError, ParseResult,
 };
 use crate::parsers::count as count2;
@@ -286,6 +286,16 @@ fn range3_record(data: &[u8]) -> R<(usize, usize)> {
     Ok((data, (first, fd)))
 }
 
+/// The glyph a StandardEncoding character code stands for. TN5177 Appendix C names the
+/// `seac` components by code; CFF glyphs are reached through the charset's SIDs, so the
+/// code goes through the standard encoding's SID table.
+fn seac_sid(code: u8) -> Option<SID> {
+    match STANDARD_ENCODING[code as usize] {
+        0 => None,
+        sid => Some(sid),
+    }
+}
+
 impl<'a> CffSlot<'a> {
     pub fn font_matrix(&self) -> Transform2F {
         self.font_matrix
@@ -297,8 +307,8 @@ impl<'a> CffSlot<'a> {
                 RectF::from_points(Vector2F::new(a, b), Vector2F::new(c, d))
             })
     }
-    // -> (outline, width, lsb)
-    pub fn outlines(&self) -> Result<impl Iterator<Item=Result<(Outline, f32, f32), FontError>> + '_, FontError> {
+    // -> (outline, width, lsb, seac)
+    pub fn outlines(&self) -> Result<impl Iterator<Item=Result<(Outline, f32, f32, Option<Seac>), FontError>> + '_, FontError> {
         let n = self.top_dict.get(&Operator::CharstringType).map(|v| get!(v, 0).to_int()).transpose()?.unwrap_or(2);
         let char_string_type = match n {
             1 => CharstringType::Type1,
@@ -357,10 +367,66 @@ impl<'a> CffSlot<'a> {
             };
             let lsb = state.lsb.unwrap_or_default();
             let path = state.take_path();
+            let seac = state.seac;
             state.clear();
-            Ok((path, width, lsb))
+            Ok((path, width, lsb, seac))
         }))
     }
+
+    /// gid - 1 -> SID, from the `Charset` operator (CFF §"Charset"); the predefined
+    /// charsets are borrowed, a custom one is parsed.
+    fn sids(&self) -> Result<Cow<'_, [SID]>, FontError> {
+        let offset: usize = self.top_dict.get(&Operator::Charset).map(|v| get!(v, 0).to_usize()).transpose()?.unwrap_or(0);
+        Ok(match offset {
+            0 => ISO_ADOBE_CHARSET[..].into(),
+            1 => EXPERT_CHARSET[..].into(),
+            2 => EXPERT_SUBSET_CHARSET[..].into(),
+            offset => {
+                let charset = charset(get!(self.cff.data, offset ..), self.num_glyphs).get()?;
+                match charset {
+                    Charset::Continous(sids) => sids,
+                    Charset::Ranges(ranges) => ranges.into_iter()
+                        .flat_map(|(sid, num)| (sid .. sid + num + 1))
+                        .collect(),
+                }.into()
+            }
+        })
+    }
+
+    /// The gid a StandardEncoding character code names, for the deprecated `seac` form.
+    /// CID-keyed fonts never match: their charset holds CIDs, not name SIDs.
+    fn seac_gid(&self, code: u8) -> Option<usize> {
+        let sid = seac_sid(code)?;
+        let sids = self.sids().ok()?;
+        sids.iter().position(|&s| s == sid).map(|n| n + 1)
+    }
+
+    /// `outlines()` with the deprecated four-argument `endchar` form (`seac`) composed:
+    /// the base character with the accent character drawn at (adx, ady) on top.
+    pub fn composed_outlines(&self) -> Result<Vec<(Outline, f32, f32)>, FontError> {
+        let mut outlines = Vec::new();
+        let mut seac_glyphs = Vec::new();
+        for r in self.outlines()? {
+            let (outline, width, lsb, seac) = r?;
+            if let Some(seac) = seac {
+                seac_glyphs.push((outlines.len(), seac));
+            }
+            outlines.push((outline, width, lsb));
+        }
+        for (gid, seac) in seac_glyphs {
+            let (base, accent) = match (self.seac_gid(seac.base), self.seac_gid(seac.accent)) {
+                (Some(base), Some(accent)) if base != gid && accent != gid => (base, accent),
+                _ => {
+                    warn!("endchar seac: glyph {gid} cannot be composed (base {}, accent {})",
+                        seac.base, seac.accent);
+                    continue;
+                }
+            };
+            outlines[gid].0 = seac.compose(outlines[base].0.clone(), outlines[accent].0.clone());
+        }
+        Ok(outlines)
+    }
+
     pub fn weight(&self) -> Option<u16> {
         None
         /*
@@ -386,23 +452,7 @@ impl<'a> CffSlot<'a> {
             Err(FontError::Other(format!("SID out of bounds {} > {} standard strings + {} font string index entries",
                 sid, STANDARD_STRINGS.len(), self.cff.string_index.len())))
         };
-        let charset_offset: usize = self.top_dict.get(&Operator::Charset).map(|v| get!(v, 0).to_usize()).transpose()?.unwrap_or(0);
-        let sids: Cow<[SID]> = match charset_offset {
-            0 => ISO_ADOBE_CHARSET[..].into(),
-            1 => EXPERT_CHARSET[..].into(),
-            2 => EXPERT_SUBSET_CHARSET[..].into(),
-            offset => {
-                let charset = charset(get!(self.cff.data, offset ..), self.num_glyphs).get()?;
-                
-                // index = gid - 1 -> sid
-                match charset {
-                    Charset::Continous(sids) => sids,
-                    Charset::Ranges(ranges) => ranges.into_iter()
-                        .flat_map(|(sid, num)| (sid .. sid + num + 1))
-                        .collect(),
-                }.into()
-            }
-        };
+        let sids: Cow<[SID]> = self.sids()?;
         
         // sid -> gid
         let sid_map: HashMap<SID, u16> = once(0).chain(sids.iter().cloned()).enumerate()
@@ -454,7 +504,9 @@ impl<'a> CffSlot<'a> {
             }
         }
         
-        let glyphs: Vec<_> = self.outlines()?.map(|r| r.map(|(outline, width, lsb)| {
+        // TN5177 Appendix C, deprecated `seac`: glyphs built from two characters are
+        // assembled here, where every charstring and the charset are known.
+        let glyphs: Vec<Glyph> = self.composed_outlines()?.into_iter().map(|(outline, width, lsb)| {
             Glyph {
                 metrics: HMetrics {
                     advance: width,
@@ -462,7 +514,7 @@ impl<'a> CffSlot<'a> {
                 },
                 path: outline
             }
-        })).collect::<Result<_, _>>()?;
+        }).collect();
         
         let mut unicode_map = HashMap::with_capacity(glyphs.len());
         for n in 0..glyphs.len()-1 {

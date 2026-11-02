@@ -368,6 +368,18 @@ pub struct Seac {
     pub accent: u8,
 }
 
+impl Seac {
+    /// The composed outline: `base` with `accent` drawn on top, the accent translated
+    /// by `(adx, ady)` from the base character's origin (T1 §6, TN5177 Appendix C).
+    pub fn compose(&self, mut base: Outline, accent: Outline) -> Outline {
+        let accent = accent.transformed(&Transform2F::from_translation(v(self.adx, self.ady)));
+        for contour in accent.contours() {
+            base.push_contour(contour.clone());
+        }
+        base
+    }
+}
+
 impl State {
     #[inline]
     pub fn new() -> State {

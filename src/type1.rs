@@ -201,14 +201,11 @@ impl Type1Font {
                 warn!("seac: glyph composes itself ({} + {})", base, accent);
                 continue;
             }
-            let (mut path, accent_path) = match (glyphs.get_index(base), glyphs.get_index(accent)) {
+            let (base_path, accent_path) = match (glyphs.get_index(base), glyphs.get_index(accent)) {
                 (Some((_, base)), Some((_, accent))) => (base.path.clone(), accent.path.clone()),
                 _ => continue,
             };
-            let accent_path = accent_path.transformed(&Transform2F::from_translation(v(seac.adx, seac.ady)));
-            for contour in accent_path.contours() {
-                path.push_contour(contour.clone());
-            }
+            let path = seac.compose(base_path, accent_path);
             if let Some((_, glyph)) = glyphs.get_index_mut(index) {
                 glyph.path = path;
             }

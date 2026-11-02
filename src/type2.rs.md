@@ -12,6 +12,10 @@ Implemented: all path operators (1, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24
 34 hflex, 35 flex, 36 hflex1, 37 flex1).
 
 ## Fixed
+* **F11 (2026-11-02):** `endchar` with four arguments (plus an optional leading width) is the
+  deprecated `seac` accent composition (TN5177 Appendix C). It now records the operands in
+  `State::seac`; `CffSlot::composed_outlines` (`src/cff.rs`) composes base + accent, the accent
+  translated by `(adx, ady)`. Test: `c24` in `tests/cff_cases.rs`.
 * **F6 (2026-11-02):** `hstem`/`vstem` use `maybe_width(s, |n| n % 2 == 0)`, so a width argument is
   only taken when the operand count is odd, like `hstemhm`/`vstemhm`. Tests: `c06`, `c06b`, `c06c`
   in `tests/cff_cases.rs`.
@@ -28,9 +32,8 @@ Implemented: all path operators (1, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24
   and 5 for the second curve) and picks `(d6, 0)` vs `(0, d6)` correctly. The original finding
   counted the decision loop as consuming new operands. `c08`/`c08b` pin the horizontal and
   vertical cases.
-* **F11 (TN5177 Appendix C):** `endchar` with four arguments is the deprecated accent composition
-  (`adx ady bchar achar`); `:462-468` treats the first argument as a width and drops the rest, so
-  those glyphs are empty.
+* ~~**F11 (TN5177 Appendix C):**~~ `endchar` with four arguments is the deprecated accent
+  composition (`adx ady bchar achar`) — implemented, see "Fixed" above.
 * **F42:** `and`/`or`/`not` (12 3/4/5), `put`/`get`/`ifelse` (12 20/21/22) and the
   storage `put`/`get` return an error, which fails the whole font. They are deprecated but legal.
 * **F44 (TN5177 §4.4 `index`):** "if `i` is negative, the top element is copied"; the code calls

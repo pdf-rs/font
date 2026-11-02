@@ -99,7 +99,7 @@ impl OpenTypeFont {
             #[cfg(feature="cff")]{
             let slot = t!(read_cff(cff)?.slot(0));
             bbox = slot.bbox();
-            outlines = t!(slot.outlines()?.map(|r| r.map(|(outline, _, _)| outline)).collect::<Result<_, _>>());
+            outlines = t!(slot.composed_outlines().map(|v| v.into_iter().map(|(outline, _, _)| outline).collect::<Vec<_>>()));
             font_matrix = slot.font_matrix();
             }
             #[cfg(not(feature="cff"))]

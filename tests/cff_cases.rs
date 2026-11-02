@@ -60,9 +60,20 @@ fn build_cff_full(
     cs0: &[u8],
     cs1: &[u8],
 ) -> Vec<u8> {
+    build_cff_glyphs(extra_top_dict, private, charset_tail, &[cs0, cs1])
+}
+
+/// `build_cff_full` with any number of charstrings (the charset in `charset_tail` names
+/// them).
+fn build_cff_glyphs(
+    extra_top_dict: &[u8],
+    private: bool,
+    charset_tail: Option<&[u8]>,
+    char_strings: &[&[u8]],
+) -> Vec<u8> {
     let name_index = index(&[b"Test".as_ref()]);
     let empty = index(&[]);
-    let charstrings = index(&[cs0, cs1]);
+    let charstrings = index(char_strings);
     let tail = charset_tail.unwrap_or(&[]);
 
     // The CharStrings and Charset operands are absolute offsets into the CFF data, and
@@ -391,4 +402,66 @@ fn c19d_index_offset_zero_is_an_error() {
     data.extend_from_slice(&index(&[])); // String INDEX
     data.extend_from_slice(&index(&[])); // GlobalSubr INDEX
     assert!(CffFont::parse(&data, 0).is_err(), "INDEX offset 0 must be rejected");
+}
+
+// ---------------------------- F11: endchar seac ----------------------------
+
+/// Type 2: `x0 y0 rmoveto` then a rectangle from `(x0, y0)` to `(x1, y1)`, `endchar`.
+fn rect2(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<u8> {
+    let mut cs = Vec::new();
+    if x0 != 0 || y0 != 0 {
+        push_int(x0, &mut cs);
+        push_int(y0, &mut cs);
+        cs.push(21); // rmoveto
+    }
+    let (w, h) = (x1 - x0, y1 - y0);
+    for &(dx, dy) in &[(w, 0), (0, h), (-w, 0), (0, -h)] {
+        push_int(dx, &mut cs);
+        push_int(dy, &mut cs);
+        cs.push(5); // rlineto
+    }
+    cs.push(14); // endchar
+    cs
+}
+
+/// Type 2: `adx ady bchar achar endchar` — the deprecated `seac` form.
+fn seac2(adx: i32, ady: i32, base: i32, accent: i32) -> Vec<u8> {
+    let mut cs = Vec::new();
+    for v in [adx, ady, base, accent] {
+        push_int(v, &mut cs);
+    }
+    cs.push(14); // endchar
+    cs
+}
+
+#[test]
+fn c24_endchar_seac_composes_the_accent() {
+    // F11: `endchar` with four arguments (TN5177 Appendix C) was read as a width and
+    // dropped, so the glyph came out empty.
+    let tail = [0u8, 0, 34, 0, 125, 0, 171]; // charset format 0: /A, /acute, /Aacute
+    let charstrings: &[&[u8]] = &[
+        &[14u8],
+        &rect2(0, 0, 300, 700),
+        &rect2(0, 0, 50, 60),
+        &seac2(100, 200, 65, 194),
+    ];
+    let data = build_cff_glyphs(&[], true, Some(&tail), charstrings);
+    let font = CffFont::parse(&data, 0).expect("font parses");
+
+    let a = font.gid_for_name("A").expect("/A");
+    let acute = font.gid_for_name("acute").expect("/acute");
+    let aacute = font.gid_for_name("Aacute").expect("/Aacute");
+    let glyph_a = font.glyph(a).expect("glyph A");
+    let glyph_accent = font.glyph(acute).expect("glyph acute");
+    let composed = font.glyph(aacute).expect("glyph Aacute");
+
+    let base_pts = points(&glyph_a);
+    let accent_pts = points(&glyph_accent);
+    let composed_pts = points(&composed);
+    assert_eq!(composed_pts.len(), base_pts.len() + accent_pts.len());
+    // The base is untouched, the accent sits at (adx, ady).
+    assert_eq!(&composed_pts[.. base_pts.len()], base_pts.as_slice());
+    for (i, &(x, y)) in accent_pts.iter().enumerate() {
+        assert_eq!(composed_pts[base_pts.len() + i], (x + 100.0, y + 200.0));
+    }
 }

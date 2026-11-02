@@ -1,6 +1,12 @@
 # `src/cff.rs` — Compact Font Format: INDEX/DICT parsing, charsets, encodings, outlines
 
 ## Fixed
+* **F11 (2026-11-02):** `CffSlot::outlines()` now also returns the `seac` composition the
+  charstring recorded (`Option<Seac>`), and `composed_outlines()` assembles it: the base glyph
+  plus the accent glyph translated by `(adx, ady)`. The components are found by mapping the
+  StandardEncoding code to its SID and that SID to a gid through the charset (`sids()` was
+  extracted from `parse_font`); CID-keyed fonts never match, so they compose nothing. Also used
+  by the CFF-inside-OpenType path (`opentype/mod.rs`). Test: `c24` in `tests/cff_cases.rs`.
 * **F22/F23 (2026-11-02):** nothing on the parse path panics any more. A missing `Private`
   TopDICT entry is an empty private dict (TN5176 makes it optional), `index()` rejects an
   INDEX offset of 0 with `error!` instead of underflowing, an unknown `CharstringType` and an
@@ -16,7 +22,7 @@
   for CID fonts, `FontMatrix` (default `0.001`), per-glyph Private DICT + local Subrs.
 * `CffSlot::outlines()`: runs each charstring (Type 1 or Type 2 dialect per
   `CharstringType`) through `type1::charstring`/`type2::charstring` and derives
-  `(outline, width, lsb)` using `defaultWidthX`/`nominalWidthX` and the `deltaWidth` from the
+  `(outline, width, lsb, seac)` using `defaultWidthX`/`nominalWidthX` and the `deltaWidth` from the
   first stack-clearing operator.
 * `CffSlot::parse_font()`: charset (predefined ISOAdobe/Expert/ExpertSubset, formats 0/1/2),
   SID→gid and name→gid maps, the 8-bit built-in encoding (Standard/Expert/custom + supplements),

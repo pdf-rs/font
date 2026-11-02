@@ -1,4 +1,4 @@
-use crate::{State, v, Value, Context, TryIndex, FontError};
+use crate::{State, Seac, v, Value, Context, TryIndex, FontError};
 use nom::{IResult,
     bytes::complete::{take},
     number::complete::{be_u8, be_i16, be_i32}
@@ -381,7 +381,26 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             13 => error!("reserved {}", b0),
             14 => { //– endchar (14) ⊦
                 trace!("endchar");
-                maybe_width(s, |n| n == 0);
+                // TN5177 Appendix C: with four arguments (and optionally a leading
+                // width) `endchar` is the deprecated `seac` form, adx ady bchar achar;
+                // the composition happens where the other glyphs are known.
+                maybe_width(s, |n| n == 0 || n == 4);
+                if s.stack.len() >= 4 {
+                    let first = s.stack.len() - 4;
+                    let adx = s.stack[first].to_float();
+                    let ady = s.stack[first + 1].to_float();
+                    let bchar = s.stack[first + 2].to_float();
+                    let achar = s.stack[first + 3].to_float();
+                    if !(0.0 ..= 255.0).contains(&bchar) || !(0.0 ..= 255.0).contains(&achar) {
+                        warn!("endchar seac: character code out of range ({bchar}, {achar})");
+                    } else {
+                        s.seac = Some(Seac {
+                            adx, ady,
+                            base: bchar as u8,
+                            accent: achar as u8,
+                        });
+                    }
+                }
                 s.contour.close();
                 s.done = true;
                 i
