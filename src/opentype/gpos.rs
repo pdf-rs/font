@@ -13,18 +13,49 @@ use itertools::{Itertools};
 #[derive(Default, Clone)]
 pub struct GPos {
     pub kern: KernTable,
-    pub mark_to_base: HashMap<(u16, u16), (i16, i16)>
+    pub mark_to_base: HashMap<(u16, u16), (i16, i16)>,
+    /// OT §GPOS "Single Adjustment" (lookup type 1): the value record of one glyph.
+    pub single: HashMap<u16, ValueRecord>,
+    /// OT §GPOS "Cursive Attachment" (3): entry and exit anchor of one glyph, in font units.
+    pub cursive: HashMap<u16, ((i16, i16), (i16, i16))>,
+    /// OT §GPOS "Mark-to-Ligature Attachment" (5): (ligature, mark) -> offset, taken from the
+    /// first component of the ligature.
+    pub mark_to_ligature: HashMap<(u16, u16), (i16, i16)>,
+    /// OT §GPOS "Mark-to-Mark Attachment" (6): (base mark, mark) -> offset.
+    pub mark_to_mark: HashMap<(u16, u16), (i16, i16)>,
 }
 impl GPos {
     pub fn from_kern(kern: KernTable) -> GPos {
         GPos {
             kern,
-            mark_to_base: HashMap::new()
+            ..GPos::default()
         }
     }
     pub fn get_mark_to_base(&self, base: GlyphId, mark: GlyphId) -> Option<(i16, i16)> {
-        self.mark_to_base.get(&(base.0 as u16, mark.0 as u16)).cloned()
+        self.mark_to_base.get(&(glyph_key(base)?, glyph_key(mark)?)).cloned()
     }
+    /// OT §GPOS "Single Adjustment": placement and advance adjustment of one glyph.
+    pub fn get_single(&self, glyph: GlyphId) -> Option<ValueRecord> {
+        self.single.get(&glyph_key(glyph)?).cloned()
+    }
+    /// OT §GPOS "Cursive Attachment": `(entry, exit)` anchors of one glyph.
+    pub fn get_cursive(&self, glyph: GlyphId) -> Option<((i16, i16), (i16, i16))> {
+        self.cursive.get(&glyph_key(glyph)?).cloned()
+    }
+    /// OT §GPOS "Mark-to-Ligature Attachment": where the mark is placed relative to the first
+    /// component of the ligature.
+    pub fn get_mark_to_ligature(&self, ligature: GlyphId, mark: GlyphId) -> Option<(i16, i16)> {
+        self.mark_to_ligature.get(&(glyph_key(ligature)?, glyph_key(mark)?)).cloned()
+    }
+    /// OT §GPOS "Mark-to-Mark Attachment": where a mark is placed relative to another mark.
+    pub fn get_mark_to_mark(&self, base: GlyphId, mark: GlyphId) -> Option<(i16, i16)> {
+        self.mark_to_mark.get(&(glyph_key(base)?, glyph_key(mark)?)).cloned()
+    }
+}
+
+/// The tables are keyed by u16 glyph ids; a larger id cannot be in one.
+fn glyph_key(glyph: GlyphId) -> Option<u16> {
+    if glyph.0 > u16::MAX as u32 { None } else { Some(glyph.0 as u16) }
 }
 
 
@@ -80,13 +111,18 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> Result<GPos, FontError> {
     Ok(gpos)
 }
 
-/// One subtable of a `GPOS` lookup. Lookup types 1 (single), 3 (cursive), 5-8 (mark
-/// attachment, contextual and friends) are not implemented; `Extension` wraps the ones that
-/// are, which is what large fonts use.
+/// One subtable of a `GPOS` lookup. Single adjustment (1), pair adjustment (2), cursive (3),
+/// mark-to-base (4), mark-to-ligature (5) and mark-to-mark (6) are read; the contextual
+/// lookups (7, 8) are not, and `Extension` (9) wraps the ones that are, which is what large
+/// fonts use.
 fn parse_positioning(data: &[u8], lookup_type: u16, gpos: &mut GPos, num_glyphs: u16) -> Result<(), FontError> {
     match lookup_type {
+        1 => parse_single_adjustment(data, gpos)?,
         2 => parse_pair_adjustment(data, &mut gpos.kern, num_glyphs)?,
-        4 => parse_mark_to_base_attachment(data, gpos)?,
+        3 => parse_cursive(data, gpos)?,
+        4 => parse_mark_attachment(data, &mut gpos.mark_to_base)?,
+        5 => parse_mark_to_ligature_attachment(data, gpos)?,
+        6 => parse_mark_attachment(data, &mut gpos.mark_to_mark)?,
         // OT §GPOS "Extension Positioning": a wrapper around another lookup type.
         9 => {
             let (inner_type, inner) = parse_extension(data)?;
@@ -103,12 +139,15 @@ fn parse_positioning(data: &[u8], lookup_type: u16, gpos: &mut GPos, num_glyphs:
 }
 
 
-#[derive(Default, Debug, Clone)]
-struct ValueRecord {
-    x_placement: i16,
-    y_placement: i16,
-    x_advance: i16,
-    y_advance: i16
+/// OT §GPOS "Value Records": a placement and an advance adjustment per axis; the value format
+/// says which of the four are present. `Default` is "no adjustment", which is also what a
+/// missing field means.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct ValueRecord {
+    pub x_placement: i16,
+    pub y_placement: i16,
+    pub x_advance: i16,
+    pub y_advance: i16,
 }
 
 fn value_record(flags: u16) -> impl Fn(&[u8]) -> R<ValueRecord> {
@@ -219,7 +258,9 @@ fn parse_mark_array_table(data: &[u8]) -> Result<impl Array<Item=(u16, AnchorTab
     Ok(array)
 }
 
-fn parse_mark_to_base_attachment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<(), FontError> {
+/// OT §GPOS "Mark-to-Base Attachment" (4) and "Mark-to-Mark Attachment" (6), format 1: the two
+/// subtables have the same layout, so this fills either map with `base`/`mark` anchor deltas.
+fn parse_mark_attachment(data: &[u8], marks: &mut HashMap<(u16, u16), (i16, i16)>) -> Result<(), FontError> {
     let (i, format) = be_u16(data)?;
     require_eq!(format, 1);
     let (i, mark_coverage_offset) = be_u16(i)?;
@@ -251,7 +292,7 @@ fn parse_mark_to_base_attachment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<
                 // Fewer anchors than baseCount x markClassCount: skip what is missing.
                 Err(_) => continue,
             };
-            gpos.mark_to_base.insert((base_gid, mark_gid), (base_anchor.x - mark_anchor.x, base_anchor.y - mark_anchor.y));
+            marks.insert((base_gid, mark_gid), (base_anchor.x - mark_anchor.x, base_anchor.y - mark_anchor.y));
         }
     }
 
@@ -263,6 +304,124 @@ fn parse_base_array(data: &[u8], mark_class_count: u16) -> Result<impl Array<Ite
     let (_, arr) = array::<uint16, _>(usize::from(mark_class_count) * usize::from(base_count))(i)?;
 
     Ok(arr.map(move |off: u16| AnchorTable::parse(slice!(data, off as usize..))))
+}
+
+/// OT §GPOS "Single Adjustment" (lookup type 1), formats 1 and 2: one value record per glyph,
+/// either the same for every covered glyph or one each.
+fn parse_single_adjustment(data: &[u8], gpos: &mut GPos) -> Result<(), FontError> {
+    let (i, format) = be_u16(data)?;
+    let (i, coverage_offset) = be_u16(i)?;
+    let (i, value_format) = be_u16(i)?;
+    let coverage = coverage_table(slice!(data, coverage_offset as usize ..))?;
+    match format {
+        1 => {
+            let (_, value) = value_record(value_format)(i)?;
+            for glyph in coverage {
+                gpos.single.insert(glyph, value.clone());
+            }
+        }
+        2 => {
+            let (i, value_count) = be_u16(i)?;
+            for (glyph, value) in coverage.zip(iterator_n(i, value_record(value_format), value_count)) {
+                gpos.single.insert(glyph, value);
+            }
+        }
+        n => warn!("GPOS: unsupported single adjustment format {}, ignoring it", n),
+    }
+    Ok(())
+}
+
+/// OT §GPOS "Cursive Attachment" (lookup type 3), format 1: an entry and an exit anchor per
+/// glyph. A NULL offset means the glyph has no such anchor, which is stored as `(0, 0)`.
+fn parse_cursive(data: &[u8], gpos: &mut GPos) -> Result<(), FontError> {
+    let (i, format) = be_u16(data)?;
+    require_eq!(format, 1);
+    let (i, coverage_offset) = be_u16(i)?;
+    let (i, entry_exit_count) = be_u16(i)?;
+    let coverage = coverage_table(slice!(data, coverage_offset as usize ..))?;
+    for (glyph, (entry_offset, exit_offset)) in coverage.zip(iterator_n(i, tuple((be_u16, be_u16)), entry_exit_count)) {
+        let entry = match Offset(entry_offset).of_opt(data) {
+            Some(anchor) => anchor_coordinates(anchor)?,
+            None => (0, 0),
+        };
+        let exit = match Offset(exit_offset).of_opt(data) {
+            Some(anchor) => anchor_coordinates(anchor)?,
+            None => (0, 0),
+        };
+        gpos.cursive.insert(glyph, (entry, exit));
+    }
+    Ok(())
+}
+
+/// OT §GPOS "Anchor Tables": only the `(x, y)` pair is used. Formats 2 and 3 carry a contour
+/// point as well, but the coordinates are the same leading fields.
+fn anchor_coordinates(data: &[u8]) -> Result<(i16, i16), FontError> {
+    let anchor = AnchorTable::parse(data)?;
+    Ok((anchor.x, anchor.y))
+}
+
+/// OT §GPOS "Mark-to-Ligature Attachment" (lookup type 5), format 1. A ligature can carry an
+/// anchor per component; this crate keeps the first component's, which is where a mark after
+/// the whole ligature goes.
+fn parse_mark_to_ligature_attachment(data: &[u8], gpos: &mut GPos) -> Result<(), FontError> {
+    let (i, format) = be_u16(data)?;
+    require_eq!(format, 1);
+    let (i, mark_coverage_offset) = be_u16(i)?;
+    let (i, ligature_coverage_offset) = be_u16(i)?;
+    let (i, mark_class_count) = be_u16(i)?;
+    let (i, mark_array_offset) = be_u16(i)?;
+    let (i, ligature_array_offset) = be_u16(i)?;
+
+    let mark_coverage = coverage_table(slice!(data, mark_coverage_offset as usize ..))?;
+    let ligature_coverage: Vec<u16> = coverage_table(slice!(data, ligature_coverage_offset as usize ..))?.collect();
+    let mark_array = parse_mark_array_table(slice!(data, mark_array_offset as usize ..))?;
+
+    // The marks with their class and anchor, once, instead of once per ligature.
+    let mut marks = Vec::new();
+    for (mark_gid, entry) in mark_coverage.zip(mark_array.iter()) {
+        let (mark_class, mark_anchor) = entry?;
+        if mark_class >= mark_class_count {
+            warn!("GPOS: mark glyph {} has class {} but markClassCount is {}",
+                  mark_gid, mark_class, mark_class_count);
+            continue;
+        }
+        marks.push((mark_gid, mark_class, (mark_anchor.x, mark_anchor.y)));
+    }
+
+    let ligature_array = slice!(data, ligature_array_offset as usize ..);
+    let (i, ligature_count) = be_u16(ligature_array)?;
+    for (&ligature_gid, attach_offset) in ligature_coverage.iter().zip(iterator_n(i, be_u16, ligature_count)) {
+        let attach = slice!(ligature_array, attach_offset as usize ..);
+        if attach.len() < 2 {
+            continue;
+        }
+        let (i, component_count) = be_u16(attach)?;
+        if component_count == 0 {
+            warn!("GPOS: ligature {} has componentCount 0, skipping it", ligature_gid);
+            continue;
+        }
+        // The first ComponentRecord: one anchor offset per mark class.
+        let anchors = match array::<uint16, _>(usize::from(mark_class_count))(i) {
+            Ok((_, anchors)) => anchors,
+            Err(_) => continue,
+        };
+        for &(mark_gid, mark_class, (mark_x, mark_y)) in &marks {
+            let anchor = match anchors.get(usize::from(mark_class)) {
+                // A NULL offset: no anchor for this class.
+                Ok(0) => continue,
+                Ok(offset) => match AnchorTable::parse(slice!(attach, offset as usize ..)) {
+                    Ok(anchor) => anchor,
+                    Err(_) => continue,
+                },
+                Err(_) => continue,
+            };
+            gpos.mark_to_ligature.insert(
+                (ligature_gid, mark_gid),
+                (anchor.x - mark_x, anchor.y - mark_y),
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -337,5 +496,80 @@ mod tests {
         parse_positioning(&data, 4, &mut gpos, 1000).expect("mark-to-base parses");
         assert_eq!(gpos.get_mark_to_base(GlyphId(200), GlyphId(100)), Some((20, 30)));
         assert_eq!(gpos.get_mark_to_base(GlyphId(200), GlyphId(101)), None);
+    }
+
+    #[test]
+    fn single_adjustment_format2_reads_one_record_per_glyph() {
+        // OT §GPOS "Single Adjustment" (1), format 2: glyph 30 gets xAdvance -10, glyph 31 +25.
+        let words: [u16; 10] = [
+            2, 12, 4, 2,          // format, coverageOffset, valueFormat = X_ADVANCE, valueCount
+            (-10i16) as u16, 25,  // the two value records
+            1, 2, 30, 31,         // coverage
+        ];
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 1, &mut gpos, 100).expect("single adjustment parses");
+        assert_eq!(gpos.get_single(GlyphId(30)).map(|v| v.x_advance), Some(-10));
+        assert_eq!(gpos.get_single(GlyphId(31)).map(|v| v.x_advance), Some(25));
+        // A glyph outside the coverage has no adjustment.
+        assert!(gpos.get_single(GlyphId(32)).is_none());
+    }
+
+    #[test]
+    fn cursive_attachment_reads_entry_and_exit_anchors() {
+        // OT §GPOS "Cursive Attachment" (3), format 1: glyph 40 enters at (5, 6) and exits at
+        // (7, 8).
+        let words: [u16; 14] = [
+            1, 10, 1,       // format, coverageOffset, entryExitCount
+            16, 22,         // entryAnchorOffset, exitAnchorOffset
+            1, 1, 40,       // coverage
+            1, 5, 6,        // entry anchor
+            1, 7, 8,        // exit anchor
+        ];
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 3, &mut gpos, 100).expect("cursive attachment parses");
+        assert_eq!(gpos.get_cursive(GlyphId(40)), Some(((5, 6), (7, 8))));
+    }
+
+    #[test]
+    fn mark_to_mark_attachment_fills_its_own_map() {
+        // OT §GPOS "Mark-to-Mark Attachment" (6), format 1 — the same layout as mark-to-base:
+        // mark 100 attaches to mark 200 at (30,40) - (10,10) = (20,30).
+        let words: [u16; 23] = [
+            1, 34, 40, 1, 12, 24, // format, mark1Cov, mark2Cov, classCount, mark1Array, mark2Array
+            1, 0, 6,              // MarkArray: one mark, class 0, anchor at +6
+            1, 10, 10,            // mark anchor (10,10)
+            1, 4,                 // Mark2Array: one mark, anchor at +4
+            1, 30, 40,            // mark2 anchor (30,40)
+            1, 1, 100,            // mark1 coverage
+            1, 1, 200,            // mark2 coverage
+        ];
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 6, &mut gpos, 100).expect("mark-to-mark parses");
+        assert_eq!(gpos.get_mark_to_mark(GlyphId(200), GlyphId(100)), Some((20, 30)));
+        // Mark-to-mark must not end up in the mark-to-base map.
+        assert!(gpos.get_mark_to_base(GlyphId(200), GlyphId(100)).is_none());
+    }
+
+    #[test]
+    fn mark_to_ligature_attachment_uses_the_first_component() {
+        // OT §GPOS "Mark-to-Ligature Attachment" (5), format 1: ligature 200 has one component
+        // whose class-0 anchor is (30,40); mark 100 attaches at (30,40) - (10,10) = (20,30).
+        let words: [u16; 25] = [
+            1, 38, 44, 1, 12, 24, // format, markCov, ligatureCov, classCount, markArray, ligatureArray
+            1, 0, 6,              // MarkArray: one mark, class 0, anchor at +6
+            1, 10, 10,            // mark anchor (10,10)
+            1, 4,                 // LigatureArray: one ligature, attach table at +4
+            1, 4,                 // LigatureAttach: one component, class-0 anchor at +4
+            1, 30, 40,            // component anchor (30,40)
+            1, 1, 100,            // mark coverage
+            1, 1, 200,            // ligature coverage
+        ];
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 5, &mut gpos, 100).expect("mark-to-ligature parses");
+        assert_eq!(gpos.get_mark_to_ligature(GlyphId(200), GlyphId(100)), Some((20, 30)));
     }
 }

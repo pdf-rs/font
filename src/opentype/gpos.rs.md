@@ -1,12 +1,25 @@
-# `src/opentype/gpos.rs` — GPOS: pair kerning and mark-to-base attachment
+# `src/opentype/gpos.rs` — GPOS: adjustments, kerning and mark attachment
 
 ## What it does
-`parse_gpos` walks the lookup list and keeps two things: a `KernTable` (glyph pairs + class
-pairs, `KernTable::get(left, right)`) filled from **PairPos** lookups (type 2), and a
-`HashMap<(base_gid, mark_gid), (dx, dy)>` filled from **MarkBasePos** lookups (type 4).
+`parse_gpos` walks the lookup list and keeps what the rest of the crate can use: a `KernTable`
+(glyph pairs + class pairs, `KernTable::get(left, right)`) filled from **PairPos** lookups
+(type 2), a `HashMap<(base_gid, mark_gid), (dx, dy)>` from **MarkBasePos** lookups (type 4) and
+**MarkMarkPos** (type 6, `GPos::mark_to_mark`), `GPos::single` with the full `ValueRecord` of
+each glyph from **SinglePos** (type 1), `GPos::cursive` with the entry/exit anchors from
+**CursivePos** (3) and `GPos::mark_to_ligature` from **MarkLigPos** (5, first component).
 `GPos::from_kern` lets a `kern` table stand in when GPOS is absent (`mod.rs:110-117`).
 
 ## Fixed
+* **F36 (2026-11-02):** single adjustment (1, formats 1 and 2), cursive attachment (3),
+  mark-to-ligature (5) and mark-to-mark (6) are parsed now, each with an accessor
+  (`get_single`, `get_cursive`, `get_mark_to_ligature`, `get_mark_to_mark`) and with the
+  `ValueRecord` fields public. MarkBasePos and MarkMarkPos share one parser
+  (`parse_mark_attachment`) because their subtables have the same layout; mark-to-ligature uses
+  the first component's anchors, which is where a mark following the whole ligature goes.
+  Tests: `single_adjustment_format2_reads_one_record_per_glyph`,
+  `cursive_attachment_reads_entry_and_exit_anchors`,
+  `mark_to_mark_attachment_fills_its_own_map`,
+  `mark_to_ligature_attachment_uses_the_first_component`.
 * **F36 (2026-11-02):** malformed tables no longer abort the process. PairPos format 2 computed
   `class_1_count * class_2_count` in `u16` (300 × 300 classes overflow — a debug panic) and
   reserved that many map entries up front; the count is now `usize`, clamped to the bytes the
@@ -33,15 +46,19 @@ pairs, `KernTable::get(left, right)`) filled from **PairPos** lookups (type 2), 
   reachable from `KernTable::get`.
 
 ## Differences from the specifications
-* Only the **first** `ValueRecord`'s `xAdvance` is used (`:130`, `:158`); `ValueRecord2`
-  (the second glyph's advance/placement) and `xPlacement`/`yPlacement` are discarded. For PDF
-  text that is defensible (you only need the advance delta), but it is not what GPOS says.
+* In PairPos only the **first** `ValueRecord`'s `xAdvance` is used (`:130`, `:158`);
+  `ValueRecord2` (the second glyph's advance/placement) and `xPlacement`/`yPlacement` are
+  discarded. For PDF text that is defensible (you only need the advance delta), but it is not
+  what GPOS says. SinglePos keeps the whole record.
 * ~~**F36 (OT §GPOS, "Extension lookups"):**~~ lookup type 9 (Extension) was not followed — the
   dispatch (`parse_positioning`) now unwraps it and parses the wrapped pair adjustment or
   mark-to-base subtable; an extension wrapping an extension warns and is dropped. Unit test:
   `extension_lookup_reaches_pair_adjustment`.
-* Lookup types 1 (single), 3 (cursive), 5/6 (mark-to-ligature, mark-to-mark), 7 (context),
-  8 (chaining context) are skipped without a warning.
+* Contextual positioning (7) and chaining contextual positioning (8) are still skipped without a
+  warning — the crate has no positioning engine that could run the lookups their rules name.
+* ~~Lookup types 1 (single), 3 (cursive), 5/6 (mark-to-ligature, mark-to-mark), 7 (context),
+  8 (chaining context) are skipped without a warning.~~ 1, 3, 5 and 6 are parsed now (see
+  "Fixed"); 7 and 8 are not.
 * `ValueRecord` correctly skips the device-table offsets (`(flags & 0x00F0).count_ones() * 2`) but
   does not read them — hinting-only, fine for outlines.
 * MarkBasePos: format must be 1 ✓; mark/base coverage, `markClassCount`, mark array
