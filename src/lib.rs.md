@@ -1,6 +1,9 @@
 # `src/lib.rs` — crate root: the `Font` trait, type dispatch, shared charstring state
 
 ## Fixed
+* **F36 (2026-11-02):** the `Font` trait gained `substitute(&self, glyphs, features) -> Vec<GlyphId>`
+  (default: the run unchanged), so a caller can apply `GSUB` ligatures/single substitutions without
+  depending on the OpenType backend; `OpenTypeFont` implements it via `GSub::substitute`.
 * **F38 (2026-11-02):** `Info` gained `x_height`, `cap_height` (font units, `None` when the font
   has no `OS/2` version 2+ table) and `unicode_ranges` (`OS/2` `ulUnicodeRange1..4`); it derives
   `Default` so constructors only set what they have.

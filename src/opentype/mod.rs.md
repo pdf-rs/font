@@ -1,6 +1,8 @@
 # `src/opentype/mod.rs` — table directory and the sfnt tables shared by glyf/CFF
 
 ## Fixed
+* **F36 (2026-11-02):** `parse_extension` reads a GSUB 7 / GPOS 9 extension subtable (format 1,
+  wrapped lookup type, 32-bit offset); `gsub.rs` and `gpos.rs` both dispatch through it.
 * **F38 (2026-11-02):** `vmetrics` no longer comes from `hhea` alone. `OpenTypeFont::from_tables`
   parses `OS/2` before the metrics and uses `Os2::typo_metrics()` when the font asks for it
   (`fsSelection` bit 7, USE_TYPO_METRICS), falling back to `hhea`; `sxHeight`, `sCapHeight` and

@@ -7,7 +7,7 @@ use nom::{
 };
 use crate::{R, GlyphId, FontError};
 use crate::parsers::{iterator_n};
-use crate::opentype::{parse_lookup_list, coverage_table, tag, Tag};
+use crate::opentype::{parse_extension, parse_lookup_list, coverage_table, tag, Tag};
 
 #[derive(Debug, Clone)]
 pub struct GlyphList(Vec<u16>);
@@ -55,6 +55,82 @@ impl GSub {
 pub enum Substitution {
     Single(HashMap<u16, u16>),
     Ligatures(HashMap<u16, Vec<(GlyphList, u16)>>),
+}
+
+impl Substitution {
+    /// If this substitution applies at the start of `glyphs`: how many glyphs it consumes
+    /// and the glyph that replaces them.
+    pub fn apply(&self, glyphs: &[GlyphId]) -> Option<(usize, GlyphId)> {
+        let (&first, rest) = match glyphs.split_first() {
+            Some(split) => split,
+            None => return None,
+        };
+        match self {
+            Substitution::Single(replacements) =>
+                replacements.get(&(first.0 as u16)).map(|&replacement| (1, GlyphId(replacement as u32))),
+            Substitution::Ligatures(ligatures) => {
+                let ligatures = ligatures.get(&(first.0 as u16))?;
+                // OT §GSUB "Ligature Substitution": the *longest* matching ligature wins. Fonts
+                // usually list them longest first, but that is a recommendation, not a rule.
+                let mut best: Option<(usize, u16)> = None;
+                for (components, ligature) in ligatures {
+                    if let Some(extra) = components.matches(rest.iter().cloned()) {
+                        let consumed = extra + 1;
+                        if best.map_or(true, |(longest, _)| consumed > longest) {
+                            best = Some((consumed, *ligature));
+                        }
+                    }
+                }
+                best.map(|(consumed, ligature)| (consumed, GlyphId(ligature as u32)))
+            }
+        }
+    }
+}
+
+impl GSub {
+    /// Applies the lookups of the default language system whose feature tag `enabled`
+    /// accepts, once each, left to right — the simple subset of OT §"Lookups" this crate
+    /// implements. Lookup types that are not implemented (`Context`, `Alternate`, …) carry
+    /// no `Substitution` and are skipped; unrecognised glyphs pass through.
+    pub fn substitute(&self, glyphs: &[GlyphId], enabled: &dyn Fn(Tag) -> bool) -> Vec<GlyphId> {
+        let language = match self.default_language() {
+            Some(language) => language,
+            None => return glyphs.to_vec(),
+        };
+
+        // OT §"Lookups": lookups are applied in lookup-list order.
+        let mut lookup_indices: Vec<u16> = language.feature_list.iter()
+            .filter_map(|&FeatureIdx(idx)| self.features.get(idx as usize))
+            .filter(|feature| enabled(feature.tag))
+            .flat_map(|feature| feature.lookup_indices.iter().copied())
+            .collect();
+        lookup_indices.sort_unstable();
+        lookup_indices.dedup();
+
+        let mut out: Vec<GlyphId> = glyphs.to_vec();
+        let mut position = 0;
+        while position < out.len() {
+            let mut applied = false;
+            'lookups: for &lookup_idx in &lookup_indices {
+                let lookups = match self.lookup.get(lookup_idx as usize) {
+                    Some(lookups) => lookups,
+                    None => continue,
+                };
+                for substitution in lookups {
+                    if let Some((consumed, glyph)) = substitution.apply(&out[position ..]) {
+                        out.splice(position .. position + consumed, Some(glyph));
+                        position += 1;
+                        applied = true;
+                        break 'lookups;
+                    }
+                }
+            }
+            if !applied {
+                position += 1;
+            }
+        }
+        out
+    }
 }
 
 pub fn parse_gsub(data: &[u8]) -> Result<GSub, FontError> {
@@ -108,21 +184,8 @@ pub fn parse_gsub(data: &[u8]) -> Result<GSub, FontError> {
         }
         let mut push = |sub| lookup[lookup_idx].push(sub);
 
-        match lookup_type { 
-            // Single · Replace one glyph with one glyph
-            1 => push(parse_single_subst(data)?), 
-
-            2 => debug!("font has Multiple substitutions"), // Multiple · Replace one glyph with more than one glyph
-            3 => debug!("font has Altername substitutions"), // Alternate · Replace one glyph with one of many glyphs
-
-            // Ligature · Replace multiple glyphs with one glyph
-            4 => push(parse_ligatures(data)?),
-            
-            5 => debug!("font has Context substitutions"), // Context · Replace one or more glyphs in context
-            6 => debug!("font has Chaining Context substitutions"), // Chaining Context · Replace one or more glyphs in chained context
-            7 => debug!("font has Extension Substitution"), // Extension Substitution · Extension mechanism for other substitutions (i.e. this excludes the Extension type substitution itself)
-            8 => debug!("font has Reverse chaining context single substitutions"), // Reverse chaining context single · Applied in reverse order, replace single glyph in chaining context
-            _ => {},
+        if let Some(sub) = parse_substitution(data, lookup_type)? {
+            push(sub);
         }
         Ok(())
     })?;
@@ -132,6 +195,42 @@ pub fn parse_gsub(data: &[u8]) -> Result<GSub, FontError> {
         scripts: script_list,
         features: feature_list,
     })
+}
+
+/// One subtable of a `GSUB` lookup, as the substitutions this crate can apply. Lookup types
+/// 2, 3, 5, 6 and 8 are recognised but not implemented, and yield `None`.
+fn parse_substitution(data: &[u8], lookup_type: u16) -> Result<Option<Substitution>, FontError> {
+    Ok(Some(match lookup_type {
+        // Single · Replace one glyph with one glyph
+        1 => parse_single_subst(data)?,
+        // Ligature · Replace multiple glyphs with one glyph
+        4 => parse_ligatures(data)?,
+        // Extension · wraps another lookup type (what every large font actually uses)
+        7 => {
+            let (inner_type, inner) = parse_extension(data)?;
+            if inner_type == 7 {
+                // OT §GSUB "Extension Substitution": the extension types are for wrapping
+                // other lookups, not each other.
+                warn!("GSUB: an Extension lookup may not point at another Extension lookup");
+                return Ok(None);
+            }
+            match parse_substitution(inner, inner_type)? {
+                Some(sub) => sub,
+                None => return Ok(None),
+            }
+        }
+        // Multiple · Replace one glyph with more than one glyph
+        2 => { debug!("font has Multiple substitutions"); return Ok(None); }
+        // Alternate · Replace one glyph with one of many glyphs
+        3 => { debug!("font has Alternate substitutions"); return Ok(None); }
+        // Context · Replace one or more glyphs in context
+        5 => { debug!("font has Context substitutions"); return Ok(None); }
+        // Chaining Context · Replace one or more glyphs in chained context
+        6 => { debug!("font has Chaining Context substitutions"); return Ok(None); }
+        // Reverse chaining context single · applied in reverse order
+        8 => { debug!("font has Reverse chaining context single substitutions"); return Ok(None); }
+        _ => return Ok(None),
+    }))
 }
 
 fn parse_single_subst(data: &[u8]) -> Result<Substitution, FontError> {
@@ -277,4 +376,90 @@ fn parse_feature_table(i: &[u8]) -> Result<impl Iterator<Item=u16> + '_, FontErr
     let (i, _feature_params) = be_u16(i)?;
     let (i, lookup_index_count) = be_u16(i)?;
     Ok(iterator_n(i, be_u16, lookup_index_count))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feature(tag: &[u8; 4], lookup_indices: Vec<u16>) -> Feature {
+        Feature { tag: Tag(*tag), lookup_indices }
+    }
+
+    fn gsub_with(features: Vec<Feature>, lookup: Vec<Vec<Substitution>>) -> GSub {
+        GSub {
+            scripts: vec![Script {
+                default_language: Some(LanguageSystem {
+                    feature_list: (0 .. features.len() as u16).map(FeatureIdx).collect(),
+                    required_feature: None,
+                }),
+                languages: Vec::new(),
+            }],
+            features,
+            lookup,
+        }
+    }
+
+    #[test]
+    fn ligature_substitution_picks_the_longest_match() {
+        // OT §GSUB "Ligature Substitution": f f i must become ffi, not ff + i.
+        let mut ligatures: HashMap<u16, Vec<(GlyphList, u16)>> = HashMap::new();
+        ligatures.insert(10, vec![
+            (GlyphList(vec![20]), 30),     // f + i   -> fi  (30)
+            (GlyphList(vec![10, 20]), 40), // f + f + i -> ffi (40)
+        ]);
+        let gsub = gsub_with(
+            vec![feature(b"liga", vec![0])],
+            vec![vec![Substitution::Ligatures(ligatures)]],
+        );
+        let liga = |tag: Tag| tag.0 == *b"liga";
+
+        assert_eq!(
+            gsub.substitute(&[GlyphId(10), GlyphId(10), GlyphId(20)], &liga),
+            vec![GlyphId(40)]
+        );
+        assert_eq!(
+            gsub.substitute(&[GlyphId(10), GlyphId(20)], &liga),
+            vec![GlyphId(30)]
+        );
+        // A disabled feature substitutes nothing.
+        let glyphs = [GlyphId(10), GlyphId(20)];
+        assert_eq!(gsub.substitute(&glyphs, &|_| false), glyphs.to_vec());
+    }
+
+    #[test]
+    fn single_substitution_replaces_one_glyph() {
+        let mut replacements = HashMap::new();
+        replacements.insert(20u16, 21u16);
+        let gsub = gsub_with(
+            vec![feature(b"smcp", vec![0])],
+            vec![vec![Substitution::Single(replacements)]],
+        );
+        assert_eq!(
+            gsub.substitute(&[GlyphId(19), GlyphId(20)], &|tag| tag.0 == *b"smcp"),
+            vec![GlyphId(19), GlyphId(21)]
+        );
+    }
+
+    #[test]
+    fn extension_lookup_is_unwrapped() {
+        // OT §GSUB "Extension Substitution" (type 7) around a SingleSubstFormat2 (type 1):
+        // glyph 20 -> 50.
+        let mut data = Vec::new();
+        data.extend_from_slice(&[0, 1]);       // extension format 1
+        data.extend_from_slice(&[0, 1]);       // extensionLookupType = Single
+        data.extend_from_slice(&[0, 0, 0, 8]); // extensionOffset
+        data.extend_from_slice(&[0, 2]);       // SingleSubst format 2
+        data.extend_from_slice(&[0, 8]);       // coverageOffset
+        data.extend_from_slice(&[0, 1]);       // glyphCount
+        data.extend_from_slice(&[0, 50]);      // substituteGlyphID
+        data.extend_from_slice(&[0, 1]);       // Coverage format 1
+        data.extend_from_slice(&[0, 1]);       // glyphCount
+        data.extend_from_slice(&[0, 20]);      // glyph
+
+        match parse_substitution(&data, 7).expect("extension parses") {
+            Some(Substitution::Single(map)) => assert_eq!(map.get(&20), Some(&50)),
+            other => panic!("expected a single substitution, got {:?}", other),
+        }
+    }
 }

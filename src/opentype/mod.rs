@@ -252,6 +252,13 @@ impl Font for OpenTypeFont {
     fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
         self.gpos.as_ref().and_then(|gpos| gpos.kern.get(left.0 as u16, right.0 as u16).map(|k| k as f32)).unwrap_or(0.0)
     }
+    fn substitute(&self, glyphs: &[GlyphId], features: &[&[u8; 4]]) -> Vec<GlyphId> {
+        match self.gsub.as_ref() {
+            // OT §GSUB: a feature is enabled by its tag in the default language system.
+            Some(gsub) => gsub.substitute(glyphs, &|tag| features.iter().any(|&feature| tag.0 == *feature)),
+            None => glyphs.to_vec(),
+        }
+    }
     fn name(&self) -> &Name {
         &self.name
     }
@@ -544,6 +551,17 @@ pub fn parse_skript_list(data: &[u8]) -> Result<(), FontError> {
         }
     }
     Ok(())
+}
+
+/// OT §GSUB/GPOS "Extension Lookup" subtable: format 1, the lookup type it wraps and a
+/// 32-bit offset to the wrapped subtable (from the start of the extension subtable). Every
+/// large font uses these, so a reader that skips them loses its ligatures and kerning.
+pub fn parse_extension(data: &[u8]) -> Result<(u16, &[u8]), FontError> {
+    let (i, format) = be_u16(data)?;
+    require_eq!(format, 1);
+    let (i, lookup_type) = be_u16(i)?;
+    let (i, extension_offset) = be_u32(i)?;
+    Ok((lookup_type, slice!(data, extension_offset as usize ..)))
 }
 
 pub fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(usize, &[u8], u16, u16) -> Result<(), FontError>) -> Result<(), FontError> {

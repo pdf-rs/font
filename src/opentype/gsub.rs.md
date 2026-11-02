@@ -8,15 +8,24 @@ FeatureList → Feature (tag + lookup indices), LookupList → single (type 1) a
 `pdf` uses ligature lookup manually where it can.
 
 ## Fixed
+* **F36 (2026-11-02):** Extension lookups are followed: `parse_substitution` unwraps lookup type 7
+  (an extension pointing at another extension warns and is dropped), so fonts that keep their
+  ligatures behind extensions now expose them. `GSub::substitute()` applies the lookups of the
+  default language system whose feature tag the caller enables, in lookup-list order, once each
+  (the subset of OT §"Lookups" this crate implements): `Substitution::apply` handles Single and
+  Ligatures, the longest ligature winning. `Font::substitute(glyphs, features)` is the new trait
+  entry point; lookups of type 2/3/5/6/8 are still not implemented and pass glyphs through.
+  Unit tests: `ligature_substitution_picks_the_longest_match`,
+  `single_substitution_replaces_one_glyph`, `extension_lookup_is_unwrapped`.
 * **F21 (2026-11-02):** an unknown `minorVersion` no longer panics (`panic!("unsupported GPOS
   version 1.{}")` here was a copy-paste of the GPOS message); it warns and the table is read.
   Tests: `c18`, `c18b`.
 
 ## Differences from the specifications
-* **F36 (OT §GSUB):** only types 1 and 4 are collected. Multiple (2), Alternate (3), Context (5),
-  Chaining Context (6), **Extension (7)** and Reverse Chaining (8) are logged with `debug!` and
-  dropped. Extension lookups are how fonts larger than 64 KiB worth of lookups encode everything,
-  so in practice "this font has ligatures" is often false even when it does.
+* ~~**F36 (OT §GSUB):**~~ types 1 and 4 were the only ones collected and Extension (7) was
+  dropped — extensions are followed and 1/4 are applied now (see "Fixed" above). Multiple (2),
+  Alternate (3), Context (5), Chaining Context (6) and Reverse Chaining (8) are still logged with
+  `debug!` and dropped.
 * `GSub::default_language()` (`:36-38`) returns `scripts.get(0)`, i.e. whichever script record
   happens to come first in the table. The spec has no "first script"; consumers want `DFLT`
   (then `latn`). `pdf` side-steps this by looking up `latn`/`DFLT` itself.

@@ -7,6 +7,10 @@ pairs, `KernTable::get(left, right)`) filled from **PairPos** lookups (type 2), 
 `GPos::from_kern` lets a `kern` table stand in when GPOS is absent (`mod.rs:110-117`).
 
 ## Fixed
+* **F36 (2026-11-02):** lookup type 9 (Extension) is followed: `parse_positioning` reads the
+  extension header and dispatches to the wrapped lookup type, so pair kerning hidden behind an
+  extension — what most large fonts do — is reachable. An extension wrapping an extension warns
+  and is dropped. Unit test: `extension_lookup_reaches_pair_adjustment`.
 * **F27 (2026-11-02):** the two `.unwrap()`s on the PairPos format 1 coverage offset/iterator are
   gone: a zero or out-of-bounds coverage offset is an error, and a coverage table shorter than
   `pairSetCount` stops the loop instead of panicking.
@@ -24,9 +28,10 @@ pairs, `KernTable::get(left, right)`) filled from **PairPos** lookups (type 2), 
 * Only the **first** `ValueRecord`'s `xAdvance` is used (`:130`, `:158`); `ValueRecord2`
   (the second glyph's advance/placement) and `xPlacement`/`yPlacement` are discarded. For PDF
   text that is defensible (you only need the advance delta), but it is not what GPOS says.
-* **F36 (OT §GPOS, "Extension lookups"):** lookup type 9 (Extension) is not followed
-  (`_ => {}` at `:72`), so a font that puts its pair kerning behind an extension lookup — which
-  is what most large fonts do — has no kerning at all.
+* ~~**F36 (OT §GPOS, "Extension lookups"):**~~ lookup type 9 (Extension) was not followed — the
+  dispatch (`parse_positioning`) now unwraps it and parses the wrapped pair adjustment or
+  mark-to-base subtable; an extension wrapping an extension warns and is dropped. Unit test:
+  `extension_lookup_reaches_pair_adjustment`.
 * Lookup types 1 (single), 3 (cursive), 5/6 (mark-to-ligature, mark-to-mark), 7 (context),
   8 (chaining context) are skipped without a warning.
 * `ValueRecord` correctly skips the device-table offsets (`(flags & 0x00F0).count_ones() * 2`) but

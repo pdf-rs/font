@@ -128,6 +128,18 @@ pub trait Font: 'static {
     fn vmetrics(&self) -> Option<VMetrics> {
         None
     }
+
+    /// Apply the font's `GSUB` substitutions (ligatures, single substitutions) to a run of
+    /// glyphs, in the font's default language system.
+    ///
+    /// `features` lists the OpenType feature tags to enable, e.g. `b"liga"` for the standard
+    /// f-ligatures and `b"rlig"` for required ligatures; an empty list enables nothing.
+    /// Backends without `GSUB` (and lookups this crate does not implement — contextual,
+    /// alternate, multiple) return the run unchanged.
+    fn substitute(&self, glyphs: &[GlyphId], features: &[&[u8; 4]]) -> Vec<GlyphId> {
+        let _ = features;
+        glyphs.to_vec()
+    }
     
     /// Kerning distance for the given glyph pair
     fn kerning(&self, _left: GlyphId, _right: GlyphId) -> f32 {

@@ -6,7 +6,7 @@ use nom::{
 };
 use crate::{R, GlyphId, FontError};
 use crate::parsers::{*};
-use crate::opentype::{Maxp, parse_lookup_list, coverage_table, parse_class_def};
+use crate::opentype::{Maxp, parse_extension, parse_lookup_list, coverage_table, parse_class_def};
 use itertools::{Itertools};
 
 
@@ -73,15 +73,33 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> Result<GPos, FontError> {
     
     parse_lookup_list(slice!(data, lookup_list_off as usize ..), |lookup_idx, data, lookup_type, _lookup_flag| {
         debug!("lookup type {}", lookup_type);
-        match lookup_type { 
-            2 => parse_pair_adjustment(data, &mut gpos.kern, maxp.num_glyphs)?,
-            4 => parse_mark_to_base_attachment(data, &mut gpos)?,
-            _ => {}
-        }
-        Ok(())
+        let _ = lookup_idx;
+        parse_positioning(data, lookup_type, &mut gpos, maxp.num_glyphs)
     })?;
     
     Ok(gpos)
+}
+
+/// One subtable of a `GPOS` lookup. Lookup types 1 (single), 3 (cursive), 5-8 (mark
+/// attachment, contextual and friends) are not implemented; `Extension` wraps the ones that
+/// are, which is what large fonts use.
+fn parse_positioning(data: &[u8], lookup_type: u16, gpos: &mut GPos, num_glyphs: u16) -> Result<(), FontError> {
+    match lookup_type {
+        2 => parse_pair_adjustment(data, &mut gpos.kern, num_glyphs)?,
+        4 => parse_mark_to_base_attachment(data, gpos)?,
+        // OT §GPOS "Extension Positioning": a wrapper around another lookup type.
+        9 => {
+            let (inner_type, inner) = parse_extension(data)?;
+            if inner_type == 9 {
+                // OT §GPOS "Extension Positioning": extensions may not wrap extensions.
+                warn!("GPOS: an Extension lookup may not point at another Extension lookup");
+                return Ok(());
+            }
+            parse_positioning(inner, inner_type, gpos, num_glyphs)?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 
@@ -226,4 +244,35 @@ fn parse_base_array(data: &[u8], mark_class_count: u16) -> Result<impl Array<Ite
     let (_, arr) = array::<uint16, _>(mark_class_count as usize * base_count as usize)(i)?;
 
     Ok(arr.map(move |off: u16| AnchorTable::parse(slice!(data, off as usize..))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_lookup_reaches_pair_adjustment() {
+        // OT §GPOS "Extension Positioning" (lookup type 9) around a PairPos format 1:
+        // glyph 20 followed by 21 gets xAdvance -40.
+        let mut data = Vec::new();
+        data.extend_from_slice(&[0, 1]);       // extension format 1
+        data.extend_from_slice(&[0, 2]);       // extensionLookupType = Pair Adjustment
+        data.extend_from_slice(&[0, 0, 0, 8]); // extensionOffset
+        data.extend_from_slice(&[0, 1]);       // PairPos format 1
+        data.extend_from_slice(&[0, 18]);      // coverageOffset (from the subtable start)
+        data.extend_from_slice(&[0, 4]);       // valueFormat1 = X_ADVANCE
+        data.extend_from_slice(&[0, 0]);       // valueFormat2
+        data.extend_from_slice(&[0, 1]);       // pairSetCount
+        data.extend_from_slice(&[0, 12]);      // pairSetOffset[0]
+        data.extend_from_slice(&[0, 1]);       // pairValueCount
+        data.extend_from_slice(&[0, 21]);      // secondGlyph
+        data.extend_from_slice(&(-40i16).to_be_bytes()); // xAdvance
+        data.extend_from_slice(&[0, 1]);       // Coverage format 1
+        data.extend_from_slice(&[0, 1]);       // glyphCount
+        data.extend_from_slice(&[0, 20]);      // glyph
+
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 9, &mut gpos, 100).expect("extension positioning parses");
+        assert_eq!(gpos.kern.get(20, 21), Some(-40));
+    }
 }
