@@ -1,5 +1,14 @@
 # `src/cff.rs` — Compact Font Format: INDEX/DICT parsing, charsets, encodings, outlines
 
+## Fixed
+* **F22/F23 (2026-11-02):** nothing on the parse path panics any more. A missing `Private`
+  TopDICT entry is an empty private dict (TN5176 makes it optional), `index()` rejects an
+  INDEX offset of 0 with `error!` instead of underflowing, an unknown `CharstringType` and an
+  unknown charset/encoding format are `Err` (charset/encoding) or a warning (`CharstringType`,
+  which only affects outlines), and a charstring that sets both an explicit and a delta width
+  keeps the explicit one instead of hitting `panic!("BUG: both char_width and delta_width set")`.
+  Tests: `c19`, `c19b`, `c19c`, `c19d` in `tests/cff_cases.rs`.
+
 ## What it does
 * `read_cff`: header (major=1, hdrSize, offSize), the four leading INDEXes (Name, TopDICT,
   String, GlobalSubr).
@@ -26,13 +35,11 @@ The SID tables (`STANDARD_STRINGS`, `ISO_ADOBE_CHARSET`, `EXPERT_CHARSET`,
   `(n+1)`; the last glyph is never mapped and an empty font underflows.
 * **F18:** encoding supplements do `sid_map[&sid]` (`:428-430`) — a supplement SID that is not in
   the charset panics (legal per TN5176, a supplement may name a glyph the font lacks).
-* **F22/F23:** `Private` is treated as mandatory (`.expect("no private dict entry")`, `:205`) and
-  the charstring/charset/FDSelect paths use `panic!` for anything unexpected (`:299`, `:343`,
-  `:787`, `:809`). `index()` subtracts 1 from every offset (`:504-517`) without checking that the
-  offset is >= 1, so a zero offset underflows.
+* **F22/F23:** (fixed above) `Private` was treated as mandatory, the charstring/charset paths
+  used `panic!` for anything unexpected, and `index()` underflowed on an offset of 0.
 * **F42 (TN5177/TN5176 §"Charstring width"):** width derivation is right — `(Some(w), None)` uses
-  the charstring width, `(None, None)` `defaultWidthX`, `(None, Some(d))` `nominalWidthX + d` —
-  but `(Some(_), Some(_))` panics instead of preferring the explicit width.
+  the charstring width, `(None, None)` `defaultWidthX`, `(None, Some(d))` `nominalWidthX + d`.
+  `(Some(_), Some(_))` was a panic; it now keeps the explicit width (fixed above).
 * `dict()` (`:481-497`) uses `while let Ok(...) = value(input)` to collect operands; an invalid
   operand byte (22-27, 31, 255 = reserved) silently ends the operand list and the next byte is
   then parsed as an operator, so a malformed DICT desynchronises instead of failing.

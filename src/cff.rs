@@ -171,6 +171,9 @@ impl<'a> Cff<'a> {
         
         // num glyphs includes glyph 0 (.notdef)
         let num_glyphs = char_strings.len() as usize;
+        // CFF §"CharStrings INDEX": there is always at least `.notdef`, and several index
+        // computations below (`num_glyphs - 1`) depend on that.
+        require!(num_glyphs >= 1);
 
         let mut font_matrix = top_dict.get(&Operator::FontMatrix).and_then(|a| parse_font_matrix(&a));
         
@@ -201,10 +204,14 @@ impl<'a> Cff<'a> {
                 subrs.push(Rc::clone(&subrs_list[fd_idx]));
             }
         } else {
-            let private_dict_entry = top_dict.get(&Operator::Private)
-                .expect("no private dict entry");
+            // CFF §"Top DICT": `Private` is optional; without it the font has no private dict
+            // and `default_width_x`/`nominal_width_x` keep their defaults (0).
+            let private_dict_entry = match top_dict.get(&Operator::Private) {
+                Some(entry) => self.private_dict_and_subrs(entry)?,
+                None => (Dict::new(), vec![]),
+            };
 
-            let (private_dict_global, subrs_global) = self.private_dict_and_subrs(&private_dict_entry)?;
+            let (private_dict_global, subrs_global) = private_dict_entry;
             let private_dict_global = Rc::new(private_dict_global);
             let subrs_global = Rc::new(subrs_global);
             for i in 0..num_glyphs {
@@ -296,7 +303,8 @@ impl<'a> CffSlot<'a> {
         let char_string_type = match n {
             1 => CharstringType::Type1,
             2 => CharstringType::Type2,
-            _ => panic!("invalid charstring type")
+            // CFF §18 "CharstringType": 1 or 2, nothing else exists.
+            n => error!("invalid CharstringType {}", n)
         };
         
         let global_subr_bias = match char_string_type {
@@ -340,7 +348,12 @@ impl<'a> CffSlot<'a> {
                 (Some(w), None) => w,
                 (None, None) => default_width,
                 (None, Some(delta)) => delta + nominal_width,
-                (Some(_), Some(_)) => panic!("BUG: both char_width and delta_width set")
+                // TN5177 §3: a charstring may set its width once, with either encoding. Both at
+                // the same time is a producer bug; keep the explicit width and carry on.
+                (Some(w), Some(_)) => {
+                    warn!("glyph {}: charstring set both an explicit and a delta width, using {}", id, w);
+                    w
+                }
             };
             let lsb = state.lsb.unwrap_or_default();
             let path = state.take_path();
@@ -506,7 +519,14 @@ fn index(i: &[u8]) -> ParseResult<Vec<&[u8]>> {
     debug!("n={}", n);
     if n != 0 {
         let (i, offSize) = t!(be_u8(i));
-        let (i, offsets) = t!(count2(|i| offset(offSize)(i).map(|(i, o)| (i, o - 1)), n+1)(i));
+        let (i, offsets) = t!(count2(|i| {
+            let (i, o) = offset(offSize)(i)?;
+            // CFF §"INDEX data": offsets are 1-based; 0 is invalid (and used to underflow).
+            if o == 0 {
+                error!("INDEX offset 0 (offset size {}) is invalid", offSize);
+            }
+            Ok((i, o - 1))
+        }, n+1)(i));
         let (i, data) = t!(take(offsets[n])(i));
         
         let items = offsets.windows(2).map(|w| Ok(slice!(data, w[0] as usize .. w[1] as usize))).collect::<Result<_, _>>()?;
@@ -784,7 +804,11 @@ fn charset(i: &[u8], num_glyphs: usize) -> R<Charset> {
         2 => {
             map(ranges(be_u16, num_glyphs), |r| Charset::Ranges(r))(i)
         },
-        _ => panic!("invalid charset format")
+        // CFF §"Charset": formats 0, 1 and 2 only.
+        format => {
+            warn!("invalid charset format {}", format);
+            Err(Failure(make_error(i, ErrorKind::Tag)))
+        }
     }
 }
 
@@ -806,7 +830,11 @@ fn parse_encoding(i: &[u8]) -> R<(GlyphEncoding, Vec<(u8, SID)>)> {
             let (i, num) = be_u8(i)?;
             map(count(tuple((be_u8, be_u8)), num as usize), |a| GlyphEncoding::Ranges(a))(i)?
         }
-        _ => panic!("invalid charset format")
+        // CFF §"Encoding": formats 0 and 1 only (bit 7 is the supplements flag).
+        format => {
+            warn!("invalid encoding format {}", format);
+            return Err(Failure(make_error(i, ErrorKind::Tag)));
+        }
     };
     if format & 0x80 != 0 {
         let (i, n) = be_u8(i)?;

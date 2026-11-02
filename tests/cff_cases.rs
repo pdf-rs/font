@@ -48,31 +48,56 @@ fn index(items: &[&[u8]]) -> Vec<u8> {
 }
 
 /// header + Name INDEX + TopDICT INDEX + String INDEX + GlobalSubr INDEX +
-/// CharStrings INDEX. The TopDICT holds only `Private [0,0]` and `CharStrings`,
-/// so the private dict is empty and every glyph falls back to width 0.
-fn build_cff(cs0: &[u8], cs1: &[u8]) -> Vec<u8> {
+/// CharStrings INDEX + `tail`.
+///
+/// `extra_top_dict` holds complete TopDICT entries placed before the ones this
+/// builder writes; `private` adds `Private [0,0]`; `charset_tail` adds a `Charset`
+/// entry pointing at `tail` and appends `tail` after the CharStrings INDEX.
+fn build_cff_full(
+    extra_top_dict: &[u8],
+    private: bool,
+    charset_tail: Option<&[u8]>,
+    cs0: &[u8],
+    cs1: &[u8],
+) -> Vec<u8> {
     let name_index = index(&[b"Test".as_ref()]);
     let empty = index(&[]);
     let charstrings = index(&[cs0, cs1]);
+    let tail = charset_tail.unwrap_or(&[]);
 
-    // The CharStrings operand is an absolute offset into the CFF data, and its
-    // own encoding length depends on its value: encode, measure, repeat.
-    let mut offset_value = 0i32;
+    // The CharStrings and Charset operands are absolute offsets into the CFF data, and
+    // their own encoding length depends on their value: encode, measure, repeat.
+    let mut charset_offset = 0i32;
+    let mut cs_offset = 0i32;
     let mut top_dict = Vec::new();
     let mut top_dict_index = Vec::new();
     for _ in 0..8 {
         top_dict.clear();
-        push_int(0, &mut top_dict);
-        push_int(0, &mut top_dict);
-        top_dict.push(18); // Operator::Private
-        push_int(offset_value, &mut top_dict);
+        top_dict.extend_from_slice(extra_top_dict);
+        if private {
+            push_int(0, &mut top_dict);
+            push_int(0, &mut top_dict);
+            top_dict.push(18); // Operator::Private
+        }
+        if charset_tail.is_some() {
+            push_int(charset_offset, &mut top_dict);
+            top_dict.push(15); // Operator::Charset
+        }
+        push_int(cs_offset, &mut top_dict);
         top_dict.push(17); // Operator::CharStrings
         top_dict_index = index(&[top_dict.as_slice()]);
-        let actual = (4 + name_index.len() + top_dict_index.len() + empty.len() * 2) as i32;
-        if actual == offset_value {
+        let base = (4 + name_index.len() + top_dict_index.len() + empty.len() * 2) as i32;
+        let new_charset = if charset_tail.is_some() {
+            base + charstrings.len() as i32
+        } else {
+            0
+        };
+        let stable = base == cs_offset && new_charset == charset_offset;
+        cs_offset = base;
+        charset_offset = new_charset;
+        if stable {
             break;
         }
-        offset_value = actual;
     }
 
     let mut data = vec![1, 0, 4, 1]; // major, minor, hdrSize, offSize
@@ -81,7 +106,15 @@ fn build_cff(cs0: &[u8], cs1: &[u8]) -> Vec<u8> {
     data.extend_from_slice(&empty); // String INDEX
     data.extend_from_slice(&empty); // GlobalSubr INDEX
     data.extend_from_slice(&charstrings);
+    data.extend_from_slice(tail);
     data
+}
+
+/// header + Name INDEX + TopDICT INDEX + String INDEX + GlobalSubr INDEX +
+/// CharStrings INDEX. The TopDICT holds only `Private [0,0]` and `CharStrings`,
+/// so the private dict is empty and every glyph falls back to width 0.
+fn build_cff(cs0: &[u8], cs1: &[u8]) -> Vec<u8> {
+    build_cff_full(&[], true, None, cs0, cs1)
 }
 
 fn glyph(data: &[u8], gid: u32) -> Glyph {
@@ -312,4 +345,50 @@ fn c08e_hflex_still_ends_flat() {
         (50.0, 5.0),
         (60.0, 5.0)
     ]);
+}
+
+// ---------------------------- F22/F23: decide, don't panic ----------------------------
+
+#[test]
+fn c19_unknown_charstring_type_is_an_error() {
+    // F23: `CharstringType` is 1 or 2 (CFF §18); anything else must reject the font,
+    // not panic inside the interpreter setup.
+    let mut extra = Vec::new();
+    push_int(3, &mut extra);
+    extra.extend_from_slice(&[12, 6]); // CharstringType
+    let data = build_cff_full(&extra, true, None, &[14], &[14]);
+    assert!(CffFont::parse(&data, 0).is_err(), "CharstringType 3 must be rejected");
+}
+
+#[test]
+fn c19b_missing_private_dict_is_not_fatal() {
+    // F22: `Private` is optional in the Top DICT (CFF §"Top DICT Data"); without it
+    // the private dict is empty, so `default_width_x`/`nominal_width_x` are 0.
+    let mut cs = Vec::new();
+    push_int(500, &mut cs); // delta width
+    cs.push(14); // endchar
+    let data = build_cff_full(&[], false, None, &[14], &cs);
+    let font = CffFont::parse(&data, 0).expect("a font without Private parses");
+    assert_eq!(font.glyph(GlyphId(1)).expect("glyph 1").metrics.advance, 500.0);
+}
+
+#[test]
+fn c19c_unknown_charset_format_is_an_error() {
+    // F23: charset formats are 0, 1 and 2 (CFF §"Charset"); format 3 used to panic.
+    let tail = [3u8];
+    let data = build_cff_full(&[], true, Some(&tail), &[14], &[14]);
+    assert!(CffFont::parse(&data, 0).is_err(), "charset format 3 must be rejected");
+}
+
+#[test]
+fn c19d_index_offset_zero_is_an_error() {
+    // F23: INDEX offsets are 1-based (CFF §"INDEX data"); 0 used to underflow in
+    // `o - 1`. Corrupt the Name INDEX, which is the first one in the file.
+    let mut data = vec![1, 0, 4, 1]; // header
+    data.extend_from_slice(&[0, 1, 1, 0, 4]); // count 1, offSize 1, offsets [0, 4]
+    data.extend_from_slice(b"Test");
+    data.extend_from_slice(&index(&[])); // Top DICT INDEX
+    data.extend_from_slice(&index(&[])); // String INDEX
+    data.extend_from_slice(&index(&[])); // GlobalSubr INDEX
+    assert!(CffFont::parse(&data, 0).is_err(), "INDEX offset 0 must be rejected");
 }
