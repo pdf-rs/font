@@ -1,5 +1,14 @@
 # `src/woff.rs` — WOFF 1.0 and WOFF2 wrappers (plus the transformed `glyf` decoder)
 
+## Fixed
+* **F26 (2026-11-02):** no panic on either WOFF path any more. The two decompression
+  `.expect()`s became `FontError::Other` carrying the table tag; `flavor == "ttcf"` errors out
+  instead of `unimplemented!()`; a `n_contour` outside `{-1, 0, >0}` is an `error!`; the WOFF2
+  `bbox` size uses `checked_sub`; a glyph stream that ends mid-triplet or a flag stream that ends
+  before its points are `error!` instead of an index panic. The feature **did not compile at all**
+  before (a `?` inside an `Iterator::map` closure in `parse_glyf_t0`), so `--features woff` was
+  dead code; it now builds. Tests: `tests/woff_cases.rs` `c23`, `c23b`, `c23c`.
+
 ## What it does
 * `parse_woff`: `wOFF` header (flavor, length, numTables, totalSfntSize, versions,
   meta/priv offsets), the 20-byte directory entries, then zlib-inflate or copy each table, build a
@@ -19,11 +28,8 @@
   WOFF requires tables to be stored in the directory's order, so this works for conforming fonts,
   but padding/gaps or a reordered directory silently shift every table. Also unvalidated:
   `length`, `totalSfntSize`, per-table `origChecksum`, the metadata/private blocks.
-* **F26 (W3C WOFF §"Decoding"):** `inflate_bytes_zlib(...).expect("can't decompress data")`
-  (`:52`) and `require_eq!(orig_data.len(), …)` — the former panics, the latter errors.
-  `decompressor.read_exact(&mut buf).expect("decode failed")` (`:112`) panics on a truncated
-  Brotli stream. `flavor == "ttcf"` is `unimplemented!()` (a panic) for WOFF and an `error!` for
-  WOFF2.
+* **F26:** (fixed above — the two decompression panics, the `ttcf` `unimplemented!()`, the
+  `n_contour` panic and the WOFF2 stream-end panics.)
 * WOFF2 (`:100-160`): the table directory is stored in an `IndexMap` (`count_map`), so the
   *order* is preserved and the sequential read from the Brotli stream matches the directory
   order — that part is right. But the spec allows a collection directory (`ttcf`) plus a

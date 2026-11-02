@@ -41,7 +41,8 @@ pub fn parse_woff(data: &[u8]) -> Result<OpenTypeFont, FontError> {
     let (mut i, tables_dir) = count(woff_dir_entry, num_tables as usize)(i)?;
     
     if flavor == b"ttcf" {
-        unimplemented!()
+        // WOFF §"WOFF Header": flavor `ttcf` marks a collection; there is no reader for those.
+        error!("WOFF font collections are not implemented yet")
     }
     
     let mut tables = HashMap::with_capacity(num_tables as usize);
@@ -49,7 +50,11 @@ pub fn parse_woff(data: &[u8]) -> Result<OpenTypeFont, FontError> {
         debug!("{}", String::from_utf8_lossy(&entry.tag));
         let data = if entry.comp_length < entry.orig_length {
             let compressed_data = parse(&mut i, take((entry.comp_length as usize + 3) & !3))?;
-            let orig_data = inflate_bytes_zlib(slice!(compressed_data, .. entry.comp_length as usize)).expect("can't decompress data");
+            let orig_data = match inflate_bytes_zlib(slice!(compressed_data, .. entry.comp_length as usize)) {
+                Ok(data) => data,
+                // WOFF §"Table Directory": a table marked compressed must decompress.
+                Err(e) => return Err(FontError::Other(format!("can't decompress {}: {:?}", String::from_utf8_lossy(&entry.tag), e)))
+            };
             require_eq!(orig_data.len(), entry.orig_length as usize);
             Cow::Owned(orig_data)
         } else {
@@ -109,7 +114,9 @@ pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
     for (&tag, entry) in &entry_tables {
         debug!("tag: {:?} ({:?}) {:?}", tag, std::str::from_utf8(&tag), entry);
         let mut buf = vec![0; entry.length as usize];
-        decompressor.read_exact(&mut buf).expect("decode failed");
+        if let Err(e) = decompressor.read_exact(&mut buf) {
+            return Err(FontError::Other(format!("can't decode table {:?}: {}", String::from_utf8_lossy(&tag), e)));
+        }
         entries.insert(tag, buf);
     }
     require_eq!(decompressor.bytes().count(), 0);
@@ -117,9 +124,9 @@ pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
     let tables = Tables { entries };
     
     let hmtx = tables.get(b"hmtx").map(|hmtx_data| {
-        let head = parse_head(tables.get(b"head").expect("no head"))?;
-        let hhea = parse_hhea(tables.get(b"hhea").expect("no hhea"))?;
-        let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp"))?;
+        let head = parse_head(expect!(tables.get(b"head"), "no head"))?;
+        let hhea = parse_hhea(expect!(tables.get(b"hhea"), "no hhea"))?;
+        let maxp = parse_maxp(expect!(tables.get(b"maxp"), "no maxp"))?;
         match entry_tables[b"hmtx"].flags {
             0 => parse_hmtx(&hmtx_data, &hhea, &maxp),
             1 => parse_hmtx_woff2_format1(&hmtx_data, &head, &hhea, &maxp).get(),
@@ -131,9 +138,9 @@ pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
         match entry_tables[b"glyf"].flags {
             0 => parse_glyf_t0(&glyf_data),
             3 => {
-                let head = parse_head(tables.get(b"head").expect("no head"))?;
-                let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp"))?;
-                let loca = parse_loca(tables.get(b"loca").expect("no loca"), &head, &maxp)?;
+                let head = parse_head(expect!(tables.get(b"head"), "no head"))?;
+                let maxp = parse_maxp(expect!(tables.get(b"maxp"), "no maxp"))?;
+                let loca = parse_loca(expect!(tables.get(b"loca"), "no loca"), &head, &maxp)?;
                 parse_shapes(&loca, glyf_data)
             }
             f => error!("invalid flag for glyf: {}", f)
@@ -163,7 +170,7 @@ fn parse_glyf_t0(i: &[u8]) -> Result<Vec<Shape>, FontError> {
     
     let bbox_bitmap_len = (num_glyphs as u32 + 7) / 8;
     let (i, _bbox_bitmap) = take(bbox_bitmap_len)(i)?;
-    let (i, _bbox_stream) = take(bbox_stream_size - bbox_bitmap_len)(i)?;
+    let (i, _bbox_stream) = take(expect!(bbox_stream_size.checked_sub(bbox_bitmap_len), "bbox stream shorter than its bitmap"))(i)?;
     let (i, _instruction_stream) = take(instruction_stream_size)(i)?;
     
     let contours = iterator(n_contour_stream, be_i16);
@@ -180,37 +187,43 @@ fn parse_glyf_t0(i: &[u8]) -> Result<Vec<Shape>, FontError> {
                 let mut outline = Outline::new();
                 let (mut x, mut y) = (0i16, 0i16);
                 for n_points in (&mut points).take(n_contour as usize) {
-                    let mut counter = 0;
-                    let points = (&mut flags).take(n_points as usize).map(|flag| {
+                    // The flag stream and the glyph stream are separate, so a truncated font
+                    // runs out of flags here — that must be an error, not a panic.
+                    let mut contour_points = Vec::with_capacity(n_points as usize);
+                    for _ in 0 .. n_points {
+                        let flag = expect!((&mut flags).next(), "flag stream ended");
                         let on_curve = flag & 0x80 == 0;
                         let triplet = TRIPLET_LUT[(flag & 0x7F) as usize];
                         use nom::error::{ErrorKind};
                         //debug!("{:02x} {:02x} {:02x} {:02x}", glyph_stream[0], glyph_stream[1], glyph_stream[2], glyph_stream[3]);
-                        let (vx, vy): (i16, i16) = parse(&mut glyph_stream,
+                        // `bits()` reports a plain nom error, which has no `From` into
+                        // `FontError`; a truncated glyph stream is an error, not a panic.
+                        let (vx, vy): (i16, i16) = match parse(&mut glyph_stream,
                             bits::<_, _, (_, ErrorKind), (_, ErrorKind), _>(
                                 tuple((
                                     take_bits(triplet.x_bits()),
                                     take_bits(triplet.y_bits())
                                 ))
                             )
-                        )?;
+                        ) {
+                            Ok(v) => v,
+                            Err(e) => return Err(FontError::Other(format!(
+                                "glyph stream: can't read a point triple: {:?}", e)))
+                        };
                         let sign = |is_minus| if is_minus { -1 } else { 1 };
                         x += sign(triplet.x_minus()) * (vx + triplet.dx() as i16);
                         y += sign(triplet.y_minus()) * (vy + triplet.dy() as i16);
-                        counter += 1;
-                        
-                        (on_curve, Vector2F::new(x as f32, y as f32))
-                    });
-                    if let Some(contour) = contour(points) {
+
+                        contour_points.push((on_curve, Vector2F::new(x as f32, y as f32)));
+                    }
+                    if let Some(contour) = contour(contour_points.into_iter()) {
                         outline.push_contour(contour);
                     }
-                    // don't care about it… but it needs to be removed from the stream
-                    require_eq!(counter, n_points);
                 }
                 glyphs.push(Shape::Simple(outline));
                 let _num_instructions = parse(&mut glyph_stream, varint_u16)?;
             }
-            _ => panic!("invalid number of contours")
+            n => error!("invalid number of contours: {}", n)
         }
     }
     
