@@ -87,7 +87,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             1 => { // ⊦ y dy hstem (1) ⊦
                 trace!("hstem");
-                maybe_width(s, |n| n == 2);
+                maybe_width(s, |n| n % 2 == 0);
                 s.stem_hints += (s.stack.len() / 2) as u32;
                 s.stack.clear();
                 i
@@ -95,7 +95,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             2 => error!("reserved {}", b0),
             3 => { // ⊦ x dx vstem (3) ⊦
                 trace!("vstem");
-                maybe_width(s, |n| n == 2);
+                maybe_width(s, |n| n % 2 == 0);
                 s.stem_hints += (s.stack.len() / 2) as u32;
                 s.stack.clear();
                 i
@@ -290,8 +290,8 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         let j = s.pop()?.to_int()?;
                         let n = s.pop()?.to_usize()?;
                         let len = s.stack.len();
-                        require!(n < len);
-                        let slice = &mut s.stack[len - n - 1 .. len - 1];
+                        require!(n <= len);
+                        let slice = &mut s.stack[len - n .. len];
                         if j > 0 {
                             let j = j as usize;
                             require!(j < n);
