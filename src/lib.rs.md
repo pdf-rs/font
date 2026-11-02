@@ -1,5 +1,12 @@
 # `src/lib.rs` — crate root: the `Font` trait, type dispatch, shared charstring state
 
+## Fixed
+* **F29 (2026-11-02):** the private `print_err(e: nom::Err<VerboseError<&[u8]>>) -> !` is gone. It
+  was never called (no caller in the crate), and it panicked with "need more data" / "error
+  converting an `Err::Failure`" / "error converting an `Err::Incomplete`" — so it was dead code
+  that could only ever abort. Errors now travel as `FontError` everywhere. `src/error.rs.md`
+  updated to match.
+
 ## What it does
 * Defines `Font`, the single trait every backend implements (`num_glyphs`, `font_matrix`,
   `glyph`, `is_empty_glyph`, `gid_for_codepoint`/`gid_for_name`/`gid_for_unicode_codepoint`,
@@ -16,8 +23,7 @@
 * **F34 (OT §"Font Collections"):** `ttcf` and `typ1` are recognised by `font_type()` and then
   rejected (`"FontCollections not implemented"` in `parse`, `:499`). A TrueType Collection is a
   legal container and is exactly what PDF `/FontFile2` may hold.
-* **F29:** `print_err` (`:441-449`) panics on purpose; it is only reached from the "verbose"
-  nom-error path.
+* ~~**F29:**~~ `print_err` (`:441-449`) panicked instead of reporting — removed (see "Fixed" above).
 * `parse()` requires 4 bytes (`slice!(data, 0..4).try_into().unwrap()` at `:493`) — a 2-byte
   input makes it return `Err` via the macro, but `font_info()` (`:557`) indexes `data[0..4]`
   directly and panics.

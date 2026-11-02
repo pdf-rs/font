@@ -17,8 +17,8 @@ failure), `offset!`, `expect!` (turn `None` into `Other(msg)`), `require!`/`requ
   the input slices (or the offset relative to the table) would make every parse error actionable.
 * `slice!` reports `OutOfBounds(file!(), line!())` — the *crate* location, not the table and
   offsets that failed. `Get`/`Key`/`Reserved` at least carry a byte value, never an offset.
-* **F29:** `lib.rs:441-449` (`print_err`) panics after printing the nom error context; it is the
-  only "diagnostic" path and it aborts instead of reporting.
+* ~~**F29:**~~ `lib.rs:441-449` (`print_err`) panicked after printing the nom error context; it
+  was dead code and has been removed (see `src/lib.rs.md`, "Fixed").
 * `error!` produces `Other(String)`, so every "unsupported feature" and every "malformed input"
   end up in the same bucket — callers cannot distinguish "this font uses a feature you do not
   implement" (recoverable: fall back, skip the glyph) from "this font is corrupt" (fatal).

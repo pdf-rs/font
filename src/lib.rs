@@ -436,19 +436,6 @@ pub trait IResultExt {
     fn get(self) -> Result<Self::Item, FontError>;
 }
 
-fn print_err(e: nom::Err<VerboseError<&[u8]>>) -> ! {
-    match e {
-        Incomplete(_) => panic!("need more data"),
-        Error(v) | Failure(v) => {
-            for (i, e) in v.errors {
-                println!("{:?} {:?}", &i[.. i.len().min(20)], e);
-                println!("{:?}", String::from_utf8_lossy(&i[.. i.len().min(20)]));
-            }
-            panic!()
-        }
-    }
-}
-
 impl<T> IResultExt for IResult<&[u8], T, VerboseError<&[u8]>> {
     type Item = T;
     #[inline]
