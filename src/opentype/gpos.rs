@@ -118,9 +118,13 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, _num_glyphs: 
             let (i, pair_set_count) = be_u16(i)?;
             let (i, _pair_set_offsets) = be_u16(i)?;
             
-            let mut coverage = coverage_table(coverage_off.of(data).unwrap())?;
+            let mut coverage = coverage_table(coverage_off.of(data)?)?;
             for offset in iterator_n(i, be_u16, pair_set_count) {
-                let first_glyph = coverage.next().unwrap();
+                let first_glyph = match coverage.next() {
+                    Some(glyph) => glyph,
+                    // fewer coverage entries than pair sets: ignore the rest
+                    None => break
+                };
                 let i = slice!(data, offset as usize ..);
                 let (i, pair_value_count) = be_u16(i)?;
                 

@@ -10,26 +10,40 @@ pub fn parse_gdef(data: &[u8]) -> Result<GDef, FontError> {
     let (i, minor) = be_u16(i)?;
 
     require_eq!(major, 1);
-    require!(matches!(minor, 1 ..= 3));
+    require!(minor <= 3);
 
     let (i, glyph_class_offset) = offset(i)?;
-    let (i, attach_offset) = offset(i)?;
+    let (i, _attach_offset) = offset(i)?;
     let (i, _lig_caret_offset) = offset(i)?;
     let (i, mark_attach_class_def_offset) = offset(i)?;
 
+    // Both class definitions are optional; offset 0 means "absent" (OT §GDEF).
+    let mut glyph_classes = HashMap::new();
+    if let Some(data) = glyph_class_offset.of_opt(data) {
+        parse_class_def(data, &mut glyph_classes)?;
+    }
     let mut mark_classes = HashMap::new();
-    parse_class_def(mark_attach_class_def_offset.of(data).unwrap(), &mut mark_classes)?;
+    if let Some(data) = mark_attach_class_def_offset.of_opt(data) {
+        parse_class_def(data, &mut mark_classes)?;
+    }
 
-    Ok(GDef { mark_classes })
+    Ok(GDef { glyph_classes, mark_classes })
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct GDef {
+    /// `glyphClassDef`: 1 base, 2 ligature, 3 mark, 4 component.
+    glyph_classes: HashMap<u16, u16>,
+    /// `markAttachClassDef`: font-defined mark attachment classes.
     mark_classes: HashMap<u16, u16>
 }
 impl GDef {
+    /// The glyph class from `glyphClassDef` (OT §GDEF, "Glyph Class Definition Table").
+    ///
+    /// `markAttachClassDef` is *not* used here: its classes are chosen by the font and carry no
+    /// Base/Ligature/Mark/Component meaning.
     pub fn mark_class(&self, gid: u16) -> Option<MarkClass> {
-        Some(match *self.mark_classes.get(&gid)? {
+        Some(match *self.glyph_classes.get(&gid)? {
             0 => MarkClass::Unassigned,
             1 => MarkClass::Base,
             2 => MarkClass::Ligature,
@@ -37,6 +51,11 @@ impl GDef {
             4 => MarkClass::Component,
             _ => return None
         })
+    }
+
+    /// The font-defined mark attachment class from `markAttachClassDef`, if any.
+    pub fn mark_attach_class(&self, gid: u16) -> Option<u16> {
+        self.mark_classes.get(&gid).cloned().filter(|&class| class != 0)
     }
 }
 

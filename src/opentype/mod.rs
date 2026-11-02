@@ -136,7 +136,7 @@ impl OpenTypeFont {
         
         let vmetrics = t!(tables.get(b"hhea").map(parse_hhea).transpose()).map(|v| v.into());
         let name = t!(tables.get(b"name").map(parse_name).transpose()).unwrap_or_default();
-        let gdef = t!(tables.get(b"gdef").map(parse_gdef).transpose());
+        let gdef = t!(tables.get(b"GDEF").map(parse_gdef).transpose());
         let base = t!(tables.get(b"BASE").map(parse_base).transpose());
         let post = t!(tables.get(b"post").map(parse_post).transpose());
         let mut name_map = HashMap::new();

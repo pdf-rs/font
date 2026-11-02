@@ -386,6 +386,11 @@ impl Offset {
             Err(FontError::OutOfBounds("offset", self.0 as _))
         }
     }
+    /// Like [`Offset::of`], but an offset of 0 means "subtable absent" (the normal encoding for
+    /// every optional OpenType subtable) and yields `None` instead of an error.
+    pub fn of_opt<'a>(&self, data: &'a [u8]) -> Option<&'a [u8]> {
+        if self.0 == 0 { None } else { self.of(data).ok() }
+    }
 }
 impl NomParser for Offset {
     type Output = Self;
