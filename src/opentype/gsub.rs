@@ -2,11 +2,10 @@ use std::collections::HashMap;
 use nom::{
     number::complete::{be_u16, be_u32},
     multi::count,
-    bytes::complete::take,
     sequence::tuple,
 };
 use crate::{R, GlyphId, FontError};
-use crate::parsers::{iterator_n};
+use crate::parsers::{iterator_n, Offset};
 use crate::opentype::{parse_extension, parse_lookup_list, coverage_table, parse_class_def, tag, Tag};
 
 #[derive(Debug, Clone)]
@@ -31,7 +30,17 @@ pub struct GSub {
 }
 impl GSub {
     pub fn default_language(&self) -> Option<&LanguageSystem> {
-        self.scripts.get(0).and_then(|script| script.default_language.as_ref())
+        // OT has no "first script": a text run means `DFLT`, then `latn`, then whatever the
+        // font happens to list first.
+        self.language_system_for_script(Tag(*b"DFLT"))
+            .or_else(|| self.language_system_for_script(Tag(*b"latn")))
+            .or_else(|| self.scripts.get(0).and_then(|script| script.default_language.as_ref()))
+    }
+    /// The default language system of the script with `tag`, if the font has one.
+    pub fn language_system_for_script(&self, tag: Tag) -> Option<&LanguageSystem> {
+        self.scripts.iter()
+            .find(|script| script.tag == tag)
+            .and_then(|script| script.default_language.as_ref())
     }
     pub fn language(&self, lang_tag: Tag) -> Option<&LanguageSystem> {
         self.scripts.iter().flat_map(|s| s.languages.iter().filter(|&&(tag, _)| tag == lang_tag).map(|(_, lang)| lang)).next()
@@ -60,6 +69,16 @@ impl GSub {
     pub fn lang_features<'a>(&'a self, lang: &'a LanguageSystem) -> impl Iterator<Item=Tag> + 'a {
         lang.feature_list.iter()
         .filter_map(move |&FeatureIdx(idx)| self.features.get(idx as usize).map(|feature| feature.tag))
+    }
+    /// The `size` feature parameters (OT §Feature Parameters), if the font has a `size`
+    /// feature with them.
+    pub fn size_params(&self) -> Option<SizeParams> {
+        self.features.iter()
+            .find(|feature| feature.tag.0 == *b"size")
+            .and_then(|feature| match feature.params {
+                Some(FeatureParams::Size(params)) => Some(params),
+                None => None,
+            })
     }
 }
 
@@ -1059,12 +1078,12 @@ impl StateMachine {
 fn parse_script_list(data: &[u8]) -> Result<Vec<Script>, FontError> {
     let (i, script_count) = be_u16(data)?;
     let mut scripts = Vec::with_capacity(script_count as usize);
-    for (tag, offset) in iterator_n(i, tuple((take(4usize), be_u16)), script_count) {
-        scripts.push(parse_script_table(slice!(data, offset as usize .. ))?);
+    for (script_tag, offset) in iterator_n(i, tuple((tag, be_u16)), script_count) {
+        scripts.push(parse_script_table(script_tag, slice!(data, offset as usize .. ))?);
     }
     Ok(scripts)
 }
-fn parse_script_table(data: &[u8]) -> Result<Script, FontError> {
+fn parse_script_table(script_tag: Tag, data: &[u8]) -> Result<Script, FontError> {
     let (i, default_lang_offset) = be_u16(data)?;
     let default_language = if default_lang_offset != 0 {
         Some(parse_language_system_table(slice!(data, default_lang_offset as usize ..))?)
@@ -1079,6 +1098,7 @@ fn parse_script_table(data: &[u8]) -> Result<Script, FontError> {
         languages.push((tag, table));
     }
     Ok(Script {
+        tag: script_tag,
         default_language,
         languages,
     })
@@ -1089,8 +1109,16 @@ struct FeatureIdx(u16);
 
 #[derive(Debug, Clone)]
 pub struct Script {
+    tag: Tag,
     default_language: Option<LanguageSystem>,
     languages: Vec<(Tag, LanguageSystem)>
+}
+
+impl Script {
+    /// The four-letter script tag (`latn`, `arab`, `DFLT`, …).
+    pub fn tag(&self) -> Tag {
+        self.tag
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1099,10 +1127,29 @@ pub struct LanguageSystem {
     required_feature: Option<FeatureIdx>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizeParams {
+    /// Design size in decipoints — OT stores tenths of a point.
+    pub design_size: u16,
+    pub subfamily_id: u16,
+    pub subfamily_name_id: u16,
+    pub range_start: u16,
+    pub range_end: u16,
+}
+
+/// OT §GSUB/GPOS "Feature Parameters": the extra data a feature tag implies. Only `size` is
+/// read here — the stylistic set (`ss01`…) parameters are nothing but a name id.
+#[derive(Debug, Clone, Copy)]
+pub enum FeatureParams {
+    /// `FeatureParamsSize` (OT §Feature Parameters).
+    Size(SizeParams),
+}
+
 #[derive(Debug, Clone)]
 struct Feature {
     tag: Tag,
-    lookup_indices: Vec<u16>
+    lookup_indices: Vec<u16>,
+    params: Option<FeatureParams>,
 }
 // returns (requiredFeatureIndex, FeatureList)
 fn parse_language_system_table(i: &[u8]) -> Result<LanguageSystem, FontError> {
@@ -1120,20 +1167,49 @@ fn parse_language_system_table(i: &[u8]) -> Result<LanguageSystem, FontError> {
 fn parse_feature_list(data: &[u8]) -> Result<Vec<Feature>, FontError> {
     let (i, feature_count) = be_u16(data)?;
     let mut features = Vec::with_capacity(feature_count as usize);
-    for (tag, feature_offset) in iterator_n(i, tuple((tag, be_u16)), feature_count) {
-        let lookup_indices = parse_feature_table(slice!(data, feature_offset as usize ..))?.collect();
+    for (feature_tag, feature_offset) in iterator_n(i, tuple((tag, be_u16)), feature_count) {
+        let table = slice!(data, feature_offset as usize ..);
+        let (lookup_indices, params) = parse_feature_table(feature_tag, table)?;
         features.push(Feature {
-            tag,
-            lookup_indices
+            tag: feature_tag,
+            lookup_indices,
+            params,
         });
     }
     Ok(features)
 }
 
-fn parse_feature_table(i: &[u8]) -> Result<impl Iterator<Item=u16> + '_, FontError> {
-    let (i, _feature_params) = be_u16(i)?;
+/// The lookup indices of a Feature table and, for `size`, its parameters.
+fn parse_feature_table(feature_tag: Tag, data: &[u8]) -> Result<(Vec<u16>, Option<FeatureParams>), FontError> {
+    let (i, feature_params_offset) = be_u16(data)?;
     let (i, lookup_index_count) = be_u16(i)?;
-    Ok(iterator_n(i, be_u16, lookup_index_count))
+    let lookup_indices = iterator_n(i, be_u16, lookup_index_count).collect();
+    // OT §Feature Parameters: only `size` has parameters this crate can use. A broken
+    // parameter block does not cost the lookups.
+    let params = if feature_tag.0 == *b"size" && feature_params_offset != 0 {
+        Offset(feature_params_offset)
+            .of_opt(data)
+            .and_then(|params| parse_size_params(params).ok())
+            .map(FeatureParams::Size)
+    } else {
+        None
+    };
+    Ok((lookup_indices, params))
+}
+
+fn parse_size_params(data: &[u8]) -> Result<SizeParams, FontError> {
+    let (i, design_size) = be_u16(data)?;
+    let (i, subfamily_id) = be_u16(i)?;
+    let (i, subfamily_name_id) = be_u16(i)?;
+    let (i, range_start) = be_u16(i)?;
+    let (i, range_end) = be_u16(i)?;
+    Ok(SizeParams {
+        design_size,
+        subfamily_id,
+        subfamily_name_id,
+        range_start,
+        range_end,
+    })
 }
 
 #[cfg(test)]
@@ -1141,7 +1217,7 @@ mod tests {
     use super::*;
 
     fn feature(tag: &[u8; 4], lookup_indices: Vec<u16>) -> Feature {
-        Feature { tag: Tag(*tag), lookup_indices }
+        Feature { tag: Tag(*tag), lookup_indices, params: None }
     }
 
     fn words_to_bytes(words: &[u16]) -> Vec<u8> {
@@ -1151,6 +1227,7 @@ mod tests {
     fn gsub_with(features: Vec<Feature>, lookup: Vec<Vec<LookupSubtable>>) -> GSub {
         GSub {
             scripts: vec![Script {
+                tag: Tag(*b"latn"),
                 default_language: Some(LanguageSystem {
                     feature_list: (0 .. features.len() as u16).map(FeatureIdx).collect(),
                     required_feature: None,
@@ -1252,6 +1329,7 @@ mod tests {
     fn out_of_range_feature_and_lookup_indices_are_ignored() {
         let gsub = GSub {
             scripts: vec![Script {
+                tag: Tag(*b"latn"),
                 default_language: Some(LanguageSystem {
                     // Feature index 9 does not exist; feature 0 points at lookup 7, which does not.
                     feature_list: vec![FeatureIdx(0), FeatureIdx(9)],
@@ -1423,6 +1501,53 @@ mod tests {
             gsub.substitute(&[GlyphId(50), GlyphId(20)], &calt),
             vec![GlyphId(50), GlyphId(20)]
         );
+    }
+
+    #[test]
+    fn size_feature_params_are_read() {
+        // OT §Feature Parameters: a `size` feature points at five uint16 values.
+        let mut data = vec![0u8, 1];             // featureCount
+        data.extend_from_slice(b"size");         // featureTag
+        data.extend_from_slice(&[0, 8]);         // featureOffset: the Feature table starts at byte 8
+        data.extend_from_slice(&[0, 4]);         // featureParamsOffset, relative to byte 8
+        data.extend_from_slice(&[0, 0]);         // lookupIndexCount
+        for value in [600u16, 1, 258, 480, 720] {
+            data.extend_from_slice(&value.to_be_bytes());
+        }
+        let features = parse_feature_list(&data).expect("feature list parses");
+        assert_eq!(features.len(), 1);
+        let gsub = GSub { scripts: Vec::new(), features, lookup: Vec::new() };
+        assert_eq!(gsub.size_params(), Some(SizeParams {
+            design_size: 600,
+            subfamily_id: 1,
+            subfamily_name_id: 258,
+            range_start: 480,
+            range_end: 720,
+        }));
+    }
+
+    #[test]
+    fn default_language_prefers_dflt_then_latn() {
+        fn language(feature: u16) -> LanguageSystem {
+            LanguageSystem { feature_list: vec![FeatureIdx(feature)], required_feature: None }
+        }
+        fn script(tag: &[u8; 4], feature: u16) -> Script {
+            Script { tag: Tag(*tag), default_language: Some(language(feature)), languages: Vec::new() }
+        }
+        let mut gsub = GSub {
+            scripts: vec![script(b"cyrl", 0), script(b"latn", 1), script(b"DFLT", 2)],
+            features: Vec::new(),
+            lookup: Vec::new(),
+        };
+        let first_feature = |gsub: &GSub| gsub.default_language().map(|lang| lang.feature_list[0].0);
+
+        // OT has no "first script": DFLT wins, then latn, then whatever comes first.
+        assert_eq!(first_feature(&gsub), Some(2));
+        assert!(gsub.language_system_for_script(Tag(*b"cyrl")).is_some());
+        gsub.scripts.remove(2);
+        assert_eq!(first_feature(&gsub), Some(1));
+        gsub.scripts.remove(1);
+        assert_eq!(first_feature(&gsub), Some(0));
     }
 
     #[test]

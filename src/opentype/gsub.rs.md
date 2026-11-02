@@ -9,6 +9,12 @@ substitutions — and exposes them as `GSub::scripts()`, `default_language()`, `
 through `Font::substitute`) applies them to a glyph run.
 
 ## Fixed
+* **F36 (2026-11-02):** `parse_feature_table` keeps `featureParamsOffset`: the `size` feature's
+  five values land in `SizeParams`, readable through `GSub::size_params()`. And
+  `default_language()` no longer returns whichever script record comes first — it prefers
+  `DFLT`, then `latn`, then the first entry, and `language_system_for_script(tag)` looks a
+  script up by tag (`Script::tag()` exposes the tag now). Tests:
+  `size_feature_params_are_read`, `default_language_prefers_dflt_then_latn`.
 * **F36 (2026-11-02):** Context (5), Chaining Context (6) and Reverse Chaining (8) are parsed
   and applied. All six context/chaining formats are flattened into one `Context` of
   `SequenceRule`s, whose matchers are `GlyphMatch::{Glyph, Class, Coverage}` — class 0 means
@@ -63,9 +69,9 @@ through `Font::substitute`) applies them to a glyph run.
   missing: lookup flags (IgnoreBaseGlyphs / IgnoreLigatures / IgnoreMarks / MarkFilteringSet)
   are read and dropped, so contextual rules match consecutive glyphs rather than skipping
   marks, and Reverse Chaining runs after all forward lookups instead of in table position.
-* `GSub::default_language()` (`:36-38`) returns `scripts.get(0)`, i.e. whichever script record
-  happens to come first in the table. The spec has no "first script"; consumers want `DFLT`
-  (then `latn`). `pdf` side-steps this by looking up `latn`/`DFLT` itself.
+* ~~`GSub::default_language()` (`:36-38`) returns `scripts.get(0)`, i.e. whichever script record
+  happens to come first in the table.~~ Fixed (see "Fixed", F36): `DFLT`, then `latn`, then the
+  first script; `language_system_for_script(tag)` for everything else.
 * ~~`subs()` indexes `self.features[idx]` and `self.lookup[lookup_idx]` with indices read
   straight from the font — a bad `featureIndex`/`lookupIndex` is a panic, not an error.~~
   Fixed (see "Fixed", F36): out-of-range indices are skipped.
@@ -77,9 +83,10 @@ through `Font::substitute`) applies them to a glyph run.
   offsets use the correct bases (resolved from the LigatureSet, not the subtable).
   `Substitution::Ligatures` maps first-glyph → list of (component list, ligature gid) and
   `GlyphList::matches` compares glyph ids ✓.
-* `parse_feature_table` (`:270-276`) reads `featureParamsOffset` and drops it; for `size`
+* ~~`parse_feature_table` (`:270-276`) reads `featureParamsOffset` and drops it; for `size`
   features and `ss01`-style parameters that is the whole point of the feature, so this is
-  "structure only".
+  "structure only".~~ `size` parameters are read now (see "Fixed", F36); the `ss01`-style
+  parameters (a name id) are still dropped.
 * **F21:** (fixed above) the GSUB copy of the GPOS version panic.
 * The version-1.1 `featureVariationsOffset` is read and ignored.
 
