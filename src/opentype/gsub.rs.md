@@ -3,11 +3,26 @@
 ## What it does
 Parses the full GSUB skeleton — ScriptList → Script → LanguageSystem (default + per-language),
 FeatureList → Feature (tag + lookup indices), LookupList → single (1), multiple (2),
-alternate (3) and ligature (4) substitutions — and exposes them as `GSub::scripts()`,
-`default_language()`, `language(tag)`, `subs(lang, enabled)`, `lang_features(lang)`. Nothing in
-the crate applies them; `pdf` uses ligature lookup manually where it can.
+alternate (3), ligature (4), context (5), chaining context (6) and reverse chaining (8)
+substitutions — and exposes them as `GSub::scripts()`, `default_language()`, `language(tag)`,
+`subs(lang, enabled)`, `lang_features(lang)`. `GSub::substitute(glyphs, enabled)` (reached
+through `Font::substitute`) applies them to a glyph run.
 
 ## Fixed
+* **F36 (2026-11-02):** Context (5), Chaining Context (6) and Reverse Chaining (8) are parsed
+  and applied. All six context/chaining formats are flattened into one `Context` of
+  `SequenceRule`s, whose matchers are `GlyphMatch::{Glyph, Class, Coverage}` — class 0 means
+  "every glyph the ClassDef does not list", as OT §"Class Definition Table" says. A matching
+  rule runs the lookups its `(sequenceIndex, lookupListIndex)` records name through
+  `GSub::apply_lookup_at`, which recurses with a nesting cap of 8 and shifts later sequence
+  indices by the glyphs an earlier record inserted or deleted. Reverse chaining is applied in
+  its own right-to-left pass over the whole run, after the forward lookups (fonts use that
+  lookup type on its own, so the order is only a deviation for mixed tables). Lookup flags
+  (IgnoreBaseGlyphs, MarkFilteringSet) are still ignored, so runs are matched on consecutive
+  glyphs. Tests: `context_substitution_runs_the_lookup_its_rule_names`,
+  `chaining_context_format3_matches_backtrack_and_lookahead`,
+  `reverse_chaining_substitutes_in_its_own_pass`,
+  `class_matchers_treat_unlisted_glyphs_as_class_zero`.
 * **F36 (2026-11-02):** Multiple (2) and Alternate (3) subtables are parsed and applied:
   `parse_multiple_subst` reads one-glyph-to-sequence records (an empty sequence deletes the
   glyph, as OT §GSUB allows) and `parse_alternate_subst` reads alternate sets. They live in the
@@ -35,7 +50,7 @@ the crate applies them; `pdf` uses ligature lookup manually where it can.
   default language system whose feature tag the caller enables, in lookup-list order, once each
   (the subset of OT §"Lookups" this crate implements): `Substitution::apply` handles Single and
   Ligatures, the longest ligature winning. `Font::substitute(glyphs, features)` is the new trait
-  entry point; lookups of type 2/3/5/6/8 are still not implemented and pass glyphs through.
+  entry point; the lookups of type 2, 3, 5, 6 and 8 were added afterwards (see above).
   Unit tests: `ligature_substitution_picks_the_longest_match`,
   `single_substitution_replaces_one_glyph`, `extension_lookup_is_unwrapped`.
 * **F21 (2026-11-02):** an unknown `minorVersion` no longer panics (`panic!("unsupported GPOS
@@ -44,8 +59,10 @@ the crate applies them; `pdf` uses ligature lookup manually where it can.
 
 ## Differences from the specifications
 * ~~**F36 (OT §GSUB):**~~ types 1 and 4 were the only ones collected and Extension (7) was
-  dropped — extensions are followed and 1/2/3/4 are applied now (see "Fixed" above). Context
-  (5), Chaining Context (6) and Reverse Chaining (8) are still logged with `debug!` and dropped.
+  dropped — extensions are followed and 1-8 are applied now (see "Fixed" above). What is still
+  missing: lookup flags (IgnoreBaseGlyphs / IgnoreLigatures / IgnoreMarks / MarkFilteringSet)
+  are read and dropped, so contextual rules match consecutive glyphs rather than skipping
+  marks, and Reverse Chaining runs after all forward lookups instead of in table position.
 * `GSub::default_language()` (`:36-38`) returns `scripts.get(0)`, i.e. whichever script record
   happens to come first in the table. The spec has no "first script"; consumers want `DFLT`
   (then `latn`). `pdf` side-steps this by looking up `latn`/`DFLT` itself.
