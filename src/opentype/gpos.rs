@@ -171,10 +171,17 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, _num_glyphs: 
             parse_class_def(Offset(class_def_1_offset).of(data)?, &mut kern.left_classes)?;
             parse_class_def(Offset(class_def_2_offset).of(data)?, &mut kern.right_classes)?;
 
+
+            // `class_1_count * class_2_count` overflows u16 (300 x 300 classes is a panic in
+            // debug builds), and a bogus count would let `iterator_n` run for billions of
+            // iterations and `reserve` allocate gigabytes. A matrix cannot hold more values
+            // than the subtable has bytes.
+            let total = usize::from(class_1_count) * usize::from(class_2_count);
+            let total = total.min(data.len());
+            kern.class_pairs.reserve(total.min(1 << 16));
+
             let iter = (0 .. class_1_count).cartesian_product(0 .. class_2_count)
-                .zip(iterator_n(i, tuple((value_record(value_format_1), value_record(value_format_2))), class_1_count * class_2_count));
-            
-            kern.class_pairs.reserve(class_1_count as usize * class_2_count as usize);
+                .zip(iterator_n(i, tuple((value_record(value_format_1), value_record(value_format_2))), total));
 
             for ((class_1, class_2), (value_record_1, _value_record_2)) in iter {
                 if value_record_1.x_advance != 0 {
@@ -229,9 +236,21 @@ fn parse_mark_to_base_attachment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<
     let mark_array = parse_mark_array_table(slice!(data, mark_array_offset as usize ..))?;
     for (mark_gid, m) in mark_coverage.zip(mark_array.iter()) {
         let (mark_class, mark_anchor) = m?;
-        require!(mark_class < mark_class_count);
+        if mark_class >= mark_class_count {
+            // A mark whose class the base array does not have: the font is malformed, but the
+            // other marks are still usable, so skip this one instead of failing the whole table
+            // (which used to drop kerning and mark attachment for the entire font).
+            warn!("GPOS: mark glyph {} has class {} but markClassCount is {}",
+                  mark_gid, mark_class, mark_class_count);
+            continue;
+        }
         for (base_nr, &base_gid) in base_coverage.iter().enumerate() {
-            let base_anchor = base_array.get(base_nr * mark_class_count as usize + mark_class as usize)?;
+            let index = base_nr * usize::from(mark_class_count) + usize::from(mark_class);
+            let base_anchor = match base_array.get(index) {
+                Ok(anchor) => anchor,
+                // Fewer anchors than baseCount x markClassCount: skip what is missing.
+                Err(_) => continue,
+            };
             gpos.mark_to_base.insert((base_gid, mark_gid), (base_anchor.x - mark_anchor.x, base_anchor.y - mark_anchor.y));
         }
     }
@@ -241,7 +260,7 @@ fn parse_mark_to_base_attachment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<
 
 fn parse_base_array(data: &[u8], mark_class_count: u16) -> Result<impl Array<Item=AnchorTable> + '_, FontError> {
     let (i, base_count) = be_u16(data)?;
-    let (_, arr) = array::<uint16, _>(mark_class_count as usize * base_count as usize)(i)?;
+    let (_, arr) = array::<uint16, _>(usize::from(mark_class_count) * usize::from(base_count))(i)?;
 
     Ok(arr.map(move |off: u16| AnchorTable::parse(slice!(data, off as usize..))))
 }
@@ -274,5 +293,49 @@ mod tests {
         let mut gpos = GPos::default();
         parse_positioning(&data, 9, &mut gpos, 100).expect("extension positioning parses");
         assert_eq!(gpos.kern.get(20, 21), Some(-40));
+    }
+
+    fn words_to_bytes(words: &[u16]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_be_bytes().to_vec()).collect()
+    }
+
+    #[test]
+    fn pair_adjustment_with_huge_class_matrix_does_not_overflow() {
+        // `class1Count * class2Count` in u16 overflowed for 300 x 300 classes. The value
+        // formats are 0, so the matrix carries no data at all.
+        let words: [u16; 14] = [
+            2, 0,                 // PairPos format 2, coverage offset (unused)
+            0, 0,                 // valueFormat1, valueFormat2
+            16, 22,               // classDef1Offset, classDef2Offset
+            300, 300,             // class1Count, class2Count
+            1, 0, 0,              // classDef1: format 1, startGlyph 0, glyphCount 0
+            1, 0, 0,              // classDef2
+        ];
+        let data = words_to_bytes(&words);
+        let mut kern = KernTable::default();
+        parse_pair_adjustment(&data, &mut kern, 1000).expect("pair adjustment parses");
+        assert!(kern.class_pairs.is_empty());
+    }
+
+    #[test]
+    fn mark_in_an_unknown_class_is_skipped_not_fatal() {
+        // MarkToBaseFormat1 with markClassCount 1. Mark glyph 100 is in class 0 and attaches
+        // to base 200 at (30,40) - (10,10) = (20,30); mark 101 claims class 5, which the base
+        // array does not have and used to make the whole GPOS table fail to load.
+        let words: [u16; 29] = [
+            1, 44, 52, 1, 12, 34, // format, markCov, baseCov, markClassCount, markArray, baseArray
+            2, 0, 10, 5, 16,      // MarkArray: 2 marks; class 0 -> +10, class 5 -> +16
+            1, 10, 10,            // mark anchor: format 1, (10,10)
+            1, 20, 20,            // mark anchor: format 1, (20,20)
+            1, 4,                 // BaseArray: baseCount 1, anchor offset +4
+            1, 30, 40,            // base anchor: format 1, (30,40)
+            1, 2, 100, 101,       // mark coverage
+            1, 1, 200,            // base coverage
+        ];
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 4, &mut gpos, 1000).expect("mark-to-base parses");
+        assert_eq!(gpos.get_mark_to_base(GlyphId(200), GlyphId(100)), Some((20, 30)));
+        assert_eq!(gpos.get_mark_to_base(GlyphId(200), GlyphId(101)), None);
     }
 }

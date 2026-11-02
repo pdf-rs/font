@@ -8,6 +8,16 @@ FeatureList → Feature (tag + lookup indices), LookupList → single (type 1) a
 `pdf` uses ligature lookup manually where it can.
 
 ## Fixed
+* **F36 (2026-11-02):** malformed tables no longer abort the process:
+  `parse_ligatures` used `count(be_u16, component_count - 1)`, which underflowed (a panic in
+  debug, a huge count in release) for `componentCount == 0`; such a ligature now warns and is
+  skipped. `subs()` and `lang_features()` no longer index `self.features[idx]` /
+  `self.lookup[idx]` with indices read from the font — a bad `featureIndex`/`lookupIndex` is
+  skipped instead of panicking. `Substitution::apply` refuses glyph ids above `0xFFFF` rather
+  than truncating them with `as u16` and substituting an unrelated glyph. Tests:
+  `ligature_with_component_count_zero_is_skipped`,
+  `out_of_range_feature_and_lookup_indices_are_ignored`,
+  `apply_ignores_glyph_ids_outside_u16`.
 * **F36 (2026-11-02):** Extension lookups are followed: `parse_substitution` unwraps lookup type 7
   (an extension pointing at another extension warns and is dropped), so fonts that keep their
   ligatures behind extensions now expose them. `GSub::substitute()` applies the lookups of the
@@ -29,13 +39,15 @@ FeatureList → Feature (tag + lookup indices), LookupList → single (type 1) a
 * `GSub::default_language()` (`:36-38`) returns `scripts.get(0)`, i.e. whichever script record
   happens to come first in the table. The spec has no "first script"; consumers want `DFLT`
   (then `latn`). `pdf` side-steps this by looking up `latn`/`DFLT` itself.
-* `subs()` (`:45-56`) indexes `self.features[idx]` and `self.lookup[lookup_idx]` with indices
-  read straight from the font — a bad `featureIndex`/`lookupIndex` is a panic, not an error.
+* ~~`subs()` indexes `self.features[idx]` and `self.lookup[lookup_idx]` with indices read
+  straight from the font — a bad `featureIndex`/`lookupIndex` is a panic, not an error.~~
+  Fixed (see "Fixed", F36): out-of-range indices are skipped.
 * `parse_single_subst` (OT §GSUB 1.1/1.2): format 1 uses `gid.wrapping_add(deltaGlyphId)` ✓
   ("modulo 65536"), format 2 zips coverage with the substitute array ✓, but a short substitute
   array silently ends the zip instead of erroring.
-* `parse_ligatures` (OT §GSUB 4): `count(be_u16, component_count - 1)` (`:181`) underflows and
-  panics when `componentCount == 0`; the ligature-set and ligature offsets use the correct bases.
+* ~~`parse_ligatures` (OT §GSUB 4): `count(be_u16, component_count - 1)` underflows and
+  panics when `componentCount == 0`;~~ fixed (see "Fixed", F36). The ligature-set and ligature
+  offsets use the correct bases (resolved from the LigatureSet, not the subtable).
   `Substitution::Ligatures` maps first-glyph → list of (component list, ligature gid) and
   `GlyphList::matches` compares glyph ids ✓.
 * `parse_feature_table` (`:270-276`) reads `featureParamsOffset` and drops it; for `size`

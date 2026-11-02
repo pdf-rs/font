@@ -7,6 +7,14 @@ pairs, `KernTable::get(left, right)`) filled from **PairPos** lookups (type 2), 
 `GPos::from_kern` lets a `kern` table stand in when GPOS is absent (`mod.rs:110-117`).
 
 ## Fixed
+* **F36 (2026-11-02):** malformed tables no longer abort the process. PairPos format 2 computed
+  `class_1_count * class_2_count` in `u16` (300 × 300 classes overflow — a debug panic) and
+  reserved that many map entries up front; the count is now `usize`, clamped to the bytes the
+  subtable actually has, and the reservation is capped. A mark whose `markClass` is not below
+  `markClassCount` used to fail the whole GPOS table via `require!`; it now warns and skips that
+  mark, as does an anchor index past the end of the base array. Tests:
+  `pair_adjustment_with_huge_class_matrix_does_not_overflow`,
+  `mark_in_an_unknown_class_is_skipped_not_fatal`.
 * **F36 (2026-11-02):** lookup type 9 (Extension) is followed: `parse_positioning` reads the
   extension header and dispatches to the wrapped lookup type, so pair kerning hidden behind an
   extension — what most large fonts do — is reachable. An extension wrapping an extension warns
@@ -36,10 +44,12 @@ pairs, `KernTable::get(left, right)`) filled from **PairPos** lookups (type 2), 
   8 (chaining context) are skipped without a warning.
 * `ValueRecord` correctly skips the device-table offsets (`(flags & 0x00F0).count_ones() * 2`) but
   does not read them — hinting-only, fine for outlines.
-* MarkBasePos (`:190-215`): format must be 1 ✓; mark/base coverage, `markClassCount`, mark array
-  and base array are handled with the right offset bases; `require!(mark_class < mark_class_count)`
-  ✓. `parse_base_array` computes `base_count * mark_class_count` entries ✓. `AnchorTable` reads
-  only `format, x, y`, which is correct for formats 1-3 (the extra fields come after).
+* MarkBasePos: format must be 1 ✓; mark/base coverage, `markClassCount`, mark array
+  and base array are handled with the right offset bases; a `markClass` outside
+  `markClassCount` (and an anchor index past the base array) is warned about and skipped per mark
+  (see "Fixed", F36). `parse_base_array` computes `base_count * mark_class_count` entries ✓.
+  `AnchorTable` reads only `format, x, y`, which is correct for formats 1-3 (the extra fields
+  come after).
 * **F5/F21:** `coverage_off.of(data).unwrap()` (`:121`), `coverage.next().unwrap()` (`:123`) and
   `panic!("unsupported GPOS version 1.{}", v)` (`:64`) — all reachable from a malformed font.
 * The version-1.1 `featureVariationsOffset` is read as `u32` ✓ (OT §GPOS header), and then

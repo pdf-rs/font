@@ -41,13 +41,17 @@ impl GSub {
     }
     pub fn subs<'a, 'b: 'a>(&'b self, lang: &'a LanguageSystem, enabled: impl Fn(Tag) -> bool + 'a) -> impl Iterator<Item=&'b Substitution> + 'a {
         lang.feature_list.iter()
-        .map(move |&FeatureIdx(idx)| &self.features[idx as usize])
+        // Feature and lookup indices come from the file: one past the end of a list is a
+        // malformed font, not something to panic on.
+        .filter_map(move |&FeatureIdx(idx)| self.features.get(idx as usize))
         .filter(move |feature| enabled(feature.tag))
-        .flat_map(move |feature| feature.lookup_indices.iter().flat_map(move |&lookup_idx| self.lookup[lookup_idx as usize].iter()))
+        .flat_map(move |feature| feature.lookup_indices.iter()
+            .filter_map(move |&lookup_idx| self.lookup.get(lookup_idx as usize))
+            .flatten())
     }
     pub fn lang_features<'a>(&'a self, lang: &'a LanguageSystem) -> impl Iterator<Item=Tag> + 'a {
         lang.feature_list.iter()
-        .map(move |&FeatureIdx(idx)| self.features[idx as usize].tag)
+        .filter_map(move |&FeatureIdx(idx)| self.features.get(idx as usize).map(|feature| feature.tag))
     }
 }
 
@@ -61,15 +65,18 @@ impl Substitution {
     /// If this substitution applies at the start of `glyphs`: how many glyphs it consumes
     /// and the glyph that replaces them.
     pub fn apply(&self, glyphs: &[GlyphId]) -> Option<(usize, GlyphId)> {
-        let (&first, rest) = match glyphs.split_first() {
-            Some(split) => split,
-            None => return None,
-        };
+        let (&first, rest) = glyphs.split_first()?;
+        // Substitution tables are keyed by u16 glyph ids; a larger id cannot be in one, and
+        // `as u16` would silently look up an unrelated glyph.
+        if first.0 > u16::MAX as u32 {
+            return None;
+        }
+        let first = first.0 as u16;
         match self {
             Substitution::Single(replacements) =>
-                replacements.get(&(first.0 as u16)).map(|&replacement| (1, GlyphId(replacement as u32))),
+                replacements.get(&first).map(|&replacement| (1, GlyphId(replacement as u32))),
             Substitution::Ligatures(ligatures) => {
-                let ligatures = ligatures.get(&(first.0 as u16))?;
+                let ligatures = ligatures.get(&first)?;
                 // OT §GSUB "Ligature Substitution": the *longest* matching ligature wins. Fonts
                 // usually list them longest first, but that is a recommendation, not a rule.
                 let mut best: Option<(usize, u16)> = None;
@@ -278,8 +285,19 @@ fn parse_ligatures(data: &[u8]) -> Result<Substitution, FontError> {
             let data = slice!(set_data, set_offest as usize ..);
             let (i, ligature_glyph) = be_u16(data)?;
             let (i, component_count) = be_u16(i)?;
-            let (_, components) = count(be_u16, component_count as usize - 1)(i)?;
-            
+            // OT §GSUB "Ligature Substitution": componentCount counts the first glyph too, so
+            // a value below 2 is malformed. It used to make `component_count - 1` underflow and
+            // abort; skip the ligature instead.
+            let following = match component_count.checked_sub(1) {
+                Some(n) if n >= 1 => n,
+                _ => {
+                    warn!("GSUB: ligature for glyph {} has componentCount {}, skipping it",
+                          ligature_glyph, component_count);
+                    continue;
+                }
+            };
+            let (_, components) = count(be_u16, following as usize)(i)?;
+
             entry.push((GlyphList(components), ligature_glyph));
         }
     }
@@ -461,5 +479,59 @@ mod tests {
             Some(Substitution::Single(map)) => assert_eq!(map.get(&20), Some(&50)),
             other => panic!("expected a single substitution, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn ligature_with_component_count_zero_is_skipped() {
+        // OT §GSUB "Ligature Substitution" table with two ligatures for glyph 10: a valid
+        // 10 + 20 -> 30, and one with componentCount 0, which used to underflow
+        // `component_count - 1` and abort.
+        let words: [u16; 14] = [
+            1, 24, 1, 8,          // format, coverage offset, ligatureSetCount, set offset
+            2, 6, 12,             // ligatureCount, ligature[0] offset, ligature[1] offset (from set start)
+            30, 2, 20,            // 10 + 20 -> 30
+            40, 0,                // malformed: no components
+            1, 1,                 // coverage format 1, glyphCount 1
+        ];
+        let mut data: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes().to_vec()).collect();
+        data.extend_from_slice(&[0, 10]); // covered glyph 10
+
+        let substitution = parse_ligatures(&data).expect("ligature table parses");
+        // The valid ligature is still there...
+        assert_eq!(substitution.apply(&[GlyphId(10), GlyphId(20)]), Some((2, GlyphId(30))));
+        // ...and the broken one does not match anything.
+        assert_eq!(substitution.apply(&[GlyphId(10)]), None);
+    }
+
+    #[test]
+    fn out_of_range_feature_and_lookup_indices_are_ignored() {
+        let gsub = GSub {
+            scripts: vec![Script {
+                default_language: Some(LanguageSystem {
+                    // Feature index 9 does not exist; feature 0 points at lookup 7, which does not.
+                    feature_list: vec![FeatureIdx(0), FeatureIdx(9)],
+                    required_feature: None,
+                }),
+                languages: Vec::new(),
+            }],
+            features: vec![feature(b"liga", vec![7])],
+            lookup: vec![Vec::new()],
+        };
+        let lang = gsub.default_language().expect("default language");
+        assert_eq!(gsub.lang_features(lang).collect::<Vec<_>>(), vec![Tag(*b"liga")]);
+        assert_eq!(gsub.subs(lang, |_| true).count(), 0);
+        // Nor may the applying path panic.
+        assert_eq!(gsub.substitute(&[GlyphId(1)], &|_| true), vec![GlyphId(1)]);
+    }
+
+    #[test]
+    fn apply_ignores_glyph_ids_outside_u16() {
+        let mut replacements = HashMap::new();
+        replacements.insert(0u16, 1u16);
+        let single = Substitution::Single(replacements);
+        // `as u16` would turn 0x10000 into 0 and wrongly substitute.
+        assert_eq!(single.apply(&[GlyphId(0x1_0000)]), None);
+        assert_eq!(single.apply(&[GlyphId(0)]), Some((1, GlyphId(1))));
+        assert_eq!(single.apply(&[]), None);
     }
 }
