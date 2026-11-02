@@ -173,3 +173,90 @@ fn c22_pfb_unknown_block_type_is_an_error() {
     ];
     assert!(font::parse(&data).is_err());
 }
+
+// ---------------------------- seac (F10)
+
+/// A Type 1 number: `139+n` for 0..=107, `247…248` for 108..=1130, and `255` plus a
+/// four-byte integer for everything else (including negatives).
+fn num(out: &mut Vec<u8>, n: i32) {
+    if (0 ..= 107).contains(&n) {
+        out.push((n + 139) as u8);
+    } else if (108 ..= 1130).contains(&n) {
+        out.push((247 + (n - 108) / 256) as u8);
+        out.push(((n - 108) % 256) as u8);
+    } else {
+        out.push(255);
+        out.extend_from_slice(&n.to_be_bytes());
+    }
+}
+
+/// `hsbw` then a rectangle from `(x0, y0)` to `(x1, y1)`, `endchar`.
+fn rect(x0: i32, y0: i32, x1: i32, y1: i32, width: i32) -> Vec<u8> {
+    let mut cs = Vec::new();
+    num(&mut cs, x0);
+    num(&mut cs, width);
+    cs.push(13); // hsbw
+    let (w, h) = (x1 - x0, y1 - y0);
+    for &(dx, dy) in &[(w, 0), (0, h), (-w, 0), (0, -h)] {
+        num(&mut cs, dx);
+        num(&mut cs, dy);
+        cs.push(5); // rlineto
+    }
+    cs.push(14); // endchar
+    cs
+}
+
+/// `hsbw 0 500` then `asb adx ady bchar achar seac` (12 6).
+fn seac(adx: i32, ady: i32, base: i32, accent: i32) -> Vec<u8> {
+    let mut cs = HSBW.to_vec();
+    num(&mut cs, 0); // asb
+    num(&mut cs, adx);
+    num(&mut cs, ady);
+    num(&mut cs, base);
+    num(&mut cs, accent);
+    cs.extend_from_slice(&[12, 6]);
+    cs
+}
+
+#[test]
+fn c23_type1_seac_composes_the_accent() {
+    // F10: `seac` was a no-op, so every accented Type 1 glyph came out empty.
+    let data = pfa(
+        &[
+            (".notdef", &notdef()),
+            ("A", &rect(0, 0, 300, 700, 500)),
+            ("acute", &rect(0, 0, 50, 60, 300)),
+            ("Aacute", &seac(100, 200, 65, 194)),
+        ],
+        Some("{/.notdef /A /acute /Aacute}"),
+    );
+    let font = parse(&data);
+    let a = font.gid_for_name("A").expect("glyph A");
+    let acute = font.gid_for_name("acute").expect("glyph acute");
+    let aacute = font.gid_for_name("Aacute").expect("glyph Aacute");
+
+    let base = font.glyph(a).unwrap().path;
+    let accent = font.glyph(acute).unwrap().path;
+    let composed = font.glyph(aacute).unwrap();
+
+    // The composite keeps its own width …
+    assert_eq!(composed.metrics.advance, 500.0);
+    // … and carries both parts: bchar 65 = /A, achar 194 = /acute (StandardEncoding).
+    assert_eq!(
+        composed.path.contours().len(),
+        base.contours().len() + accent.contours().len()
+    );
+    // The accent sits at (adx, ady) from the base origin.
+    let shifted = &composed.path.contours()[base.contours().len()];
+    let original = accent.contours()[0].points();
+    assert_eq!(shifted.points().len(), original.len());
+    for (s, o) in shifted.points().iter().zip(original) {
+        assert_eq!(s.x(), o.x() + 100.0);
+        assert_eq!(s.y(), o.y() + 200.0);
+    }
+    // The base is not moved.
+    let base_after = composed.path.contours()[0].points();
+    for (s, o) in base_after.iter().zip(base.contours()[0].points()) {
+        assert_eq!(s, o);
+    }
+}

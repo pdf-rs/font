@@ -5,11 +5,11 @@ use nom::{IResult,
 use tuple::{TupleElements};
 use itertools::Itertools;
 use indexmap::IndexMap;
-use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId, Name, Value, Info, FontError};
+use crate::{Font, Glyph, State, Seac, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId, Name, Value, Info, FontError};
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
 use crate::parsers::parse;
-use pdf_encoding::{glyphname_to_unicode};
+use pdf_encoding::{glyphname_to_unicode, Encoding};
 use pathfinder_geometry::{
     transform2d::Transform2F,
     vector::Vector2F,
@@ -137,6 +137,7 @@ impl Type1Font {
         
         let mut glyphs = IndexMap::with_capacity(char_strings.len());
         let mut unicode_map = HashMap::with_capacity(char_strings.len());
+        let mut seac_glyphs = Vec::new();
         let mut state = State::new();
         for (name, item) in char_strings.string_entries() {
             let data = expect!(item.as_bytes(), "data is not bytes");
@@ -156,6 +157,9 @@ impl Type1Font {
                 },
                 path: state.take_path(),
             });
+            if let Some(seac) = state.seac {
+                seac_glyphs.push((index, seac));
+            }
             state.clear();
 
             if let Some(unicode) = glyphname_to_unicode(name) {
@@ -173,7 +177,43 @@ impl Type1Font {
                 }
             }
         }
-        
+
+        // T1 §6 second pass: a `seac` glyph is empty on its own — it is the base
+        // character with the accent drawn on top, the accent shifted by (adx, ady)
+        // from the origin of the base. The components can be defined after the
+        // composite, so this cannot be done while decoding the charstrings.
+        for (index, seac) in seac_glyphs {
+            let base = match seac_gid(seac.base, &unicode_map) {
+                Some(gid) => gid,
+                None => {
+                    warn!("seac: no glyph for StandardEncoding base character {}", seac.base);
+                    continue;
+                }
+            };
+            let accent = match seac_gid(seac.accent, &unicode_map) {
+                Some(gid) => gid,
+                None => {
+                    warn!("seac: no glyph for StandardEncoding accent character {}", seac.accent);
+                    continue;
+                }
+            };
+            if base == index || accent == index {
+                warn!("seac: glyph composes itself ({} + {})", base, accent);
+                continue;
+            }
+            let (mut path, accent_path) = match (glyphs.get_index(base), glyphs.get_index(accent)) {
+                (Some((_, base)), Some((_, accent))) => (base.path.clone(), accent.path.clone()),
+                _ => continue,
+            };
+            let accent_path = accent_path.transformed(&Transform2F::from_translation(v(seac.adx, seac.ady)));
+            for contour in accent_path.contours() {
+                path.push_contour(contour.clone());
+            }
+            if let Some((_, glyph)) = glyphs.get_index_mut(index) {
+                glyph.path = path;
+            }
+        }
+
         let mut codepoints = HashMap::with_capacity(encoding.map(|e| e.len()).unwrap_or(0));
         if let Some(encoding) = encoding {
             let mut codepoint = 0;
@@ -230,6 +270,14 @@ impl Type1Font {
     pub fn unicode_names(&self) -> impl Iterator<Item=(GlyphId, &str)> + '_ {
         self.unicode_map.iter().map(|(s, &g)| (GlyphId(g), s.as_str()))
     }
+}
+
+/// The glyph a StandardEncoding character code stands for. T1 §6 identifies the
+/// `seac` components by code, not by name: the code is mapped to the character it
+/// encodes, and that character to the glyph whose name maps to it.
+fn seac_gid(code: u8, unicode_map: &HashMap<TinyString, u32>) -> Option<usize> {
+    let ch = Encoding::AdobeStandard.forward_map()?.get(code)?;
+    unicode_map.get(&TinyString::from(ch)).map(|&gid| gid as usize)
 }
 
 fn parse_binary<'a>(vm: &mut Vm, data: &'a [u8]) {
@@ -368,6 +416,26 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     }
                     6 => { // ⊦ asb adx ady bchar achar seac (12 6) ⊦
                         trace!("seac");
+                        // T1 §6: an accented character is not drawn by its own
+                        // charstring — it is the base character plus the accent, both
+                        // named by their StandardEncoding code and composed in
+                        // `Type1Font::from_vm` once every charstring is decoded.
+                        require!(s.stack.len() >= 5);
+                        let first = s.stack.len() - 5;
+                        let _asb = s.stack[first].to_float();
+                        let adx = s.stack[first + 1].to_float();
+                        let ady = s.stack[first + 2].to_float();
+                        let bchar = s.stack[first + 3].to_float();
+                        let achar = s.stack[first + 4].to_float();
+                        if !(0.0 ..= 255.0).contains(&bchar) || !(0.0 ..= 255.0).contains(&achar) {
+                            warn!("seac: character code out of range ({bchar}, {achar})");
+                        } else {
+                            s.seac = Some(Seac {
+                                adx, ady,
+                                base: bchar as u8,
+                                accent: achar as u8,
+                            });
+                        }
                         s.stack.clear();
                     }
                     7 => { // ⊦ sbx sby wx wy sbw (12 7) ⊦

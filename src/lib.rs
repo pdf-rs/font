@@ -351,7 +351,21 @@ pub struct State {
     pub stem_hints: u32,
     pub delta_width: Option<f32>,
     pub first_stack_clearing_operator: bool,
-    pub flex_sequence: Option<Vec<Vector2F>>
+    pub flex_sequence: Option<Vec<Vector2F>>,
+    /// Set by Type 1 `seac` (12 6) and Type 2 `endchar` with four arguments: the glyph
+    /// is not drawn by its own charstring but composed of two other glyphs.
+    pub seac: Option<Seac>
+}
+
+/// A `seac` accent composition: the base and accent characters, given as
+/// StandardEncoding codes, with the accent shifted by `(adx, ady)` from the origin
+/// of the base character (T1 §6; TN5177 Appendix C for the Type 2 form).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Seac {
+    pub adx: f32,
+    pub ady: f32,
+    pub base: u8,
+    pub accent: u8,
 }
 
 impl State {
@@ -368,7 +382,8 @@ impl State {
             stem_hints: 0,
             delta_width: None,
             first_stack_clearing_operator: true,
-            flex_sequence: None
+            flex_sequence: None,
+            seac: None
         }
     }
     #[inline]
@@ -384,6 +399,7 @@ impl State {
         self.delta_width = None;
         self.first_stack_clearing_operator = true;
         self.flex_sequence = None;
+        self.seac = None;
     }
 
     #[inline]

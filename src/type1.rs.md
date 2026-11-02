@@ -1,6 +1,13 @@
 # `src/type1.rs` — Type 1 fonts (PFB/PFA) and the Type 1 charstring interpreter
 
 ## Fixed
+* **F10 (2026-11-02):** `seac` (`12 6`) is no longer a no-op. It records the base and accent
+  standard-encoding codes plus `(adx, ady)` in `State::seac`; `Type1Font::from_vm` composes them
+  in a second pass (the components may be defined after the composite): base outline plus the
+  accent outline translated by `(adx, ady)`. Components are found by mapping the StandardEncoding
+  code to its character (`pdf_encoding`) and that to the glyph whose name maps to it; a missing
+  component or a self-reference warns and leaves the glyph empty. Test: `tests/type1_cases.rs`
+  `c23`.
 * **F24 (2026-11-02):** `/Encoding` is no longer required to be an array. A font without
   `/Encoding`, or with `/Encoding /StandardEncoding` (a name this VM does not resolve back to an
   array), now warns and leaves the codepoint map empty — the glyphs stay reachable by name.
@@ -24,8 +31,9 @@ The interpreter covers the Type 1 path operators (`hsbw`, `hstem`/`vstem`, `vmov
 `seac`, `sbw`, `div`, `callothersubr`, `pop`, `setcurrentpoint`).
 
 ## Differences from the specifications
-* **F10 (T1 §6, "Standard Encoding Accented Character"):** `seac` (`:376-379`) clears the stack
-  and does nothing. Every accented composite glyph renders empty.
+* ~~**F10 (T1 §6, "Standard Encoding Accented Character"):**~~ `seac` used to clear the stack and
+  do nothing, so every accented composite glyph rendered empty — composed in `from_vm` now (see
+  "Fixed" above).
 * **F40:** the flex mechanism (`callothersubr` 1 → `callothersubr` 0, `:396-420`) can never
   work: the 7-point sequence is only appended to by `rmoveto` (`:481-495`), while the curve
   operators never push into `s.flex_sequence`, so `TupleElements::from_iter` on the 7-tuple fails
