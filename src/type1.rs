@@ -260,6 +260,7 @@ impl Type1Font {
             name,
             info: Info {
                 weight,
+                .. Info::default()
             }
         })
     }

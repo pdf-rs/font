@@ -536,6 +536,7 @@ impl<'a> CffSlot<'a> {
             name: Name::default(),
             info: Info {
                 weight: None,
+                .. Info::default()
             },
             sid_map,
             cid: self.top_dict.contains_key(&Operator::ROS)

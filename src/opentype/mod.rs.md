@@ -1,6 +1,10 @@
 # `src/opentype/mod.rs` — table directory and the sfnt tables shared by glyf/CFF
 
 ## Fixed
+* **F38 (2026-11-02):** `vmetrics` no longer comes from `hhea` alone. `OpenTypeFont::from_tables`
+  parses `OS/2` before the metrics and uses `Os2::typo_metrics()` when the font asks for it
+  (`fsSelection` bit 7, USE_TYPO_METRICS), falling back to `hhea`; `sxHeight`, `sCapHeight` and
+  `ulUnicodeRange1..4` are passed on to `Info`. Tests: `c25`, `c25b` in `tests/spec_cases.rs`.
 * **F28 (2026-11-02):** `parse_hmtx_woff2_format1` computed `maxp.numGlyphs - numberOfHMetrics`
   as `usize` and wrapped to a huge count when the WOFF2 hmtx transform claimed more metrics
   than glyphs (debug: "attempt to subtract with overflow"). It now uses `checked_sub` and

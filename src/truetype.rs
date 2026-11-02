@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::iter;
 use std::ops::Deref;
 use crate::opentype::post::parse_post;
-use crate::{Font, Glyph, R, IResultExt, GlyphId, Name, Info, FontError};
+use crate::{Font, Glyph, R, IResultExt, GlyphId, Name, Info, VMetrics, FontError};
 use crate::parsers::{iterator, parse};
 use pdf_encoding::Encoding;
 use nom::{
@@ -61,6 +61,7 @@ pub struct TrueTypeFont {
     kern: KernTable,
     name: Name,
     info: Info,
+    vmetrics: Option<VMetrics>,
     pub name_map: HashMap<String, u16>,
 }
 
@@ -95,6 +96,11 @@ impl TrueTypeFont {
         };
         let name = tables.get(b"name").map(|data| parse_name(data)).transpose()?.unwrap_or_default();
         let os2 = tables.get(b"OS/2").map(|data| parse_os2(data)).transpose()?;
+        // OT §OS/2: with `fsSelection` bit 7 (USE_TYPO_METRICS) the `sTypo*` values are
+        // the line metrics; without it applications lay out with `hhea`.
+        let hhea = tables.get(b"hhea").map(parse_hhea).transpose()?;
+        let vmetrics = os2.as_ref().and_then(|os2| os2.typo_metrics())
+            .or_else(|| hhea.map(|hhea| hhea.into()));
 
         let post = t!(tables.get(b"post").map(parse_post).transpose());
         let mut name_map = HashMap::new();
@@ -113,8 +119,12 @@ impl TrueTypeFont {
             kern: tables.get(b"kern").map(|data| parse_kern(data)).transpose()?.unwrap_or_default(),
             name,
             info: Info {
-                weight: os2.map(|t| t.weight),
+                weight: os2.as_ref().map(|t| t.weight),
+                x_height: os2.as_ref().and_then(|t| t.x_height).map(|height| height as f32),
+                cap_height: os2.as_ref().and_then(|t| t.cap_height).map(|height| height as f32),
+                unicode_ranges: os2.as_ref().map(|t| t.unicode_ranges).unwrap_or_default(),
             },
+            vmetrics,
             name_map,
         })
     }
@@ -183,6 +193,9 @@ impl Font for TrueTypeFont {
     }
     fn info(&self) -> &Info {
         &self.info
+    }
+    fn vmetrics(&self) -> Option<VMetrics> {
+        self.vmetrics
     }
 }
 

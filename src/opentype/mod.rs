@@ -135,7 +135,12 @@ impl OpenTypeFont {
         #[cfg(feature="math")]
         let math = t!(tables.get(b"MATH").map(parse_math).transpose());
         
-        let vmetrics = t!(tables.get(b"hhea").map(parse_hhea).transpose()).map(|v| v.into());
+        let hhea = t!(tables.get(b"hhea").map(parse_hhea).transpose());
+        let os2 = t!(tables.get(b"OS/2").map(|data| os2::parse_os2(data)).transpose());
+        // OT §OS/2: with `fsSelection` bit 7 (USE_TYPO_METRICS) the `sTypo*` values are
+        // the line metrics; without it applications lay out with `hhea`.
+        let vmetrics = os2.as_ref().and_then(|os2| os2.typo_metrics())
+            .or_else(|| hhea.map(|hhea| hhea.into()));
         let name = t!(tables.get(b"name").map(parse_name).transpose()).unwrap_or_default();
         let gdef = t!(tables.get(b"GDEF").map(parse_gdef).transpose());
         let base = t!(tables.get(b"BASE").map(parse_base).transpose());
@@ -146,7 +151,7 @@ impl OpenTypeFont {
         }
         
 
-        let weight = t!(tables.get(b"OS/2").map(|data| os2::parse_os2(data)).transpose()).map(|os2| os2.weight);
+        let weight = os2.as_ref().map(|os2| os2.weight);
 
         Ok(OpenTypeFont {
             outlines,
@@ -172,6 +177,9 @@ impl OpenTypeFont {
             name,
             info: Info {
                 weight,
+                x_height: os2.as_ref().and_then(|os2| os2.x_height).map(|height| height as f32),
+                cap_height: os2.as_ref().and_then(|os2| os2.cap_height).map(|height| height as f32),
+                unicode_ranges: os2.as_ref().map(|os2| os2.unicode_ranges).unwrap_or_default(),
             },
         })
     }

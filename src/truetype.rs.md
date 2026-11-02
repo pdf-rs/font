@@ -1,6 +1,9 @@
 # `src/truetype.rs` — `glyf`/`loca` outlines and composite glyphs
 
 ## Fixed
+* **F38 (2026-11-02):** `TrueTypeFont` now implements `vmetrics()` (it returned the trait default,
+  `None`, before): `OS/2` `sTypo*` when `fsSelection` bit 7 asks for it, `hhea` otherwise, and
+  `sxHeight`/`sCapHeight`/`ulUnicodeRange1..4` go into `Info`.
 * **F19/F20 (2026-11-02):** `compound()` no longer panics when `ARGS_ARE_XY_VALUES` is clear —
   the arguments are stored as `ComponentOffset::MatchPoints { parent, child }` and resolved in
   `get_outline` once the component outline exists (`spec_points`/`point_at` count §glyf point

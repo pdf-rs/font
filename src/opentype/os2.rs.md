@@ -1,23 +1,30 @@
-# `src/opentype/os2.rs` — OS/2 table (usWeightClass only)
+# `src/opentype/os2.rs` — OS/2 table: the layout metrics Windows asks for
+
+## Fixed
+* **F38 (2026-11-02):** the table is no longer cut off after `usWeightClass`. The fixed prefix
+  is parsed (`version`, `xAvgCharWidth`, `usWeightClass`, `usWidthClass`, `fsType`, the
+  `ySubscript*`/`ySuperscript*`/`yStrikeout*` fields, `sFamilyClass`, `panose`,
+  `ulUnicodeRange1..4`, `achVendID`, `fsSelection`, `usFirstCharIndex`/`usLastCharIndex`,
+  `sTypoAscender`/`sTypoDescender`/`sTypoLineGap`, `usWinAscent`/`usWinDescent`), plus the
+  versioned tails: `ulCodePageRange1/2` (version ≥ 1) and `sxHeight`/`sCapHeight` (version ≥ 2).
+  A tail that the table is too short to hold only costs those optional fields, never the font.
+  `Os2::use_typo_metrics()` (version ≥ 4 and `fsSelection` bit 7) and `Os2::typo_metrics()` feed
+  `Font::vmetrics()` in `opentype/mod.rs` and `truetype.rs`; `sxHeight`, `sCapHeight` and
+  `ulUnicodeRange1..4` reach `Font::info()`. Tests: `c25`, `c25b` in `tests/spec_cases.rs`.
 
 ## What it does
-Reads `version`, `xAvgCharWidth` and `usWeightClass`, and exposes `Os2 { weight }`. That weight
-is the only OS/2 datum that reaches `Font::info().weight`.
+`Os2` carries the prefix fields listed above, `x_height`/`cap_height` as `Option<i16>` (version ≥ 2
+and long enough), and the derived line metrics. `usWinAscent`/`usWinDescent`, `fsType` and the PANOSE
+bytes are parsed but not used anywhere yet.
 
 ## Differences from the specifications
-* **F38 (OT §OS/2):** everything else is dropped. The ones that change output elsewhere in this
-  crate:
-  * `sTypoAscender` / `sTypoDescender` / `sTypoLineGap` plus `fsSelection` bit 7
-    (`USE_TYPO_METRICS`) — the *recommended* source of line spacing for Windows fonts.
-    `Font::vmetrics()` returns `hhea`'s values instead (`opentype/mod.rs:129`), which for many
-    Microsoft-authored fonts gives the wrong line height.
-  * `sCapHeight`, `sxHeight` — needed by any vertical alignment/MATH work.
-  * `usWinAscent`/`usWinDescent` — the clipping box.
-  * `fsSelection` italic/bold bits and `ulUnicodeRange*` for font substitution.
-* Only `version` 0's layout is read, and only its first fields, so versions 1-5 parse fine (the
-  extra fields are simply never touched) — but `version` itself is not validated at all.
-* `xAvgCharWidth` is read as `i16`; per the spec it is `int16` for versions 0-2 and `uint16`
-  from version 3. Irrelevant here since it is discarded.
+* Only versions 0-5 are considered; the version number itself is not validated, and a field that
+  a version defines is read only after a length check (a truncated table is accepted).
+* `xAvgCharWidth` is read as `int16`, which is the version 0-2 type; from version 3 it is
+  `uint16`. It is discarded, so only a value ≥ 32768 would be affected.
+* `usWinAscent`/`usWinDescent` (the clipping box), `fsType`, PANOSE, `sFamilyClass` and the
+  `ulCodePageRange*` bits are parsed but not exposed — nothing in this crate needs them yet.
 
 ## Cross references
-`opentype/mod.rs.md` (`vmetrics` from `hhea`), `opentype/post.rs.md`.
+`opentype/mod.rs.md` (`vmetrics` preference), `truetype.rs.md` (same rule for the `true` format),
+`opentype/post.rs.md`.

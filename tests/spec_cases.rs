@@ -814,3 +814,75 @@ fn c24b_woff2_hmtx_reads_a_consistent_table() {
     assert_eq!((m.advance, m.lsb), (500.0, head.x_min as f32));
     assert!(parsed.metrics_for_gid(1).is_none());
 }
+
+// ---------------------------- F38: OS/2 metrics ----------------------------
+
+/// `OS/2` version 4 (OT §OS/2), 96 bytes: fixed prefix, `ulCodePageRange1/2`, the three
+/// version 2 fields the crate reads, and the rest of the tail.
+pub fn os2_table(fs_selection: u16, typo: (i16, i16, i16), x_height: i16, cap_height: i16) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_u16(&mut t, 4);        // version
+    push_i16(&mut t, 500);      // xAvgCharWidth
+    push_u16(&mut t, 400);      // usWeightClass
+    push_u16(&mut t, 5);        // usWidthClass
+    push_u16(&mut t, 0);        // fsType
+    for _ in 0 .. 10 { push_i16(&mut t, 0); } // ySubscriptXSize … yStrikeoutPosition
+    push_i16(&mut t, 0);        // sFamilyClass
+    t.extend_from_slice(&[0; 10]); // panose
+    for range in [1u32, 2, 4, 8] { push_u32(&mut t, range); } // ulUnicodeRange1..4
+    t.extend_from_slice(b"TEST"); // achVendID
+    push_u16(&mut t, fs_selection);
+    push_u16(&mut t, 0x20);     // usFirstCharIndex
+    push_u16(&mut t, 0x7e);     // usLastCharIndex
+    push_i16(&mut t, typo.0);   // sTypoAscender
+    push_i16(&mut t, typo.1);   // sTypoDescender
+    push_i16(&mut t, typo.2);   // sTypoLineGap
+    push_u16(&mut t, 1000);     // usWinAscent
+    push_u16(&mut t, 200);      // usWinDescent
+    push_u32(&mut t, 1);        // ulCodePageRange1
+    push_u32(&mut t, 0);        // ulCodePageRange2
+    push_i16(&mut t, x_height); // sxHeight
+    push_i16(&mut t, cap_height); // sCapHeight
+    push_u16(&mut t, 0);        // usDefaultChar
+    push_u16(&mut t, 0x20);     // usBreakChar
+    push_u16(&mut t, 2);        // usMaxContext
+    t
+}
+
+/// Two empty glyphs plus the given `OS/2` table.
+fn font_with_os2(fs_selection: u16) -> OpenTypeFont {
+    let (glyf, loca) = glyf_and_loca(&[Vec::new(), Vec::new()]);
+    let mut tables = base_tables(2);
+    tables.push((*b"loca", loca));
+    tables.push((*b"glyf", glyf));
+    tables.push((*b"OS/2", os2_table(fs_selection, (900, -300, 120), 500, 700)));
+    OpenTypeFont::parse(&build_font(tables)).expect("font parses")
+}
+
+#[test]
+fn c25_os2_typo_metrics_win_when_the_font_asks_for_them() {
+    // F38: line metrics came from `hhea` only; `fsSelection` bit 7 (USE_TYPO_METRICS)
+    // says the `sTypo*` values are the ones to use.
+    let font = font_with_os2(0x0080);
+    let vmetrics = font.vmetrics().expect("line metrics");
+    assert_eq!(
+        (vmetrics.ascent, vmetrics.descent, vmetrics.line_gap),
+        (900.0, -300.0, 120.0)
+    );
+    // The rest of the table is exposed too, instead of just the weight.
+    assert_eq!(font.info().x_height, Some(500.0));
+    assert_eq!(font.info().cap_height, Some(700.0));
+    assert_eq!(font.info().unicode_ranges, [1, 2, 4, 8]);
+    assert_eq!(font.info().weight, Some(400));
+}
+
+#[test]
+fn c25b_hhea_metrics_without_use_typo_metrics() {
+    // Negative control: bit 7 clear means `hhea` is what applications use.
+    let font = font_with_os2(0);
+    let vmetrics = font.vmetrics().expect("line metrics");
+    assert_eq!(
+        (vmetrics.ascent, vmetrics.descent, vmetrics.line_gap),
+        (800.0, -200.0, 0.0)
+    );
+}

@@ -47,9 +47,15 @@ pub struct Name {
     pub full_name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Info {
     pub weight: Option<u16>,
+    /// `OS/2` `sxHeight`, in font units (fonts may not carry it).
+    pub x_height: Option<f32>,
+    /// `OS/2` `sCapHeight`, in font units (fonts may not carry it).
+    pub cap_height: Option<f32>,
+    /// `OS/2` `ulUnicodeRange1..4`, the bit set of Unicode blocks the font covers.
+    pub unicode_ranges: [u32; 4],
 }
 
 pub trait Font: 'static {

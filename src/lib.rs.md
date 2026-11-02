@@ -1,6 +1,9 @@
 # `src/lib.rs` — crate root: the `Font` trait, type dispatch, shared charstring state
 
 ## Fixed
+* **F38 (2026-11-02):** `Info` gained `x_height`, `cap_height` (font units, `None` when the font
+  has no `OS/2` version 2+ table) and `unicode_ranges` (`OS/2` `ulUnicodeRange1..4`); it derives
+  `Default` so constructors only set what they have.
 * **F10/F11 (2026-11-02):** `State` gained `seac: Option<Seac>` (cleared by `State::clear`), and the
   crate root now defines `pub struct Seac { adx, ady, base, accent }` — the accent composition
   shared by Type 1 `seac` and Type 2 `endchar` with four arguments.
