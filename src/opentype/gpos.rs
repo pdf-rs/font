@@ -23,6 +23,10 @@ pub struct GPos {
     pub mark_to_ligature: HashMap<(u16, u16), (i16, i16)>,
     /// OT §GPOS "Mark-to-Mark Attachment" (6): (base mark, mark) -> offset.
     pub mark_to_mark: HashMap<(u16, u16), (i16, i16)>,
+    /// OT §GPOS "Pair Adjustment" (2), format 1: both value records of a glyph pair.
+    pub pair: HashMap<(u16, u16), (ValueRecord, ValueRecord)>,
+    /// OT §GPOS "Pair Adjustment" (2), format 2: both value records of a class pair.
+    pub class_pair: HashMap<(u16, u16), (ValueRecord, ValueRecord)>,
 }
 impl GPos {
     pub fn from_kern(kern: KernTable) -> GPos {
@@ -50,6 +54,18 @@ impl GPos {
     /// OT §GPOS "Mark-to-Mark Attachment": where a mark is placed relative to another mark.
     pub fn get_mark_to_mark(&self, base: GlyphId, mark: GlyphId) -> Option<(i16, i16)> {
         self.mark_to_mark.get(&(glyph_key(base)?, glyph_key(mark)?)).cloned()
+    }
+    /// OT §GPOS "Pair Adjustment": both value records of `left` followed by `right` — the
+    /// glyph pairs first, then the class pair the two glyphs fall into.
+    pub fn get_pair(&self, left: GlyphId, right: GlyphId) -> Option<(ValueRecord, ValueRecord)> {
+        let left_key = glyph_key(left)?;
+        let right_key = glyph_key(right)?;
+        if let Some(pair) = self.pair.get(&(left_key, right_key)) {
+            return Some(pair.clone());
+        }
+        let left_class = *self.kern.left_classes.get(&left_key)?;
+        let right_class = *self.kern.right_classes.get(&right_key)?;
+        self.class_pair.get(&(left_class, right_class)).cloned()
     }
 }
 
@@ -118,7 +134,7 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> Result<GPos, FontError> {
 fn parse_positioning(data: &[u8], lookup_type: u16, gpos: &mut GPos, num_glyphs: u16) -> Result<(), FontError> {
     match lookup_type {
         1 => parse_single_adjustment(data, gpos)?,
-        2 => parse_pair_adjustment(data, &mut gpos.kern, num_glyphs)?,
+        2 => parse_pair_adjustment(data, gpos, num_glyphs)?,
         3 => parse_cursive(data, gpos)?,
         4 => parse_mark_attachment(data, &mut gpos.mark_to_base)?,
         5 => parse_mark_to_ligature_attachment(data, gpos)?,
@@ -170,7 +186,10 @@ fn value_record(flags: u16) -> impl Fn(&[u8]) -> R<ValueRecord> {
     }
 }
 
-fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, _num_glyphs: u16) -> Result<(), FontError> {
+fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos, _num_glyphs: u16) -> Result<(), FontError> {
+    // Filled side by side: the plain `i16` maps are what `Font::kerning` uses, the value
+    // records keep the placements the advance-only map cannot hold.
+    let (kern, pairs, class_pairs) = (&mut gpos.kern, &mut gpos.pair, &mut gpos.class_pair);
     let (i, format) = be_u16(data)?;
     match format {
         1 => {
@@ -190,9 +209,9 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, _num_glyphs: 
                 let (i, pair_value_count) = be_u16(i)?;
                 
                 let iter = iterator_n(i, tuple((be_u16, value_record(value_format_1), value_record(value_format_2))), pair_value_count);
-                for (second_glyph, value_record_1, _value_record_2) in iter {
-                    //debug!("{:?}/{}: {:?} {:?}", first_glyph, second_glyph, value_record_1, value_record_2);
+                for (second_glyph, value_record_1, value_record_2) in iter {
                     kern.glyph_pairs.insert((first_glyph, second_glyph), value_record_1.x_advance);
+                    pairs.insert((first_glyph, second_glyph), (value_record_1, value_record_2));
                 }
             }
         },
@@ -222,7 +241,10 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], kern: &mut KernTable, _num_glyphs: 
             let iter = (0 .. class_1_count).cartesian_product(0 .. class_2_count)
                 .zip(iterator_n(i, tuple((value_record(value_format_1), value_record(value_format_2))), total));
 
-            for ((class_1, class_2), (value_record_1, _value_record_2)) in iter {
+            for ((class_1, class_2), (value_record_1, value_record_2)) in iter {
+                if value_record_1 != ValueRecord::default() || value_record_2 != ValueRecord::default() {
+                    class_pairs.insert((class_1, class_2), (value_record_1.clone(), value_record_2));
+                }
                 if value_record_1.x_advance != 0 {
                     kern.class_pairs.insert((class_1, class_2), value_record_1.x_advance);
                 }
@@ -471,9 +493,34 @@ mod tests {
             1, 0, 0,              // classDef2
         ];
         let data = words_to_bytes(&words);
-        let mut kern = KernTable::default();
-        parse_pair_adjustment(&data, &mut kern, 1000).expect("pair adjustment parses");
-        assert!(kern.class_pairs.is_empty());
+        let mut gpos = GPos::default();
+        parse_pair_adjustment(&data, &mut gpos, 1000).expect("pair adjustment parses");
+        assert!(gpos.kern.class_pairs.is_empty());
+    }
+
+    #[test]
+    fn pair_adjustment_keeps_both_value_records() {
+        // OT §GPOS "Pair Adjustment" (2), format 1: 20 followed by 21 gets xPlacement 3 and
+        // xAdvance -40 on the first glyph and xAdvance 5 on the second.
+        let words: [u16; 14] = [
+            1, 22,                // format, coverageOffset
+            5, 4,                 // valueFormat1 = X_PLACEMENT|X_ADVANCE, valueFormat2 = X_ADVANCE
+            1, 12,                // pairSetCount, pairSetOffset[0]
+            1, 21,                // pairValueCount, secondGlyph
+            3, (-40i16) as u16,   // value record 1: xPlacement, xAdvance
+            5,                    // value record 2: xAdvance
+            1, 1, 20,             // coverage
+        ];
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 2, &mut gpos, 100).expect("pair adjustment parses");
+
+        let (first, second) = gpos.get_pair(GlyphId(20), GlyphId(21)).expect("a pair");
+        assert_eq!(first.x_placement, 3);
+        assert_eq!(first.x_advance, -40);
+        assert_eq!(second.x_advance, 5);
+        // The advance-only map `Font::kerning` uses is still filled.
+        assert_eq!(gpos.kern.get(20, 21), Some(-40));
     }
 
     #[test]

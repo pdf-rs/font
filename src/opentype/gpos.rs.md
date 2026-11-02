@@ -10,6 +10,11 @@ each glyph from **SinglePos** (type 1), `GPos::cursive` with the entry/exit anch
 `GPos::from_kern` lets a `kern` table stand in when GPOS is absent (`mod.rs:110-117`).
 
 ## Fixed
+* **F36 (2026-11-02):** PairPos keeps both value records of a pair: `GPos::pair` (glyph pairs,
+  format 1) and `GPos::class_pair` (class pairs, format 2) hold `(ValueRecord, ValueRecord)`,
+  reachable through `GPos::get_pair(left, right)` — glyph pairs first, then the class pair the
+  two glyphs fall into. `KernTable` keeps its `i16` maps for `Font::kerning`. Test:
+  `pair_adjustment_keeps_both_value_records`.
 * **F36 (2026-11-02):** single adjustment (1, formats 1 and 2), cursive attachment (3),
   mark-to-ligature (5) and mark-to-mark (6) are parsed now, each with an accessor
   (`get_single`, `get_cursive`, `get_mark_to_ligature`, `get_mark_to_mark`) and with the
@@ -46,10 +51,11 @@ each glyph from **SinglePos** (type 1), `GPos::cursive` with the entry/exit anch
   reachable from `KernTable::get`.
 
 ## Differences from the specifications
-* In PairPos only the **first** `ValueRecord`'s `xAdvance` is used (`:130`, `:158`);
+* ~~In PairPos only the **first** `ValueRecord`'s `xAdvance` is used (`:130`, `:158`);
   `ValueRecord2` (the second glyph's advance/placement) and `xPlacement`/`yPlacement` are
-  discarded. For PDF text that is defensible (you only need the advance delta), but it is not
-  what GPOS says. SinglePos keeps the whole record.
+  discarded.~~ Both value records are kept now (`GPos::pair` / `GPos::class_pair`,
+  `GPos::get_pair`); `KernTable` still holds only the first record's `xAdvance`, because
+  `Font::kerning` returns a single number and `pdf` builds on that.
 * ~~**F36 (OT §GPOS, "Extension lookups"):**~~ lookup type 9 (Extension) was not followed — the
   dispatch (`parse_positioning`) now unwraps it and parses the wrapped pair adjustment or
   mark-to-base subtable; an extension wrapping an extension warns and is dropped. Unit test:
