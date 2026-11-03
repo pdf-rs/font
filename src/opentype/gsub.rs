@@ -481,6 +481,15 @@ fn to_glyph_ids(ids: &[u16]) -> Vec<GlyphId> {
 /// than a handful deep.
 pub(crate) const MAX_NESTING: u8 = 8;
 
+/// What one application of a lookup did at a position. `grown` is the net change in the
+/// length of the run (negative when the rule deleted glyphs); `advance` is how many glyphs of
+/// the result the match produced — OT §"Lookup List" has the lookup carry on after them, not
+/// inside them.
+struct Step {
+    grown: isize,
+    advance: usize,
+}
+
 impl GSub {
     /// Applies the lookups of the default language system whose feature tag `enabled`
     /// accepts — the subset of OT §"Lookups" this crate implements. Single (1), Multiple (2),
@@ -502,21 +511,19 @@ impl GSub {
         }
 
         let mut out: Vec<GlyphId> = glyphs.to_vec();
-        let mut position = 0;
-        while position < out.len() {
-            let mut applied = false;
-            for &lookup_idx in &lookup_indices {
-                if let Some(grown) = self.apply_lookup_at(lookup_idx, &mut out, position, 0, gdef) {
-                    // OT §"Lookups": what a lookup produces is not fed back into it. A lookup
-                    // that deletes the glyphs at `position` still has to move on, or the same
-                    // rule would delete them again forever.
-                    position += if grown > 0 { grown as usize } else { 1 };
-                    applied = true;
-                    break;
-                }
-            }
-            if !applied {
-                position += 1;
+        // OT §"Lookup List": the lookups run in list order, and each one is applied across the
+        // whole glyph run before the next starts — so a later lookup sees what the earlier
+        // ones produced, and a lookup never applies to its own output (its position moves past
+        // what it produced).
+        for &lookup_idx in &lookup_indices {
+            let mut position = 0;
+            while position < out.len() {
+                position += match self.apply_lookup_at(lookup_idx, &mut out, position, 0, gdef) {
+                    // A rule that produces nothing has still consumed the glyphs it matched,
+                    // so the run shrank under `position`: it names the next glyph already.
+                    Some(step) => step.advance.max(1),
+                    None => 1,
+                };
             }
         }
 
@@ -537,10 +544,8 @@ impl GSub {
         out
     }
 
-    /// Applies one lookup at `position`. `Some(grown)` is how much the glyph run at and after
-    /// `position` grew by (zero, or negative when the rule deleted glyphs); `None` if no
-    /// subtable of the lookup applies there.
-    fn apply_lookup_at(&self, lookup_idx: u16, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8, gdef: Option<&GDef>) -> Option<isize> {
+    /// Applies one lookup at `position`. `None` if no subtable of the lookup applies there.
+    fn apply_lookup_at(&self, lookup_idx: u16, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8, gdef: Option<&GDef>) -> Option<Step> {
         let subtables = self.lookup.get(lookup_idx as usize)?;
         let flag = self.flags.get(lookup_idx as usize).copied().unwrap_or_default();
         // OT §"Lookup Flags": a lookup skips the glyph classes its flag names (marks,
@@ -567,9 +572,9 @@ impl GSub {
                     };
                     match step {
                         Some((consumed, replacement)) => {
-                            let grown = replacement.len() as isize - consumed as isize;
+                            let produced = replacement.len();
                             glyphs.splice(position .. position + consumed, replacement);
-                            Some(grown)
+                            Some(Step { grown: produced as isize - consumed as isize, advance: produced })
                         }
                         None => None,
                     }
@@ -584,7 +589,7 @@ impl GSub {
 
     /// Applies the first rule of `context` that matches at `position`, which means running the
     /// lookups its records name at the glyphs of the run.
-    fn apply_context(&self, context: &Context, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8, flag: LookupFlags, gdef: Option<&GDef>) -> Option<isize> {
+    fn apply_context(&self, context: &Context, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8, flag: LookupFlags, gdef: Option<&GDef>) -> Option<Step> {
         if depth >= MAX_NESTING {
             debug!("GSUB: not following context lookups nested deeper than {}", MAX_NESTING);
             return None;
@@ -607,11 +612,20 @@ impl GSub {
             if target < 0 || target as usize >= glyphs.len() {
                 continue;
             }
-            if let Some(grown) = self.apply_lookup_at(lookup_index, glyphs, target as usize, depth + 1, gdef) {
-                shift += grown;
+            if let Some(step) = self.apply_lookup_at(lookup_index, glyphs, target as usize, depth + 1, gdef) {
+                shift += step.grown;
             }
         }
-        Some(glyphs.len() as isize - before as isize)
+        // The rule matched the glyphs `targets` names; after the records ran, the run's end is
+        // the last of them moved by `shift`. Anything past that belongs to the next position.
+        let end = match targets.last() {
+            Some(&last) => (last as isize + shift + 1).max(position as isize + 1) as usize,
+            None => position + 1,
+        };
+        Some(Step {
+            grown: glyphs.len() as isize - before as isize,
+            advance: end.saturating_sub(position).max(1),
+        })
     }
 }
 
@@ -1465,6 +1479,44 @@ mod tests {
 
         gsub.flags[0] = LookupFlags { flag: 0x0008, mark_filtering_set: None }; // IgnoreMarks
         assert_eq!(gsub.substitute_with(&run, &liga, Some(&gdef)), vec![GlyphId(30)]);
+    }
+
+    #[test]
+    fn each_lookup_runs_over_the_whole_run_in_turn() {
+        // Audit C1: OT §"Lookup List" applies each lookup across the whole run before the
+        // next one starts, so the second lookup here sees the first one's 20.
+        let mut first = HashMap::new();
+        first.insert(10u16, 20u16);
+        let mut second = HashMap::new();
+        second.insert(20u16, 30u16);
+        let gsub = gsub_with(
+            vec![feature(b"ccmp", vec![0, 1])],
+            vec![
+                vec![LookupSubtable::Substitution(Substitution::Single(first))],
+                vec![LookupSubtable::Substitution(Substitution::Single(second))],
+            ],
+        );
+        assert_eq!(
+            gsub.substitute(&[GlyphId(10), GlyphId(11)], &|tag| tag.0 == *b"ccmp"),
+            vec![GlyphId(30), GlyphId(11)]
+        );
+    }
+
+    #[test]
+    fn a_lookup_does_not_run_on_its_own_output() {
+        // Audit C1: the position has to move past the glyphs a rule produced. Advancing by the
+        // net growth would leave `position` inside the output of this 1 → 2 substitution and
+        // run it again on its own result, without end.
+        let mut multiple = HashMap::new();
+        multiple.insert(10u16, vec![10u16, 10u16]);
+        let gsub = gsub_with(
+            vec![feature(b"ccmp", vec![0])],
+            vec![vec![LookupSubtable::Multiple(multiple)]],
+        );
+        assert_eq!(
+            gsub.substitute(&[GlyphId(10)], &|tag| tag.0 == *b"ccmp"),
+            vec![GlyphId(10), GlyphId(10)]
+        );
     }
 
     #[test]
