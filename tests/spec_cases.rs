@@ -720,6 +720,27 @@ pub fn composite_glyph(components: &[(u16, Placement)]) -> Vec<u8> {
     t
 }
 
+/// A composite glyph record (OT §glyf) whose components all carry a uniform `WE_HAVE_A_SCALE`
+/// transform (F2Dot14, 0x2000 = 0.5) plus the flag bits in `extra_flags`.
+pub fn composite_glyph_scaled(components: &[(u16, Placement)], scale: i16, extra_flags: u16) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_i16(&mut t, -1);                       // numberOfContours
+    for _ in 0 .. 4 { push_i16(&mut t, 0); }    // xMin, yMin, xMax, yMax
+    for (n, &(gid, placement)) in components.iter().enumerate() {
+        let mut flags = 0x0001 | 0x0008 | extra_flags; // words, WE_HAVE_A_SCALE
+        if n + 1 < components.len() { flags |= 0x0020; }  // MORE_COMPONENTS
+        if let Placement::Offset(..) = placement { flags |= 0x0002; }
+        push_u16(&mut t, flags);
+        push_u16(&mut t, gid);
+        match placement {
+            Placement::Offset(dx, dy) => { push_i16(&mut t, dx); push_i16(&mut t, dy); }
+            Placement::Points(parent, child) => { push_u16(&mut t, parent); push_u16(&mut t, child); }
+        }
+        push_i16(&mut t, scale);
+    }
+    t
+}
+
 /// Assemble `glyf` and a matching short `loca` from the glyph records, each padded to 2 bytes.
 pub fn glyf_and_loca(glyphs: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
     let mut glyf = Vec::new();
@@ -800,6 +821,63 @@ fn c17c_self_referencing_composite_terminates() {
         composite_glyph(&[(2, Placement::Offset(0, 0))]),
     ]);
     assert!(outline_points(&font, 2).is_empty());
+}
+
+#[test]
+fn c17d_component_offset_is_scaled_only_when_asked() {
+    // Audit C8: `SCALED_COMPONENT_OFFSET` (0x0800) makes the placement offset part of the
+    // component's own design space, so the component matrix scales it (Apple's reading). The
+    // Microsoft default — and `UNSCALED_COMPONENT_OFFSET` (0x1000) explicitly — puts the
+    // offset in the composite's coordinates: the matrix applies to the outline only.
+    let glyphs = |flags: u16| {
+        font_with_glyphs(&[
+            Vec::new(),
+            simple_glyph(&[(0, 0), (100, 0), (0, 100)]),
+            composite_glyph_scaled(&[(1, Placement::Offset(100, 40))], 0x2000, flags),
+        ])
+    };
+    // scale 0.5 then offset (50, 20): the offset went through the matrix too
+    assert_eq!(
+        outline_points(&glyphs(0x0800), 2),
+        vec![(50.0, 20.0), (100.0, 20.0), (50.0, 70.0)]
+    );
+    // scale 0.5 then offset (100, 40): the offset was already in composite coordinates
+    assert_eq!(
+        outline_points(&glyphs(0x1000), 2),
+        vec![(100.0, 40.0), (150.0, 40.0), (100.0, 90.0)]
+    );
+    // and that is also what a font with neither flag gets
+    assert_eq!(outline_points(&glyphs(0), 2), outline_points(&glyphs(0x1000), 2));
+}
+
+#[test]
+fn c17e_point_numbers_are_the_glyf_ones() {
+    // Audit C8: point matching must count the glyph's own points. A contour that repeats its
+    // first point as its last one, and the closing point `contour()` adds, must both stay out of
+    // the numbering — point 4 of a four-point contour does not exist.
+    let font = font_with_glyphs(&[
+        Vec::new(),
+        simple_glyph(&[(0, 0), (100, 0), (100, 100), (0, 0)]),
+        composite_glyph(&[(1, Placement::Offset(0, 0)), (1, Placement::Points(4, 1))]),
+    ]);
+    assert_eq!(
+        outline_points(&font, 2),
+        // the second copy could not be placed, so it sits at the origin unchanged
+        vec![(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 0.0),
+             (0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 0.0)]
+    );
+
+    // and point 2 is the third point of the glyph, not the fourth
+    let font = font_with_glyphs(&[
+        Vec::new(),
+        simple_glyph(&[(0, 0), (100, 0), (100, 100), (0, 0)]),
+        composite_glyph(&[(1, Placement::Offset(0, 0)), (1, Placement::Points(2, 0))]),
+    ]);
+    assert_eq!(
+        outline_points(&font, 2),
+        vec![(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 0.0),
+             (100.0, 100.0), (200.0, 100.0), (200.0, 200.0), (100.0, 100.0)]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

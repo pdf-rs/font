@@ -40,6 +40,12 @@ pub struct Component {
     pub gid: u32,
     pub matrix: Matrix2x2F,
     pub offset: ComponentOffset,
+    /// `SCALED_COMPONENT_OFFSET` (0x0800): the placement offset is part of the component's
+    /// own design space and is scaled by `matrix`, as Apple's rasterizer does it. Without the
+    /// flag — and without `UNSCALED_COMPONENT_OFFSET` (0x1000) too, which only exists to say
+    /// so explicitly — the offset is in the composite's coordinates and applied after the
+    /// matrix, the Microsoft default (MS §glyf, "Composite glyph description").
+    pub scaled_offset: bool,
 }
 
 #[derive(Clone)]
@@ -298,7 +304,12 @@ pub fn compound(mut input: &[u8]) -> R<Shape> {
         }
 
         // Get indexed glyph.
-        parts.push(Component { gid: gidx as u32, matrix: transform.matrix, offset });
+        parts.push(Component {
+            gid: gidx as u32,
+            matrix: transform.matrix,
+            offset,
+            scaled_offset: flags & 0x0800 != 0,
+        });
         // More components ?
         if flags & 0x20 == 0 {
             break;
@@ -307,8 +318,20 @@ pub fn compound(mut input: &[u8]) -> R<Shape> {
     Ok((input, Shape::Compound(parts)))
 }
 
-/// The points of a contour without the explicit closing point that `contour()` appends, i.e.
-/// the numbering OT §glyf uses for point matching.
+/// The points of a contour without the closing point that `contour()` appends, i.e. the
+/// numbering OT §glyf uses for point matching.
+///
+/// `contour()` always ends a glyph contour at its start point — a closing line, a closing
+/// quadratic, or the implied on-curve point between two off-curve points — so the last point of
+/// every contour built there repeats the first, and dropping it restores the glyph's own
+/// numbering exactly, including for a glyph whose last point genuinely repeats its first (the
+/// fabricated point is still there, after it).
+///
+/// Two things still shift the numbering: an implied on-curve midpoint inserted between two
+/// consecutive off-curve points, and quadratic-to-cubic conversion (the control points are then
+/// stored as two cubic control points). Point matching in such a contour therefore refers to the
+/// converted outline, not to `glyf` — fixing that needs the original numbering kept beside the
+/// outline, which `pathfinder_content::outline::Contour` has no room for.
 fn spec_points(contour: &Contour) -> &[Vector2F] {
     let points = contour.points();
     if points.len() > 1 && points[0] == points[points.len() - 1] {
@@ -363,9 +386,11 @@ fn expand_outline(shapes: &[Shape], idx: u32, stack: &mut Vec<u32>) -> Option<Ou
                         continue;
                     }
                 };
-                // The 2×2 part applies before the placement offset.
+                // The 2×2 part applies before the placement offset, except for a component
+                // that asks for its offset to be scaled as well.
                 child.transform(&Transform2F { matrix: part.matrix, vector: Vector2F::zero() });
                 let offset = match part.offset {
+                    ComponentOffset::Vector(v) if part.scaled_offset => part.matrix * v,
                     ComponentOffset::Vector(v) => v,
                     ComponentOffset::MatchPoints { parent, child: child_point } => {
                         match (point_at(&outline, parent), point_at(&child, child_point)) {
