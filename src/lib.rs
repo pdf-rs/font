@@ -226,6 +226,9 @@ pub mod opentype;
 mod parsers;
 mod eexec;
 
+#[cfg(any(feature="woff", feature="svg"))]
+mod inflate_limited;
+
 #[cfg(feature="woff")]
 mod woff;
 

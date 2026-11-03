@@ -24,6 +24,10 @@ pub struct SvgTable {
     pub glyphs: HashMap<u16, SvgGlyph>
 }
 
+/// How large one SVG document of a font may be once inflated (audit §3). Font documents are
+/// a few KiB; the cap keeps a gzip member from expanding without bound.
+const MAX_SVG_BYTES: usize = 64 * 1024 * 1024;
+
 /// OT §SVG: a document may be gzip-compressed. Decompress it if it is, otherwise hand the
 /// bytes to the SVG parser unchanged.
 fn document_data(data: &[u8]) -> Result<Cow<[u8]>, FontError> {
@@ -60,12 +64,18 @@ fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, FontError> {
         header += 2;
     }
     let body = match data.get(header ..) {
-        // The last eight bytes are CRC32 and ISIZE; `inflate_bytes` stops at the end of
-        // the deflate stream anyway, so they are simply cut off.
+        // The last eight bytes are CRC32 and ISIZE, the size of the document modulo 2^32.
         Some(body) if body.len() > 8 => &body[.. body.len() - 8],
         _ => return Err(FontError::Other("SVG: truncated gzip stream".into())),
     };
-    inflate::inflate_bytes(body)
+    let isize = data.get(data.len() - 4 ..)
+        .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize)
+        .unwrap_or(0);
+    // SVG §"Document structure": the member is inflated, and gzip's ISIZE says how large the
+    // document is. That is a claim by the font, so the cap on top of it is what actually
+    // bounds the work: a few KiB of compressed data must not expand to gigabytes.
+    let limit = if isize == 0 { MAX_SVG_BYTES } else { isize.min(MAX_SVG_BYTES) };
+    crate::inflate_limited::deflate(body, limit)
         .map_err(|e| FontError::Other(format!("SVG: gzip: {e}")))
 }
 

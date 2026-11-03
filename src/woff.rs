@@ -2,7 +2,6 @@ use std::convert::TryInto;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{Read, Cursor};
-use inflate::inflate_bytes_zlib;
 use brotli_decompressor::{Decompressor};
 
 use crate::{
@@ -21,6 +20,14 @@ use nom::{
     sequence::tuple,
     combinator::map
 };
+
+/// How large one uncompressed WOFF table may be (audit §3). A real font's largest table runs
+/// to a few MiB; the cap keeps a hostile `origLength` of 4 GiB from being believed.
+const MAX_TABLE_BYTES: usize = 256 * 1024 * 1024;
+
+/// How large the uncompressed sfnt of a WOFF2 file may be. Its header states it, every
+/// table's length is charged against it before a buffer is allocated for that table.
+const MAX_SFNT_BYTES: usize = 256 * 1024 * 1024;
 
 
 pub fn parse_woff(data: &[u8]) -> Result<OpenTypeFont, FontError> {
@@ -74,9 +81,18 @@ pub fn parse_woff(data: &[u8]) -> Result<OpenTypeFont, FontError> {
                 String::from_utf8_lossy(&entry.tag), start, padded))),
         };
         let data = if compressed {
-            let orig_data = match inflate_bytes_zlib(slice!(chunk, .. entry.comp_length as usize)) {
+            // WOFF §"Table Directory": a table marked compressed must decompress, and
+            // `origLength` says to how much. `inflate_bytes_zlib` would believe the stream
+            // instead and decode as much as it likes (audit §3), so the length is a cap.
+            if entry.orig_length as usize > MAX_TABLE_BYTES {
+                return Err(FontError::Other(format!(
+                    "WOFF: table {} claims {} bytes, more than a table may have",
+                    String::from_utf8_lossy(&entry.tag), entry.orig_length)));
+            }
+            let orig_data = match crate::inflate_limited::zlib(
+                slice!(chunk, .. entry.comp_length as usize), entry.orig_length as usize)
+            {
                 Ok(data) => data,
-                // WOFF §"Table Directory": a table marked compressed must decompress.
                 Err(e) => return Err(FontError::Other(format!("can't decompress {}: {:?}", String::from_utf8_lossy(&entry.tag), e)))
             };
             require_eq!(orig_data.len(), entry.orig_length as usize);
@@ -116,7 +132,7 @@ pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
     let (i, _length) = be_u32(i)?;
     let (i, num_tables) = be_u16(i)?;
     let (i, _reserved) = be_u16(i)?;
-    let (i, _total_sfnt_size) = be_u32(i)?;
+    let (i, total_sfnt_size) = be_u32(i)?;
     let (i, total_compressed_size) = be_u32(i)?;
     let (i, _major_version) = be_u16(i)?;
     let (i, _minor_version) = be_u16(i)?;
@@ -133,9 +149,27 @@ pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
     }
     
     let mut decompressor = Decompressor::new(Cursor::new(slice!(i,  .. total_compressed_size as usize)), 1024);
+    // WOFF2 §"WOFF2 Header": `totalSfntSize` is the size of the equivalent uncompressed sfnt,
+    // and the tables together are exactly that large. It is a claim by the file, so it is
+    // capped, and each table's length is charged against it before a buffer that large is
+    // allocated: `entry.length` alone would allow a 4 GiB allocation (audit §3).
+    if total_sfnt_size as usize > MAX_SFNT_BYTES {
+        return Err(FontError::Other(format!(
+            "WOFF2: totalSfntSize {} is larger than a font may be", total_sfnt_size)));
+    }
+    let mut left = match (total_sfnt_size as usize).checked_sub(12 + 16 * num_tables as usize) {
+        Some(left) => left,
+        None => return Err(FontError::Other(format!(
+            "WOFF2: totalSfntSize {} cannot hold {} table directories", total_sfnt_size, num_tables))),
+    };
     let mut entries = HashMap::new();
     for (&tag, entry) in &entry_tables {
         debug!("tag: {:?} ({:?}) {:?}", tag, std::str::from_utf8(&tag), entry);
+        left = match left.checked_sub(entry.length as usize) {
+            Some(left) => left,
+            None => return Err(FontError::Other(format!(
+                "WOFF2: the tables are longer than totalSfntSize {} allows", total_sfnt_size))),
+        };
         let mut buf = vec![0; entry.length as usize];
         if let Err(e) = decompressor.read_exact(&mut buf) {
             return Err(FontError::Other(format!("can't decode table {:?}: {}", String::from_utf8_lossy(&tag), e)));
@@ -208,7 +242,11 @@ fn parse_glyf_t0(i: &[u8]) -> Result<Vec<Shape>, FontError> {
             -1 => glyphs.push(parse(&mut composite_stream, compound)?),
             n if n > 0 => {
                 let mut outline = Outline::new();
-                let (mut x, mut y) = (0i16, 0i16);
+                // WOFF2 §"Triplet Encoding": each point is a delta from the one before, so the
+                // running position is a sum over the whole contour. Accumulating in `i16`
+                // overflows on a font whose points drift past ±32767 (audit §3), so it is
+                // summed in `i32` and turned into coordinates at the end.
+                let (mut x, mut y) = (0i32, 0i32);
                 for n_points in (&mut points).take(n_contour as usize) {
                     // The flag stream and the glyph stream are separate, so a truncated font
                     // runs out of flags here — that must be an error, not a panic.
@@ -234,8 +272,10 @@ fn parse_glyf_t0(i: &[u8]) -> Result<Vec<Shape>, FontError> {
                                 "glyph stream: can't read a point triple: {:?}", e)))
                         };
                         let sign = |is_minus| if is_minus { -1 } else { 1 };
-                        x += sign(triplet.x_minus()) * (vx + triplet.dx() as i16);
-                        y += sign(triplet.y_minus()) * (vy + triplet.dy() as i16);
+                        let (step_x, step_y) = (i32::from(vx) + i32::from(triplet.dx()),
+                                                i32::from(vy) + i32::from(triplet.dy()));
+                        x += sign(triplet.x_minus()) * step_x;
+                        y += sign(triplet.y_minus()) * step_y;
 
                         contour_points.push((on_curve, Vector2F::new(x as f32, y as f32)));
                     }
