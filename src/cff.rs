@@ -588,21 +588,60 @@ impl<'a> CffSlot<'a> {
 /// Appendix A.3 uses for the standard strings map like this; an unrecognised word leaves the
 /// weight unknown instead of guessing.
 fn weight_class(weight: &str) -> Option<u16> {
-    weight
+    // CFF writes the weight loosely — "SemiBold", "Semi Bold", "Demi-Bold", "ExtraLight".
+    // Matching word by word read "Semi Bold" as 700 (the "bold" word) and "Extra Light" as
+    // 300, so the whole string is normalised first: spaces, hyphens and underscores
+    // stripped, lowercase, then matched against the table (audit C6).
+    let normalised: String = weight
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if normalised.is_empty() {
+        return None;
+    }
+    if let Some(class) = weight_word(&normalised) {
+        return Some(class);
+    }
+
+    let words: Vec<String> = weight
         .split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
-        .find_map(|word| match word.to_ascii_lowercase().as_str() {
-            "thin" | "hairline" => Some(100),
-            "extralight" | "ultralight" => Some(200),
-            "light" => Some(300),
-            "regular" | "normal" | "book" | "roman" => Some(400),
-            "medium" => Some(500),
-            "semibold" | "demibold" => Some(600),
-            "bold" => Some(700),
-            "extrabold" | "ultrabold" => Some(800),
-            "black" | "heavy" => Some(900),
-            _ => None,
-        })
+        .map(|word| word.to_ascii_lowercase())
+        .collect();
+    // "Extra Bold Italic": the modifier and the weight are still one weight, so adjacent
+    // words are tried joined before single words are looked at.
+    for pair in words.windows(2) {
+        let joined = format!("{}{}", pair[0], pair[1]);
+        if let Some(class) = weight_word(&joined) {
+            return Some(class);
+        }
+    }
+    // A single word decides only when every recognised word agrees: "Bold Italic" is bold,
+    // "Light Bold" is a contradiction the font has to resolve, not this function.
+    let mut classes = words.iter().filter_map(|word| weight_word(word));
+    let first = classes.next()?;
+    if classes.all(|class| class == first) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+/// The weight class of one already normalised word: lowercase, no separators.
+fn weight_word(word: &str) -> Option<u16> {
+    match word {
+        "thin" | "hairline" => Some(100),
+        "extralight" | "ultralight" => Some(200),
+        "light" => Some(300),
+        "regular" | "normal" | "book" | "roman" => Some(400),
+        "medium" => Some(500),
+        "semibold" | "demibold" => Some(600),
+        "bold" => Some(700),
+        "extrabold" | "ultrabold" => Some(800),
+        "black" | "heavy" | "extrablack" | "ultrablack" => Some(900),
+        _ => None,
+    }
 }
 
 fn dict(mut input: &[u8]) -> Result<HashMap<Operator, Vec<Value>>, FontError> {
@@ -1363,3 +1402,33 @@ static ISO_ADOBE_CHARSET: [SID; 228] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1
 static EXPERT_CHARSET: [SID; 165] = [1, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 13, 14, 15, 99, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 27, 28, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 109, 110, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 158, 155, 163, 319, 320, 321, 322, 323, 324, 325, 326, 150, 164, 169, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 347, 348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363, 364, 365, 366, 367, 368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378];
 
 static EXPERT_SUBSET_CHARSET: [SID; 86] =[1, 231, 232, 235, 236, 237, 238, 13, 14, 15, 99, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 27, 28, 249, 250, 251, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 109, 110, 267, 268, 269, 270, 272, 300, 301, 302, 305, 314, 315, 158, 155, 163, 320, 321, 322, 323, 324, 325, 326, 150, 164, 169, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346];
+
+#[cfg(test)]
+mod tests {
+    use super::weight_class;
+
+    #[test]
+    fn weight_class_reads_the_whole_string_first() {
+        // Audit C6: matching word by word read "Semi Bold" as 700 (the "bold" word) and
+        // "Extra Light" as 300 (the "light" word).
+        assert_eq!(weight_class("Semi Bold"), Some(600));
+        assert_eq!(weight_class("SemiBold"), Some(600));
+        assert_eq!(weight_class("Demi-Bold"), Some(600));
+        assert_eq!(weight_class("Extra Light"), Some(200));
+        assert_eq!(weight_class("UltraLight"), Some(200));
+        assert_eq!(weight_class("Extra Bold"), Some(800));
+        assert_eq!(weight_class("Ultra Black"), Some(900));
+        assert_eq!(weight_class("Regular"), Some(400));
+        assert_eq!(weight_class("Medium"), Some(500));
+    }
+
+    #[test]
+    fn weight_class_falls_back_to_words_only_when_they_agree() {
+        // A style word next to the weight still resolves; two contradicting weights do not.
+        assert_eq!(weight_class("Bold Italic"), Some(700));
+        assert_eq!(weight_class("Extra Bold Italic"), Some(800));
+        assert_eq!(weight_class("Light Bold"), None);
+        assert_eq!(weight_class("Condensed"), None);
+        assert_eq!(weight_class(""), None);
+    }
+}
