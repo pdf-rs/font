@@ -298,13 +298,15 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         i
                     }
                     22 => { // num1 num2 v1 v2 ifelse (12 22) v
-                        // TN5177 §4.4: `v1` when `num1 <= num2`, otherwise `v2`.
+                        // TN5177 §4.4: "if v1 <= v2 then num1 else num2". The two
+                        // values compared are the *top* pair and the two returned are
+                        // the values underneath them — the reverse of a C `? :`.
                         trace!("ifelse");
                         let v2 = s.pop()?.to_float();
                         let v1 = s.pop()?.to_float();
-                        let num2 = s.pop()?.to_float();
-                        let num1 = s.pop()?.to_float();
-                        s.push(if num1 <= num2 { v1 } else { v2 });
+                        let num2 = s.pop()?;
+                        let num1 = s.pop()?;
+                        s.push(if v1 <= v2 { num1 } else { num2 });
                         i
                     }
                     23 => { // random (12 23) num2

@@ -627,45 +627,46 @@ fn c28_type2_deprecated_logic_and_transient_operators() {
         push_int(slot, &mut cs);
         cs.extend_from_slice(&[12, 20]);
     }
-    // ifelse: 0 1 3 7 -> 3 (0 <= 1), 2 1 3 7 -> 7 (2 > 1)
-    for (num1, num2, slot) in [(0, 1, 6), (2, 1, 7)] {
-        push_int(num1, &mut cs);
-        push_int(num2, &mut cs);
-        push_int(3, &mut cs);
-        push_int(7, &mut cs);
+    // ifelse: `num1 num2 v1 v2 ifelse` -> num1 when v1 <= v2, else num2 (TN5177 §4.4).
+    // Like every CFF operator the *operands* are the two values compared, so the
+    // interesting part is that the comparison is on the top pair, not on the bottom one.
+    for (num1, num2, v1, v2, slot) in [(0, 1, 3, 7, 6), (2, 1, 7, 3, 7), (4, 5, 5, 5, 8)] {
+        for n in [num1, num2, v1, v2] {
+            push_int(n, &mut cs);
+        }
         cs.extend_from_slice(&[12, 22]);
         push_int(slot, &mut cs);
-        cs.extend_from_slice(&[12, 20]);
+        cs.extend_from_slice(&[12, 20]); // put
     }
 
-    // 0 0 rmoveto, then two rlineto segments built from the stored values.
+    // 0 0 rmoveto, then three rlineto segments built from the stored values.
     push_int(0, &mut cs);
     push_int(0, &mut cs);
     cs.push(21); // rmoveto
     push_int(0, &mut cs); // get t[0] -> 1
     cs.extend_from_slice(&[12, 21]);
-    push_int(6, &mut cs); // get t[6] -> 3
+    push_int(6, &mut cs); // get t[6] -> 0 (3 <= 7 -> num1)
     cs.extend_from_slice(&[12, 21]);
-    cs.push(5); // rlineto -> (1, 3)
+    cs.push(5); // rlineto -> (1, 0)
     push_int(4, &mut cs); // get t[4] -> 0 (not 1)
     cs.extend_from_slice(&[12, 21]);
     push_int(5, &mut cs); // get t[5] -> 1 (not 0)
     cs.extend_from_slice(&[12, 21]);
-    cs.push(5); // rlineto -> (1, 4)
-    push_int(3, &mut cs); // get t[3] -> 1
+    cs.push(5); // rlineto -> (1, 1)
+    push_int(7, &mut cs); // get t[7] -> 1 (7 > 3 -> num2)
     cs.extend_from_slice(&[12, 21]);
-    push_int(7, &mut cs); // get t[7] -> 7
+    push_int(8, &mut cs); // get t[8] -> 4 (5 <= 5 -> num1)
     cs.extend_from_slice(&[12, 21]);
-    cs.push(5); // rlineto -> (2, 11)
+    cs.push(5); // rlineto -> (2, 5)
     cs.push(14); // endchar
 
     let data = build_cff(&[14], &cs);
     let glyph = glyph(&data, 1);
     assert_eq!(
         points(&glyph),
-        vec![(0.0, 0.0), (1.0, 3.0), (1.0, 4.0), (2.0, 11.0)],
+        vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (2.0, 5.0)],
         "and 1,1 = 1, and 1,0 = 0, or 0,0 = 0, or 0,1 = 1, not 1 = 0, not 0 = 1, \
-         ifelse(0,1,3,7) = 3, ifelse(2,1,3,7) = 7"
+         ifelse(0,1,3,7) = 0, ifelse(2,1,7,3) = 1, ifelse(4,5,5,5) = 4"
     );
 }
 
