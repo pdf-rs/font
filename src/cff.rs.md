@@ -28,7 +28,7 @@
 
 ## What it does
 * `read_cff`: header (major=1, hdrSize, offSize), the four leading INDEXes (Name, TopDICT,
-  String, GlobalSubr).
+  String, GlobalSubr); the Name INDEX (font name) is kept for `CffFont::name()`.
 * `Cff::slot(idx)`: one TopDICT → `CharStrings` INDEX, `Private`/`Subrs`, `FDArray`/`FDSelect`
   for CID fonts, `FontMatrix` (default `0.001`), per-glyph Private DICT + local Subrs.
 * `CffSlot::outlines()`: runs each charstring (Type 1 or Type 2 dialect per
@@ -45,9 +45,13 @@ The SID tables (`STANDARD_STRINGS`, `ISO_ADOBE_CHARSET`, `EXPERT_CHARSET`,
 
 ## Differences from the specifications
 * **F35:** `require_eq!(major, 1)` (`:105`) — CFF2 (variable fonts) is rejected.
-* **F42 (TN5176 §"Name INDEX"):** the Name INDEX is parsed and thrown away, so `CffFont::name()`
-  is `Name::default()` and `info.weight` is always `None` (**F47**) — a bare CFF font reports no
-  name at all.
+* **F47 (TN5176 §"Name INDEX", §"Top DICT") — fixed 2026-11-03:** `CffFont::name()` was
+  `Name::default()` and `info.weight` always `None`, although the data was parsed. `read_cff` now
+  keeps the Name INDEX (index 0 = the PostScript name) and `parse_font` resolves the Top DICT's
+  `FamilyName`/`FullName`/`Weight` SIDs through the String INDEX. `Weight` is a *string*
+  ("SemiBold") and `weight_class` maps the TN5176 A.3 words to the numeric OS/2 class (an
+  unrecognised word stays `None`, nothing is guessed). Without a `FamilyName` the head of the font
+  name (before `-`) is the family. Tests `c47`, `c47b`.
 * **F22/F23:** (fixed above) `Private` was treated as mandatory, the charstring/charset paths
   used `panic!` for anything unexpected, and `index()` underflowed on an offset of 0.
 * **F42 (TN5177/TN5176 §"Charstring width"):** width derivation is right — `(Some(w), None)` uses

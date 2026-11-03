@@ -144,6 +144,45 @@ fn build_cff(cs0: &[u8], cs1: &[u8]) -> Vec<u8> {
     build_cff_full(&[], true, None, cs0, cs1)
 }
 
+/// `build_cff`, but the String INDEX holds `strings` (SID `391 + i`, the first one after the
+/// 391 standard strings), so `extra_top_dict` can name SIDs that only exist in this font.
+fn build_cff_with_strings(extra_top_dict: &[u8], strings: &[&[u8]]) -> Vec<u8> {
+    let name_index = index(&[b"Test".as_ref()]);
+    let string_index = index(strings);
+    let empty = index(&[]);
+    let charstrings = index(&[&[14u8][..], &[14u8][..]]); // two `endchar`-only glyphs
+
+    // The CharStrings operand is an absolute offset, its own encoding length depends on its
+    // value: encode, measure, repeat.
+    let mut cs_offset = 0i32;
+    let mut top_dict = Vec::new();
+    let mut top_dict_index = Vec::new();
+    for _ in 0..8 {
+        top_dict.clear();
+        top_dict.extend_from_slice(extra_top_dict);
+        push_int(cs_offset, &mut top_dict);
+        top_dict.push(17); // Operator::CharStrings
+        top_dict_index = index(&[top_dict.as_slice()]);
+        let base = (4 + name_index.len()
+            + top_dict_index.len()
+            + string_index.len()
+            + empty.len()) as i32;
+        let stable = base == cs_offset;
+        cs_offset = base;
+        if stable {
+            break;
+        }
+    }
+
+    let mut data = vec![1, 0, 4, 1]; // major, minor, hdrSize, offSize
+    data.extend_from_slice(&name_index);
+    data.extend_from_slice(&top_dict_index);
+    data.extend_from_slice(&string_index);
+    data.extend_from_slice(&empty); // GlobalSubr INDEX
+    data.extend_from_slice(&charstrings);
+    data
+}
+
 fn glyph(data: &[u8], gid: u32) -> Glyph {
     let font = CffFont::parse(data, 0).expect("font parses");
     font.glyph(GlyphId(gid)).expect("glyph exists")
@@ -727,4 +766,39 @@ fn c17b_zero_char_strings_does_not_panic() {
     // the guarantee it relies on rather than a panic.
     let data = build_cff_glyphs(&[], true, None, &[]);
     assert!(CffFont::parse(&data, 0).is_err(), "a font without .notdef is rejected");
+}
+
+#[test]
+fn c47_cff_name_and_weight_come_from_the_name_index_and_top_dict() {
+    // F47: the Name INDEX and the Top DICT's FamilyName/FullName/Weight were parsed and
+    // thrown away, so a bare CFF font reported no name and no weight at all.
+    let mut top_dict = Vec::new();
+    for (sid, op) in [(391, 3), (392, 4), (393, 2)] {
+        // FamilyName, Weight, FullName
+        push_int(sid, &mut top_dict);
+        top_dict.push(op);
+    }
+    let strings: &[&[u8]] = &[b"Helvetia", b"SemiBold", b"Helvetia SemiBold"];
+    let data = build_cff_with_strings(&top_dict, strings);
+    let font = CffFont::parse(&data, 0).expect("font parses");
+
+    let name = font.name();
+    assert_eq!(name.family.as_deref(), Some("Helvetia"), "FamilyName SID 391");
+    assert_eq!(name.full_name.as_deref(), Some("Helvetia SemiBold"), "FullName SID 393");
+    assert_eq!(name.postscript_name.as_deref(), Some("Test"), "the Name INDEX entry");
+    assert_eq!(font.info().weight, Some(600), "\"SemiBold\" is weight class 600");
+}
+
+#[test]
+fn c47b_cff_without_a_family_name_falls_back_to_the_font_name() {
+    // A bare CFF font need not carry FamilyName/Weight; the Name INDEX still gives the
+    // PostScript name, and nothing is invented where the Top DICT has no entry.
+    let data = build_cff(&[14], &[14]);
+    let font = CffFont::parse(&data, 0).expect("font parses");
+
+    let name = font.name();
+    assert_eq!(name.postscript_name.as_deref(), Some("Test"));
+    assert_eq!(name.family.as_deref(), Some("Test"), "font name before the '-' separator");
+    assert_eq!(name.full_name, None);
+    assert_eq!(font.info().weight, None);
 }

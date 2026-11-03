@@ -113,13 +113,16 @@ pub fn read_cff(data: &[u8]) -> Result<Cff, FontError> {
     require!(hdrSize >= 4);
     let (i, _) = take(hdrSize - 4)(i)?;
     
-    let (i, _name_index) = index(i)?;
+    // TN5176 §"Name INDEX": index 0 holds the font name (the PostScript name); kept for
+    // `CffFont::name()`, it used to be parsed and discarded (F47).
+    let (i, name_index) = index(i)?;
     let (i, dict_index) = index(i)?;
     let (i, string_index) = index(i)?;
     let (i, subroutines) = index(i)?;
     
     Ok(Cff {
         data,
+        name_index,
         dict_index,
         string_index,
         subroutines
@@ -139,6 +142,7 @@ type Index<'a> = Vec<&'a [u8]>;
 
 pub struct Cff<'a> {
     data: &'a [u8],
+    name_index: Index<'a>,
     dict_index: Index<'a>,
     string_index:Index<'a>,
     subroutines: Index<'a>,
@@ -535,6 +539,30 @@ impl<'a> CffSlot<'a> {
         }
         //info!("unicode_map: {:?}", unicode_map);
         
+        // TN5176 §"Name INDEX" / §"Top DICT": the Name INDEX holds the font name, and
+        // `FamilyName` / `FullName` / `Weight` in the Top DICT are SIDs into the String INDEX.
+        // All of it used to be dropped, leaving `Name::default()` and `info.weight == None`
+        // even though the data was right there (F47).
+        let font_name = self.cff.name_index.first()
+            .and_then(|data| std::str::from_utf8(data).ok())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        let dict_sid_string = |op: &Operator| -> Option<String> {
+            let value = *self.top_dict.get(op)?.first()?;
+            let sid = value.to_int().ok().filter(|&sid| sid >= 0)? as SID;
+            glyph_name(sid).ok().filter(|s| !s.is_empty()).map(str::to_owned)
+        };
+        // A bare CFF font need not carry `FamilyName`; the font name is `Family-Style` by
+        // convention (TN5176 §"Name INDEX"), so its head is a usable family fallback.
+        let name = Name {
+            family: dict_sid_string(&Operator::FamilyName)
+                .or_else(|| font_name.as_deref().map(|n| n.split('-').next().unwrap_or(n).to_owned())),
+            subfamily: None,
+            postscript_name: font_name,
+            full_name: dict_sid_string(&Operator::FullName),
+        };
+        let weight = dict_sid_string(&Operator::Weight).as_deref().and_then(weight_class);
+
         Ok(CffFont {
             glyphs,
             font_matrix: self.font_matrix(),
@@ -544,15 +572,37 @@ impl<'a> CffSlot<'a> {
             encoding,
             bbox: self.bbox(),
             vmetrics: None,
-            name: Name::default(),
+            name,
             info: Info {
-                weight: None,
+                weight,
                 .. Info::default()
             },
             sid_map,
             cid: self.top_dict.contains_key(&Operator::ROS)
         })
     }
+}
+
+/// CFF `Weight` (Top DICT op 4) is a *string* SID — "SemiBold", "UltraLight" — while
+/// `Info::weight` is the numeric class of OT §OS/2 `usWeightClass`. The words TN5176
+/// Appendix A.3 uses for the standard strings map like this; an unrecognised word leaves the
+/// weight unknown instead of guessing.
+fn weight_class(weight: &str) -> Option<u16> {
+    weight
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .find_map(|word| match word.to_ascii_lowercase().as_str() {
+            "thin" | "hairline" => Some(100),
+            "extralight" | "ultralight" => Some(200),
+            "light" => Some(300),
+            "regular" | "normal" | "book" | "roman" => Some(400),
+            "medium" => Some(500),
+            "semibold" | "demibold" => Some(600),
+            "bold" => Some(700),
+            "extrabold" | "ultrabold" => Some(800),
+            "black" | "heavy" => Some(900),
+            _ => None,
+        })
 }
 
 fn dict(mut input: &[u8]) -> Result<HashMap<Operator, Vec<Value>>, FontError> {
