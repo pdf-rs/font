@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use nom::{
     bytes::complete::{take},
     number::complete::{be_i16, be_u16, be_u32},
@@ -54,12 +54,42 @@ enum PosSubtable {
     Context(Context),
 }
 
-/// The two halves of pair positioning: explicit glyph pairs (format 1) and the class matrix
-/// (format 2). The class definitions themselves live in the `KernTable`.
+/// One pair positioning subtable: explicit glyph pairs (format 1) or a class matrix (format 2).
+///
+/// The class definitions belong to their subtable, not to the `GPOS` table: two class-pair
+/// subtables of the same font can assign a glyph entirely different classes, and the flat
+/// `KernTable` that `Font::kerning` reads has room for only one of them, so the classes are
+/// kept here and `KernTable` is filled for that accessor alone.
 #[derive(Debug, Clone, Default)]
 struct PairSets {
     pairs: HashMap<(u16, u16), (ValueRecord, ValueRecord)>,
     class_pairs: HashMap<(u16, u16), (ValueRecord, ValueRecord)>,
+    /// Format 2 only: the glyphs that may start a pair (OT §"Pair Adjustment" — the coverage
+    /// table is consulted even though the classes decide which value applies).
+    coverage: HashSet<u16>,
+    /// Whether this is a format 2 subtable at all; a format 1 subtable has no classes and no
+    /// coverage, and a pair it does not list simply does not exist.
+    class_based: bool,
+    left_classes: HashMap<u16, u16>,
+    right_classes: HashMap<u16, u16>,
+}
+
+impl PairSets {
+    /// The value records of `left` followed by `right` in this subtable, or `None` if it has
+    /// nothing to say about the pair.
+    fn lookup(&self, left: u16, right: u16) -> Option<(ValueRecord, ValueRecord)> {
+        if let Some(pair) = self.pairs.get(&(left, right)) {
+            return Some(pair.clone());
+        }
+        if !self.class_based || !self.coverage.contains(&left) {
+            return None;
+        }
+        // A glyph the subtable's ClassDefs do not mention is class 0, which has its own row
+        // and column in the matrix.
+        let left_class = self.left_classes.get(&left).copied().unwrap_or(0);
+        let right_class = self.right_classes.get(&right).copied().unwrap_or(0);
+        self.class_pairs.get(&(left_class, right_class)).cloned()
+    }
 }
 
 impl GPos {
@@ -113,25 +143,27 @@ impl GPos {
             _ => None,
         })
     }
-    /// OT §GPOS "Pair Adjustment": both value records of `left` followed by `right` — the
-    /// glyph pairs first, then the class pair the two glyphs fall into.
+    /// OT §GPOS "Pair Adjustment": both value records of `left` followed by `right`. The
+    /// subtables are tried in lookup order, each with its own coverage and classes.
     pub fn get_pair(&self, left: GlyphId, right: GlyphId) -> Option<(ValueRecord, ValueRecord)> {
         let left_key = glyph_key(left)?;
         let right_key = glyph_key(right)?;
-        let classes = self.kern.left_classes.get(&left_key)
-            .and_then(|left_class| self.kern.right_classes.get(&right_key).map(|right_class| (*left_class, *right_class)));
-        let mut class_pair = None;
-        for subtable in self.subtables() {
-            if let PosSubtable::Pair(sets) = subtable {
-                if let Some(pair) = sets.pairs.get(&(left_key, right_key)) {
-                    return Some(pair.clone());
-                }
-                if class_pair.is_none() {
-                    class_pair = classes.and_then(|classes| sets.class_pairs.get(&classes).cloned());
-                }
-            }
+        self.subtables().find_map(|subtable| match subtable {
+            PosSubtable::Pair(sets) => sets.lookup(left_key, right_key),
+            _ => None,
+        })
+    }
+
+    /// The advance `left` gets when followed by `right`, which is what `Font::kerning` reports:
+    /// the pair subtables first, then the flat `kern`-table maps.
+    pub fn kerning(&self, left: GlyphId, right: GlyphId) -> Option<i16> {
+        if let Some((first, _second)) = self.get_pair(left, right) {
+            return Some(first.x_advance);
         }
-        class_pair
+        match (glyph_key(left), glyph_key(right)) {
+            (Some(left), Some(right)) => self.kern.get(left, right),
+            _ => None,
+        }
     }
 
     /// Applies the positioning of the default language system whose feature tag `enabled`
@@ -209,16 +241,9 @@ impl GPos {
             Some(glyph) => glyph,
             None => return false,
         };
-        let (first_value, second_value) = match sets.pairs.get(&(glyph, second)) {
-            Some(pair) => pair.clone(),
-            None => {
-                let classes = self.kern.left_classes.get(&glyph)
-                    .and_then(|left_class| self.kern.right_classes.get(&second).map(|right_class| (*left_class, *right_class)));
-                match classes.and_then(|classes| sets.class_pairs.get(&classes)) {
-                    Some(pair) => pair.clone(),
-                    None => return false,
-                }
-            }
+        let (first_value, second_value) = match sets.lookup(glyph, second) {
+            Some(pair) => pair,
+            None => return false,
         };
         add(positions, position, &first_value);
         add(positions, second_index, &second_value);
@@ -448,6 +473,25 @@ fn value_record(flags: u16) -> impl Fn(&[u8]) -> R<ValueRecord> {
     }
 }
 
+/// Reads one `ClassDef` of a pair adjustment subtable into `classes`. An offset of 0 means the
+/// subtable has no class definition at all — every glyph is then class 0 — and an unreadable
+/// one costs the classes, not the rest of the table.
+fn parse_optional_class_def(data: &[u8], class_def_offset: u16, classes: &mut HashMap<u16, u16>, name: &str) {
+    let class_def = match Offset(class_def_offset).of_opt(data) {
+        Some(class_def) => class_def,
+        None => {
+            if class_def_offset != 0 {
+                warn!("GPOS pair adjustment: unreadable {} offset {}", name, class_def_offset);
+            }
+            return;
+        }
+    };
+    if let Err(err) = parse_class_def(class_def, classes) {
+        warn!("GPOS pair adjustment: {} is unreadable: {:?}", name, err);
+        classes.clear();
+    }
+}
+
 /// OT §GPOS "Pair Adjustment" (lookup type 2), formats 1 and 2. Fills the flat `i16` maps that
 /// `Font::kerning` uses side by side with the value records, which keep the placements the
 /// advance-only maps cannot hold.
@@ -479,7 +523,7 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<PairSets
             }
         },
         2 => {
-            let (i, _coverage_off) = be_u16(i)?;
+            let (i, coverage_off) = offset(i)?;
             let (i, value_format_1) = be_u16(i)?;
             let (i, value_format_2) = be_u16(i)?;
             let (i, class_def_1_offset) = be_u16(i)?;
@@ -487,10 +531,30 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<PairSets
             let (i, class_1_count) = be_u16(i)?;
             let (i, class_2_count) = be_u16(i)?;
 
-            // The class matrix is indexed by the two ClassDefs; without them no glyph ever gets a
-            // class and `KernTable::get` can never reach `class_pairs`.
-            parse_class_def(Offset(class_def_1_offset).of(data)?, &mut gpos.kern.left_classes)?;
-            parse_class_def(Offset(class_def_2_offset).of(data)?, &mut gpos.kern.right_classes)?;
+            pairs.class_based = true;
+            // OT §GPOS "Pair Adjustment" format 2: the coverage lists the glyphs that may start
+            // a pair. It is not optional — a glyph it does not list has no pair here, however
+            // the ClassDefs classify it.
+            match coverage_off.of(data) {
+                Ok(coverage) => pairs.coverage = coverage_table(coverage)?.collect(),
+                Err(_) => warn!("GPOS pair adjustment: unreadable coverage offset {}", coverage_off.0),
+            }
+
+            // The class definitions are subtable-local: a second class-pair subtable may put the
+            // same glyphs into entirely different classes. An offset of 0 means "no glyph in
+            // that class definition", i.e. every glyph is class 0 — the default row and column
+            // of the matrix — not a broken subtable.
+            parse_optional_class_def(data, class_def_1_offset, &mut pairs.left_classes, "ClassDef1");
+            parse_optional_class_def(data, class_def_2_offset, &mut pairs.right_classes, "ClassDef2");
+
+            // The flat maps `Font::kerning` reads keep one table's view of the classes; the
+            // first definition wins so a later subtable cannot silently change an earlier one.
+            for (&glyph, &class) in &pairs.left_classes {
+                gpos.kern.left_classes.entry(glyph).or_insert(class);
+            }
+            for (&glyph, &class) in &pairs.right_classes {
+                gpos.kern.right_classes.entry(glyph).or_insert(class);
+            }
 
 
             // `class_1_count * class_2_count` overflows u16 (300 x 300 classes is a panic in
@@ -751,19 +815,105 @@ mod tests {
     fn pair_adjustment_with_huge_class_matrix_does_not_overflow() {
         // `class1Count * class2Count` in u16 overflowed for 300 x 300 classes. The value
         // formats are 0, so the matrix carries no data at all.
-        let words: [u16; 14] = [
-            2, 0,                 // PairPos format 2, coverage offset (unused)
+        let words: [u16; 17] = [
+            2, 28,                // PairPos format 2, coverageOffset
             0, 0,                 // valueFormat1, valueFormat2
             16, 22,               // classDef1Offset, classDef2Offset
             300, 300,             // class1Count, class2Count
             1, 0, 0,              // classDef1: format 1, startGlyph 0, glyphCount 0
             1, 0, 0,              // classDef2
+            1, 1, 20,             // coverage: format 1, glyphCount 1, glyph 20
         ];
         let data = words_to_bytes(&words);
         let mut gpos = GPos::default();
         let pairs = parse_pair_adjustment(&data, &mut gpos).expect("pair adjustment parses");
         assert!(gpos.kern.class_pairs.is_empty());
         assert!(pairs.class_pairs.is_empty());
+        // Glyph 20 is covered but no class pair of the empty matrix applies.
+        assert!(pairs.lookup(20, 21).is_none());
+    }
+
+    fn c2_subtable_first() -> Vec<u8> {
+        let words: [u16; 23] = [
+            2, 40,                // format 2, coverageOffset
+            4, 0,                 // valueFormat1 = X_ADVANCE, valueFormat2
+            24, 32,               // classDef1Offset, classDef2Offset
+            2, 2,                 // class1Count, class2Count
+            0, 0, 0, (-40i16) as u16, // matrix [0][0] [0][1] [1][0] [1][1]
+            1, 20, 1, 1,          // classDef1: glyph 20 -> class 1
+            1, 21, 1, 1,          // classDef2: glyph 21 -> class 1
+            1, 1, 20,             // coverage: glyph 20
+        ];
+        words_to_bytes(&words)
+    }
+
+    fn c2_subtable_second() -> Vec<u8> {
+        let words: [u16; 24] = [
+            2, 40,                // format 2, coverageOffset
+            4, 0,                 // valueFormat1 = X_ADVANCE, valueFormat2
+            24, 32,               // classDef1Offset, classDef2Offset
+            2, 2,                 // class1Count, class2Count
+            0, (-3i16) as u16, 0, 0, // matrix [0][0] [0][1] [1][0] [1][1]
+            1, 30, 1, 1,          // classDef1: glyph 30 -> class 1, glyph 20 -> class 0
+            1, 21, 1, 1,          // classDef2: glyph 21 -> class 1
+            1, 2, 20, 30,         // coverage: glyphs 20 and 30
+        ];
+        words_to_bytes(&words)
+    }
+
+    #[test]
+    fn class_pairs_are_local_to_their_subtable() {
+        // Audit C2: two class-pair subtables of one lookup. Both cover glyph 20 and both
+        // classify glyph 21 as class 1, but the first puts glyph 20 in class 1 (cell -40) and
+        // the second leaves it in class 0 (cell -3). Classes are subtable-local, so the second
+        // subtable must not inherit the first one's ClassDef1.
+        let first = c2_subtable_first();
+        let second = c2_subtable_second();
+
+        let mut gpos = GPos::default();
+        let one = parse_pair_adjustment(&first, &mut gpos).expect("first subtable");
+        let two = parse_pair_adjustment(&second, &mut gpos).expect("second subtable");
+
+        assert_eq!(one.lookup(20, 21).map(|(a, _)| a.x_advance), Some(-40));
+        // Classes (0, 1) here: with the first subtable's ClassDef1 merged in this was (1, 1).
+        assert_eq!(two.lookup(20, 21).map(|(a, _)| a.x_advance), Some(-3));
+        assert_eq!(two.lookup(30, 21), None);
+    }
+
+    #[test]
+    fn class_zero_kerns_and_uncovered_glyphs_do_not() {
+        // A glyph absent from both class definitions is class 0, which is a perfectly good
+        // class; a glyph outside the subtable's coverage never matches.
+        let words: [u16; 24] = [
+            2, 40,                // format 2, coverageOffset
+            4, 0,                 // valueFormat1 = X_ADVANCE, valueFormat2
+            24, 32,               // classDef1Offset, classDef2Offset
+            2, 2,                 // class1Count, class2Count
+            (-9i16) as u16, 0, 0, 0, // matrix: [0][0] = -9, the rest 0
+            1, 20, 1, 1,          // classDef1: glyph 20 -> class 1
+            1, 21, 1, 1,          // classDef2: glyph 21 -> class 1
+            1, 2, 20, 30,         // coverage: glyphs 20 and 30
+        ];
+        let mut gpos = GPos::default();
+        let pairs = parse_pair_adjustment(&words_to_bytes(&words), &mut gpos).expect("parses");
+
+        // Glyph 30 is covered but in neither class definition: classes (0, 0), cell -9.
+        assert_eq!(pairs.lookup(30, 31).map(|(a, _)| a.x_advance), Some(-9));
+        // Glyph 40 is not covered by the subtable, so nothing applies to it.
+        assert!(pairs.lookup(40, 31).is_none());
+
+        // And a subtable that leaves both class definitions out: every glyph is class 0.
+        let no_class_defs: [u16; 12] = [
+            2, 18,                // format 2, coverageOffset
+            4, 0,                 // valueFormat1 = X_ADVANCE, valueFormat2
+            0, 0,                 // classDef1Offset, classDef2Offset: both absent
+            1, 1,                 // class1Count, class2Count
+            (-5i16) as u16,       // matrix: [0][0] = -5
+            1, 1, 40,             // coverage: glyph 40
+        ];
+        let mut gpos = GPos::default();
+        let pairs = parse_pair_adjustment(&words_to_bytes(&no_class_defs), &mut gpos).expect("parses");
+        assert_eq!(pairs.lookup(40, 41).map(|(a, _)| a.x_advance), Some(-5));
     }
 
     #[test]

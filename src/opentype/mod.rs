@@ -257,7 +257,7 @@ impl Font for OpenTypeFont {
         self.vmetrics
     }
     fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
-        self.gpos.as_ref().and_then(|gpos| gpos.kern.get(left.0 as u16, right.0 as u16).map(|k| k as f32)).unwrap_or(0.0)
+        self.gpos.as_ref().and_then(|gpos| gpos.kerning(left, right)).map(|k| k as f32).unwrap_or(0.0)
     }
     fn substitute(&self, glyphs: &[GlyphId], features: &[&[u8; 4]]) -> Vec<GlyphId> {
         match self.gsub.as_ref() {
