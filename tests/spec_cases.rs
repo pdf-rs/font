@@ -957,6 +957,25 @@ fn c25b_hhea_metrics_without_use_typo_metrics() {
     );
 }
 
+#[test]
+fn c25c_os2_truncated_inside_the_codepage_ranges_has_no_heights() {
+    // Audit C7: the version 1 tail was only stepped over when all eight bytes were
+    // present, so a table cut inside `ulCodePageRange1` had those four bytes read as
+    // `sxHeight`/`sCapHeight` (0 and 256 from the range bits).
+    let mut data = os2_table(0, (900, -300, 120), 500, 700);
+    data.truncate(82); // 78-byte prefix + half of `ulCodePageRange1`
+    let (glyf, loca) = glyf_and_loca(&[Vec::new(), Vec::new()]);
+    let mut tables = base_tables(2);
+    tables.push((*b"loca", loca));
+    tables.push((*b"glyf", glyf));
+    tables.push((*b"OS/2", data));
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("font parses");
+    assert_eq!(font.info().x_height, None);
+    assert_eq!(font.info().cap_height, None);
+    // The fixed prefix is still read.
+    assert_eq!(font.info().weight, Some(400));
+}
+
 // ---------------------------- F16: vhea version fields ----------------------------
 
 /// `vhea` (OT §vhea), 36 bytes: two `u16` versions, ascent/descent/lineGap, then the

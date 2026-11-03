@@ -85,8 +85,11 @@ pub fn parse_os2(data: &[u8]) -> Result<Os2, FontError> {
 
     // The tails are optional in practice, so they are read off the raw slice.
     let mut tail = i;
-    if version >= 1 && tail.len() >= 8 {
-        tail = &tail[8..]; // ulCodePageRange1, ulCodePageRange2
+    if version >= 1 {
+        // ulCodePageRange1, ulCodePageRange2. Either all eight bytes are there or the
+        // table stops inside them: a partial tail must not shift `sxHeight` onto the
+        // code-page bits (audit C7).
+        tail = tail.get(8..).unwrap_or_default();
     }
     let (mut x_height, mut cap_height) = (None, None);
     if version >= 2 && tail.len() >= 4 {
