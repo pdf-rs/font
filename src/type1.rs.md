@@ -17,6 +17,14 @@
   empty PS stack returns an error instead of `.expect("PS stack is empty")`, and a PFB block type
   other than 1/2/3 is an error instead of `panic!("unknown block type")` (`:250`).
   Tests: `tests/type1_cases.rs` `c20`/`c20b`/`c20c`/`c21`/`c22`.
+* **F40 (2026-11-03):** Type 1 flex works. `rrcurveto`, `hvcurveto` and `vhcurveto` now feed
+  their control points and endpoint into `State::flex_sequence` while a flex is open (new
+  `push_curve`), so the seven points (`reference, c1, c2, join, c3, c4, end`) are complete at
+  `flexheight x y 3 0 callothersubr`; the flex end draws the reference point and the two cubics,
+  pushes `(y, x)` for the trailing `pop pop setcurrentpoint`, and only warns when the sequence has
+  the wrong length or is missing (previously the glyph was dropped). Flex start accepts otherSubr
+  1 or 2 with no arguments, flex end otherSubr 0 or 1 with three. `callothersubr` also warns
+  instead of underflowing when `n` exceeds the stack. Test: `tests/type1_cases.rs` `c24`.
 
 ## What it does
 `Type1Font::from_vm` pulls `FontName`, `FontInfo/FullName`, `Weight`, `FontMatrix`, `FontBBox`,
@@ -34,10 +42,10 @@ The interpreter covers the Type 1 path operators (`hsbw`, `hstem`/`vstem`, `vmov
 * ~~**F10 (T1 §6, "Standard Encoding Accented Character"):**~~ `seac` used to clear the stack and
   do nothing, so every accented composite glyph rendered empty — composed in `from_vm` now (see
   "Fixed" above).
-* **F40:** the flex mechanism (`callothersubr` 1 → `callothersubr` 0, `:396-420`) can never
-  work: the 7-point sequence is only appended to by `rmoveto` (`:481-495`), while the curve
-  operators never push into `s.flex_sequence`, so `TupleElements::from_iter` on the 7-tuple fails
-  and the glyph is dropped (`:139-142` warns and `continue`s).
+* ~~**F40:**~~ the flex mechanism used to never work: the 7-point sequence was only appended to
+  by `rmoveto`, while the curve operators never pushed into `s.flex_sequence`, so
+  `TupleElements::from_iter` failed and the glyph was dropped (drawn by `push_curve` now, see
+  "Fixed" above).
 * **F24:** (fixed above) `/Encoding` had to be an array.
 * **F41:** `lenIV` is cast with `as usize`; `lenIV = -1` ("charstrings are not encrypted", legal)
   becomes a gigantic skip. Values > the charstring length silently produce an empty glyph.

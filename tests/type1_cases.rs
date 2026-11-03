@@ -218,6 +218,68 @@ fn seac(adx: i32, ady: i32, base: i32, accent: i32) -> Vec<u8> {
     cs
 }
 
+// ---------------------------- flex (F40)
+
+/// A charstring drawing a 100 unit wide flex: `rmoveto` to the reference point, two
+/// `rrcurveto`, then `flexheight x y 3 0 callothersubr` and `pop pop setcurrentpoint`.
+fn flex_glyph() -> Vec<u8> {
+    let mut cs = HSBW.to_vec(); // hsbw 0 500
+    num(&mut cs, 0); // n = 0
+    num(&mut cs, 1); // otherSubr 1: flex start
+    cs.extend_from_slice(&[12, 16]);
+    num(&mut cs, 10); // rmoveto, reference point (10, 10)
+    num(&mut cs, 10);
+    cs.push(21);
+    for &d in &[0, 50, 50, 50, 40, 0] { // first curve, ends (100, 110)
+        num(&mut cs, d);
+    }
+    cs.push(8); // rrcurveto
+    for &d in &[10, -50, 40, -50, 0, 0] { // second curve, ends (150, 10)
+        num(&mut cs, d);
+    }
+    cs.push(8); // rrcurveto
+    num(&mut cs, 10); // flex height
+    num(&mut cs, 150); // final x
+    num(&mut cs, 10); // final y
+    num(&mut cs, 3); // n = 3
+    num(&mut cs, 0); // otherSubr 0: flex end
+    cs.extend_from_slice(&[12, 16]);
+    cs.extend_from_slice(&[12, 17, 12, 17, 12, 33]); // pop pop setcurrentpoint
+    cs.push(14); // endchar
+    cs
+}
+
+#[test]
+fn c24_type1_flex_draws_two_cubics() {
+    // F40: only `rmoveto` fed the flex sequence, so the seven points were never
+    // complete and the glyph was dropped (`TupleElements` failed).
+    let data = pfa(
+        &[(".notdef", &notdef()), ("flex", &flex_glyph())],
+        Some("{/.notdef /flex}"),
+    );
+    let font = parse(&data);
+    let gid = font.gid_for_name("flex").expect("glyph flex");
+    let glyph = font.glyph(gid).unwrap();
+
+    assert_eq!(glyph.metrics.advance, 500.0);
+    let contours = glyph.path.contours();
+    assert_eq!(contours.len(), 1);
+    let points = contours[0].points();
+    let expected = [
+        (10., 10.),   // reference point, the start of the flex
+        (10., 60.),   // first control point
+        (60., 110.),  // second control point
+        (100., 110.), // joining point
+        (110., 60.),  // third control point
+        (150., 10.),  // fourth control point
+        (150., 10.),  // end point
+    ];
+    assert_eq!(points.len(), expected.len(), "{:?}", points);
+    for (p, &(x, y)) in points.iter().zip(expected.iter()) {
+        assert_eq!((p.x(), p.y()), (x, y));
+    }
+}
+
 #[test]
 fn c23_type1_seac_composes_the_accent() {
     // F10: `seac` was a no-op, so every accented Type 1 glyph came out empty.

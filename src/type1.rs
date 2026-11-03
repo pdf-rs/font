@@ -321,6 +321,20 @@ fn parse_pfb(mut vm: &mut Vm, i: &[u8]) -> Result<(), FontError> {
     
     Ok(())
 }
+/// Append one cubic Bézier to the contour — or, while a Type 1 flex sequence is open,
+/// to the list of flex points (T1 §6, F40). The flex machinery in `callothersubr`
+/// needs the control points, not just the endpoints.
+#[inline]
+fn push_curve(s: &mut State, c1: Vector2F, c2: Vector2F, p: Vector2F) {
+    if let Some(points) = s.flex_sequence.as_mut() {
+        points.push(c1);
+        points.push(c2);
+        points.push(p);
+    } else {
+        s.contour.push_cubic(c1, c2, p);
+    }
+}
+
 pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State) -> Result<(), FontError>
     where T: TryIndex + 'a, U: TryIndex + 'a
 {
@@ -378,7 +392,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let c1 = s.current + v(s.stack[0], s.stack[1]);
                 let c2 = c1 + v(s.stack[2], s.stack[3]);
                 let p = c2 + v(s.stack[4], s.stack[5]);
-                s.contour.push_cubic(c1, c2, p);
+                push_curve(s, c1, c2, p);
                 s.stack.clear();
                 s.current = p;
             }
@@ -454,9 +468,9 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         trace!("callothersubr {}", subr_nr);
                         let n = s.pop()?.to_int()? as usize;
                         
-                        match subr_nr {
-                            1 => {
-                                require_eq!(n, 0);
+                        match (subr_nr, n) {
+                            // flex start: `1 0 callothersubr` (T1 §6)
+                            (1, 0) | (2, 0) => {
                                 s.flex_sequence = Some(Vec::with_capacity(7));
                                 
                                 // first moveto: referece point
@@ -468,30 +482,48 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                                 // endpoint of second curve
                                 // (flex height, final x, final y) 0 callsubr
                             }
-                            2 => {
-                                require_eq!(n, 0);
+                            // flex end: `flexheight x y 3 0 callothersubr`
+                            (0, 3) | (1, 3) => {
+                                if s.stack.len() < 3 {
+                                    warn!("flex end with {} operands, expected flexheight and a point", s.stack.len());
+                                    s.stack.clear();
+                                } else {
+                                    let y = s.pop()?;
+                                    let x = s.pop()?;
+                                    let _flex_height = s.pop()?;
+                                    match s.flex_sequence.take() {
+                                        Some(points) if points.len() == 7 => {
+                                            // reference point, c1, c2, join, c3, c4, end
+                                            s.contour.push_endpoint(points[0]);
+                                            s.contour.push_cubic(points[1], points[2], points[3]);
+                                            s.contour.push_cubic(points[4], points[5], points[6]);
+                                            s.current = points[6];
+                                        }
+                                        Some(points) => {
+                                            warn!("flex sequence has {} points, expected 7", points.len());
+                                        }
+                                        None => {
+                                            warn!("flex end without a flex sequence");
+                                        }
+                                    }
+                                    // the charstring continues with `pop pop setcurrentpoint`
+                                    ps_stack.push(y);
+                                    ps_stack.push(x);
+                                }
                             }
-                            0 => {
-                                // end of flex sequences
-                                require_eq!(n, 3);
-                                let (_flex_height, x, y) = s.pop_tuple()?;
-                                let flex_sequence = expect!(s.flex_sequence.take(), "no flex sequence");
-                                let (_ref, c0, c1, p2, c3, c4, p5) = expect!(TupleElements::from_iter(flex_sequence.into_iter()), "can't parse flex sequence");
-                                //require_eq!(p5, v(x, y));
-                                s.contour.push_cubic(c0, c1, p2);
-                                s.contour.push_cubic(c3, c4, p5);
-                                ps_stack.push(y);
-                                ps_stack.push(x);
-                            }
-                            3 => {
-                                require_eq!(n, 1);
+                            // otherSubr 3 returns a value to the PostScript side
+                            (3, 1) => {
                                 ps_stack.push(s.pop()?);
                                 ps_stack.push(Value::Int(3));
                             }
                             _ => {
                                 let m = s.stack.len();
                                 ps_stack.clear();
-                                ps_stack.extend(s.stack.drain(m - n ..).rev());
+                                if n <= m {
+                                    ps_stack.extend(s.stack.drain(m - n ..).rev());
+                                } else {
+                                    warn!("callothersubr {} wants {} operands, {} on the stack", subr_nr, n, m);
+                                }
                             }
                         }
                     }
@@ -553,7 +585,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let c1 = s.current + v(0., dy1);
                 let c2 = c1 + v(dx2, dy2);
                 let p = c2 + v(dx3, 0.);
-                s.contour.push_cubic(c1, c2, p);
+                push_curve(s, c1, c2, p);
                 s.stack.clear();
                 s.current = p;
             }
@@ -563,7 +595,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let c1 = s.current + v(dx1, 0.);
                 let c2 = c1 + v(dx2, dy2);
                 let p = c2 + v(0., dy3);
-                s.contour.push_cubic(c1, c2, p);
+                push_curve(s, c1, c2, p);
                 s.stack.clear();
                 s.current = p;
             },
