@@ -10,6 +10,11 @@
 * **F10/F11 (2026-11-02):** `State` gained `seac: Option<Seac>` (cleared by `State::clear`), and the
   crate root now defines `pub struct Seac { adx, ady, base, accent }` — the accent composition
   shared by Type 1 `seac` and Type 2 `endchar` with four arguments.
+* **F43 (2026-11-03):** `MAX_SUBR_DEPTH` (16) is the crate-wide cap on charstring subroutine
+  nesting, and `State::subr_depth` (cleared by `State::clear`) counts the active
+  `callsubr`/`callgsubr` frames. Type 2 uses it in `type2.rs::call_subr`, Type 1 in its own
+  `callsubr` arm; both restore the counter when the subr returns *or* fails. Without it a cyclic
+  subr recursed until the native stack was gone (see `src/type2.rs.md`, `src/type1.rs.md`).
 * **F29 (2026-11-02):** the private `print_err(e: nom::Err<VerboseError<&[u8]>>) -> !` is gone. It
   was never called (no caller in the crate), and it panicked with "need more data" / "error
   converting an `Err::Failure`" / "error converting an `Err::Incomplete`" — so it was dead code
@@ -26,7 +31,7 @@
   `0x25 0x21` → Type 1 PFA, `0x01 xx xx xx` → bare CFF).
 * `State` — the shared interpreter state for Type 1 and Type 2 charstrings (`stack`, `outline`,
   `contour`, `current`, `lsb`, `char_width`, `delta_width`, `stem_hints`, `flex_sequence`,
-  `seac`).
+  `subr_depth`, `seac`).
 * `Context` — subr index + bias table for both charstring dialects.
 
 ## Differences from the specifications

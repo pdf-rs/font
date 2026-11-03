@@ -1,4 +1,4 @@
-use crate::{State, Seac, v, Value, Context, TryIndex, FontError};
+use crate::{State, Seac, v, Value, Context, TryIndex, FontError, MAX_SUBR_DEPTH};
 use nom::{IResult,
     bytes::complete::{take},
     number::complete::{be_u8, be_i16, be_i32}
@@ -74,6 +74,23 @@ fn maybe_width(state: &mut State, cond: impl Fn(usize) -> bool) {
         }
     }
 }
+
+/// Run one subroutine, guarding against subrs that call themselves.
+///
+/// The depth is restored afterwards even when the subr fails, so one bad glyph does
+/// not poison the counter for the next one.
+fn call_subr<'a, 'b, T, U>(subr: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State) -> Result<(), FontError>
+    where T: TryIndex + 'a, U: TryIndex + 'a
+{
+    if s.subr_depth >= MAX_SUBR_DEPTH {
+        error!("subroutine nesting deeper than {} levels (recursive subr?)", MAX_SUBR_DEPTH);
+    }
+    s.subr_depth += 1;
+    let result = charstring(subr, ctx, s);
+    s.subr_depth -= 1;
+    result
+}
+
 pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State) -> Result<(), FontError>
     where T: TryIndex + 'a, U: TryIndex + 'a
 {
@@ -168,7 +185,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let subr_nr = s.pop()?.to_int()?;
                 
                 let subr = ctx.subr(subr_nr)?;
-                charstring(subr, ctx, s)?;
+                call_subr(subr, ctx, s)?;
                 i
             }
             11 => { // – return (11) –
@@ -509,7 +526,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 trace!("globalsubr#{}", subr_nr as i32 + ctx.global_subr_bias);
                 
                 let subr = ctx.global_subr(subr_nr)?;
-                charstring(subr, ctx, s)?;
+                call_subr(subr, ctx, s)?;
                 i
             }
             30 => { // |- dy1 dx2 dy2 dx3 {dxa dxb dyb dyc dyd dxe dye dxf}* dyf? vhcurveto (30) |-

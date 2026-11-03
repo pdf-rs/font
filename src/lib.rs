@@ -369,6 +369,15 @@ pub struct Context<T=(), U=()> {
     pub global_subr_bias: i32,
 }
 
+/// How deep `callsubr`/`callgsubr` may nest before the charstring is rejected.
+///
+/// TN5177 §4.4 and Adobe's implementations limit Type 2 subroutine nesting to 10
+/// levels; Type 1 fonts rarely exceed one or two. A recursive subr (a subr calling
+/// itself) has no bound of its own, so without this limit a small malicious font
+/// overflows the native stack and kills the process instead of failing that one glyph.
+/// 16 leaves room for the fonts that nest a little deeper than the spec allows.
+pub const MAX_SUBR_DEPTH: u32 = 16;
+
 impl<T, U> Context<T, U> where T: TryIndex, U: TryIndex {
     #[inline]
     pub fn subr(&self, idx: i32) -> Result<&[u8], FontError> {
@@ -398,6 +407,9 @@ pub struct State {
     pub delta_width: Option<f32>,
     pub first_stack_clearing_operator: bool,
     pub flex_sequence: Option<Vec<Vector2F>>,
+    /// Current depth of `callsubr`/`callgsubr` nesting; guards against cyclic subrs
+    /// recursing until the process runs out of stack (see `MAX_SUBR_DEPTH`).
+    pub subr_depth: u32,
     /// Set by Type 1 `seac` (12 6) and Type 2 `endchar` with four arguments: the glyph
     /// is not drawn by its own charstring but composed of two other glyphs.
     pub seac: Option<Seac>
@@ -441,6 +453,7 @@ impl State {
             delta_width: None,
             first_stack_clearing_operator: true,
             flex_sequence: None,
+            subr_depth: 0,
             seac: None
         }
     }
@@ -457,6 +470,7 @@ impl State {
         self.delta_width = None;
         self.first_stack_clearing_operator = true;
         self.flex_sequence = None;
+        self.subr_depth = 0;
         self.seac = None;
     }
 

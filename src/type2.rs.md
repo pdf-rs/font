@@ -25,6 +25,13 @@ Implemented: all path operators (1, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24
   delta is `(dx6, -(dy1 + dy2 + dy5))`, so the curve ends on the starting y as the operator's
   precondition requires (TN5177 §4.1: "the starting and ending points have the same y value").
   Tests: `c08c`, `c08d`, `c08e` (the `hflex` control is unchanged).
+* **F43 (2026-11-03):** `callsubr` (10) and `callgsubr` (29) go through the new `call_subr`, which
+  refuses to nest more than `crate::MAX_SUBR_DEPTH` (16) levels — TN5177 allows 10, the extra room
+  is for real fonts that overreach. A subr that calls itself now fails that charstring (and so
+  that glyph) with an error instead of recursing until the native stack dies and aborts the whole
+  process. The counter (`State::subr_depth`, shared with Type 1) is restored on every path, so a
+  bad glyph does not poison the next one. Tests: `c27` (`tests/cff_cases.rs`, self-recursive
+  global subr) and `c27b` (positive control, a legal two-level nesting still works).
 
 ## Differences from the specifications
 * **F7 — withdrawn (2026-11-02):** `flex1` consumes exactly 11 arguments (6 for the first curve,
@@ -38,8 +45,9 @@ Implemented: all path operators (1, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24
   storage `put`/`get` return an error, which fails the whole font. They are deprecated but legal.
 * **F44 (TN5177 §4.4 `index`):** "if `i` is negative, the top element is copied"; the code calls
   `to_usize()` (`:287`) and errors instead.
-* **F43:** no recursion depth limit in `callsubr`/`callgsubr` (`:161`, `:490`): a cyclic
-  subroutine is a stack overflow, i.e. a process abort, not an error.
+* ~~**F43:**~~ `callsubr`/`callgsubr` used to recurse with no depth limit (`:161`, `:490`), so a
+  cyclic subroutine was a stack overflow — a process abort, not an error (guarded by
+  `call_subr` now, see "Fixed" above).
 * `12 0` (dotsection) is treated as "clear the stack and continue" — it is deprecated/no-op in
   Type 2, so this is fine, but it also clears the stack first (correct) and does *not* count as a
   stack-clearing operator for the width (`first_stack_clearing_operator` is left alone), which is

@@ -71,8 +71,21 @@ fn build_cff_glyphs(
     charset_tail: Option<&[u8]>,
     char_strings: &[&[u8]],
 ) -> Vec<u8> {
+    build_cff_glyphs_with_gsubrs(extra_top_dict, private, charset_tail, &[], char_strings)
+}
+
+/// `build_cff_glyphs`, plus a GlobalSubr INDEX holding `global_subrs` (index 0 is
+/// `-global_subr_bias callgsubr`).
+fn build_cff_glyphs_with_gsubrs(
+    extra_top_dict: &[u8],
+    private: bool,
+    charset_tail: Option<&[u8]>,
+    global_subrs: &[&[u8]],
+    char_strings: &[&[u8]],
+) -> Vec<u8> {
     let name_index = index(&[b"Test".as_ref()]);
     let empty = index(&[]);
+    let gsubr_index = index(global_subrs);
     let charstrings = index(char_strings);
     let tail = charset_tail.unwrap_or(&[]);
 
@@ -97,7 +110,10 @@ fn build_cff_glyphs(
         push_int(cs_offset, &mut top_dict);
         top_dict.push(17); // Operator::CharStrings
         top_dict_index = index(&[top_dict.as_slice()]);
-        let base = (4 + name_index.len() + top_dict_index.len() + empty.len() * 2) as i32;
+        let base = (4 + name_index.len()
+            + top_dict_index.len()
+            + empty.len()
+            + gsubr_index.len()) as i32;
         let new_charset = if charset_tail.is_some() {
             base + charstrings.len() as i32
         } else {
@@ -115,7 +131,7 @@ fn build_cff_glyphs(
     data.extend_from_slice(&name_index);
     data.extend_from_slice(&top_dict_index);
     data.extend_from_slice(&empty); // String INDEX
-    data.extend_from_slice(&empty); // GlobalSubr INDEX
+    data.extend_from_slice(&gsubr_index); // GlobalSubr INDEX
     data.extend_from_slice(&charstrings);
     data.extend_from_slice(tail);
     data
@@ -464,4 +480,77 @@ fn c24_endchar_seac_composes_the_accent() {
     for (i, &(x, y)) in accent_pts.iter().enumerate() {
         assert_eq!(composed_pts[base_pts.len() + i], (x + 100.0, y + 200.0));
     }
+}
+
+/// Type 2 subr bias for a subroutine count (TN5177 §4.4): 107, 1131 or 32768.
+fn subr_bias(count: usize) -> i32 {
+    if count < 1240 {
+        107
+    } else if count < 33900 {
+        1131
+    } else {
+        32768
+    }
+}
+
+#[test]
+fn c27_type2_recursive_gsubr_is_rejected() {
+    // F43: `callsubr`/`callgsubr` recursed with no depth limit, so a one-entry global
+    // subr that calls itself overflowed the native stack and killed the process. The
+    // nesting is now capped (`MAX_SUBR_DEPTH`), the charstring fails and the glyph with
+    // it — the font reports an error instead of crashing.
+    let bias = subr_bias(1); // one global subr -> 0 is `-107 callgsubr`
+    let mut subr = Vec::new();
+    push_int(-bias, &mut subr); // operand: global subr 0
+    subr.push(29); // callgsubr
+    // No `return` on purpose: even with one, the recursion would be infinite.
+
+    // Glyph 0 is an empty `.notdef`, glyph 1 calls the subr that calls itself.
+    let data = build_cff_glyphs_with_gsubrs(
+        &[],
+        true,
+        None,
+        &[subr.as_slice()],
+        &[&[14], subr.as_slice()],
+    );
+
+    // Parsing must return — the guard fires at depth MAX_SUBR_DEPTH.
+    let result = CffFont::parse(&data, 0);
+    assert!(
+        result.is_err(),
+        "a self-recursive global subr must fail the charstring, not hang"
+    );
+}
+
+#[test]
+fn c27b_type2_nested_gsubr_still_runs() {
+    // Positive control for the depth guard: a subr calling a (different) subr is legal
+    // and must still work.
+    let bias = subr_bias(2); // subrs 0 and 1 -> operands -107 (`-bias`) and -106
+    let mut subr0 = Vec::new();
+    push_int(1 - bias, &mut subr0); // global subr 1
+    subr0.push(29); // callgsubr
+    subr0.push(11); // return
+
+    let mut subr1 = Vec::new();
+    push_int(0, &mut subr1);
+    push_int(0, &mut subr1);
+    subr1.push(21); // 0 0 rmoveto
+    subr1.push(11); // return
+
+    let mut cs1 = Vec::new();
+    push_int(-bias, &mut cs1); // global subr 0
+    cs1.push(29); // callgsubr
+    cs1.push(14); // endchar
+
+    let data = build_cff_glyphs_with_gsubrs(
+        &[],
+        true,
+        None,
+        &[subr0.as_slice(), subr1.as_slice()],
+        &[&[14], cs1.as_slice()],
+    );
+    let font = CffFont::parse(&data, 0).expect("two-level subr nesting is legal");
+    let glyph = font.glyph(GlyphId(1)).expect("glyph 1");
+    assert_eq!(points(&glyph), vec![(0.0, 0.0)]);
 }

@@ -5,7 +5,7 @@ use nom::{IResult,
 use tuple::{TupleElements};
 use itertools::Itertools;
 use indexmap::IndexMap;
-use crate::{Font, Glyph, State, Seac, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId, Name, Value, Info, FontError};
+use crate::{Font, Glyph, State, Seac, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId, Name, Value, Info, FontError, MAX_SUBR_DEPTH};
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
 use crate::parsers::parse;
@@ -447,7 +447,14 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let subr_nr = s.pop()?.to_int()?;
                 trace!("callsubr {}", subr_nr);
                 let subr = ctx.subr(subr_nr)?;
-                charstring(subr, ctx, s)?;
+                // A subr calling itself would recurse until the native stack dies.
+                if s.subr_depth >= MAX_SUBR_DEPTH {
+                    error!("subroutine nesting deeper than {} levels (recursive subr?)", MAX_SUBR_DEPTH);
+                }
+                s.subr_depth += 1;
+                let result = charstring(subr, ctx, s);
+                s.subr_depth -= 1;
+                result?;
             }
             11 => { // return
                 trace!("return");

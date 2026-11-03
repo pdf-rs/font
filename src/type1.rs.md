@@ -33,6 +33,12 @@
   `None`) instead of decoding to an empty string and failing later with "CharWidth not set";
   the same applies to `/Subrs`. Tests: `tests/type1_cases.rs` `c25` (`/lenIV -1 def`, plain
   strings), `c26` (2-byte charstring under `lenIV 4` → glyph skipped, font loads).
+* **F43 (2026-11-03):** Type 1 `callsubr` (10) counts its nesting in `State::subr_depth` and
+  refuses to go deeper than `crate::MAX_SUBR_DEPTH` (16), so a subr that calls itself is an error
+  for that glyph instead of a native stack overflow that aborts the process. The same guard lives
+  in `type2.rs::call_subr`; the counter is restored whether the subr returns or fails.
+  (The Type 1 path has no dedicated test — `tests/type1_cases.rs` has no `/Subrs` builder; the
+  Type 2 tests `c27`/`c27b` cover the shared mechanism.)
 
 ## What it does
 `Type1Font::from_vm` pulls `FontName`, `FontInfo/FullName`, `Weight`, `FontMatrix`, `FontBBox`,
