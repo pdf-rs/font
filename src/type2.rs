@@ -456,14 +456,16 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 trace!("endchar");
                 // TN5177 Appendix C: with four arguments (and optionally a leading
                 // width) `endchar` is the deprecated `seac` form, adx ady bchar achar;
-                // the composition happens where the other glyphs are known.
+                // the composition happens where the other glyphs are known. FreeType's
+                // interpreter (`psintrp.c`, `cf2_cmdENDCHAR`) wants precisely four
+                // operands left at this point; extra values are producer garbage, and
+                // composing with them draws the wrong glyph (audit C8).
                 maybe_width(s, |n| n == 0 || n == 4);
-                if s.stack.len() >= 4 {
-                    let first = s.stack.len() - 4;
-                    let adx = s.stack[first].to_float();
-                    let ady = s.stack[first + 1].to_float();
-                    let bchar = s.stack[first + 2].to_float();
-                    let achar = s.stack[first + 3].to_float();
+                if s.stack.len() == 4 {
+                    let adx = s.stack[0].to_float();
+                    let ady = s.stack[1].to_float();
+                    let bchar = s.stack[2].to_float();
+                    let achar = s.stack[3].to_float();
                     if !(0.0 ..= 255.0).contains(&bchar) || !(0.0 ..= 255.0).contains(&achar) {
                         warn!("endchar seac: character code out of range ({bchar}, {achar})");
                     } else {
@@ -477,6 +479,9 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                             accent: achar as u8,
                         });
                     }
+                } else if s.stack.len() > 4 {
+                    warn!("endchar with {} operands is not a seac, ignoring them",
+                          s.stack.len());
                 }
                 s.contour.close();
                 s.done = true;

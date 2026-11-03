@@ -521,6 +521,61 @@ fn c24_endchar_seac_composes_the_accent() {
     }
 }
 
+#[test]
+fn c24b_endchar_seac_needs_exactly_four_operands() {
+    // F11/audit C8: `endchar` is the `seac` form only with exactly `adx ady bchar
+    // achar` (plus the optional leading width). Junk operands used to be read as a
+    // composition whose values happened to sit at the bottom of the stack.
+    let tail = [0u8, 0, 34, 0, 125, 0, 171]; // charset format 0: /A, /acute, /Aacute
+
+    let mut garbage = Vec::new();
+    push_int(0, &mut garbage); // width, so the rest is not mistaken for one
+    push_int(1, &mut garbage);
+    push_int(2, &mut garbage); // adx ady that a loose reader would compose with
+    push_int(65, &mut garbage); // 'A'
+    push_int(194, &mut garbage); // 'acute'
+    push_int(7, &mut garbage); // one operand too many
+    garbage.push(14); // endchar — six operands, five after the width
+
+    let charstrings: &[&[u8]] = &[
+        &[14u8],
+        &rect2(0, 0, 300, 700),
+        &rect2(0, 0, 50, 60),
+        &garbage,
+    ];
+    let data = build_cff_glyphs(&[], true, Some(&tail), charstrings);
+    let font = CffFont::parse(&data, 0).expect("font parses");
+    let aacute = font.gid_for_name("Aacute").expect("/Aacute");
+    let glyph = font.glyph(aacute).expect("glyph Aacute");
+    assert!(
+        glyph.path.contours().is_empty(),
+        "five operands are not a seac: nothing must be composed"
+    );
+
+    // The width form (`width adx ady bchar achar`) is still a seac.
+    let mut wide = Vec::new();
+    push_int(500, &mut wide);
+    wide.extend_from_slice(&seac2(100, 200, 65, 194));
+    let charstrings: &[&[u8]] = &[
+        &[14u8],
+        &rect2(0, 0, 300, 700),
+        &rect2(0, 0, 50, 60),
+        &wide,
+    ];
+    let data = build_cff_glyphs(&[], true, Some(&tail), charstrings);
+    let font = CffFont::parse(&data, 0).expect("font parses");
+    let a = font.gid_for_name("A").expect("/A");
+    let acute = font.gid_for_name("acute").expect("/acute");
+    let composed = font.glyph(font.gid_for_name("Aacute").expect("/Aacute")).expect("glyph");
+    let base_pts = points(&font.glyph(a).expect("glyph A"));
+    let accent_pts = points(&font.glyph(acute).expect("glyph acute"));
+    let composed_pts = points(&composed);
+    assert_eq!(composed_pts.len(), base_pts.len() + accent_pts.len());
+    for (i, &(x, y)) in accent_pts.iter().enumerate() {
+        assert_eq!(composed_pts[base_pts.len() + i], (x + 100.0, y + 200.0));
+    }
+}
+
 /// Type 2 subr bias for a subroutine count (TN5177 §4.4): 107, 1131 or 32768.
 fn subr_bias(count: usize) -> i32 {
     if count < 1240 {
