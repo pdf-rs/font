@@ -25,6 +25,10 @@ bytes are parsed but not used anywhere yet.
 * `usWinAscent`/`usWinDescent` (the clipping box), `fsType`, PANOSE, `sFamilyClass` and the
   `ulCodePageRange*` bits are parsed but not exposed — nothing in this crate needs them yet.
 
+## Audit PR #7 (2026-11-03)
+* **C7 (v2 tail):** the length check covers the whole `sxHeight` … `usMaxContext` tail, so a
+  table cut inside `ulCodePageRange2` no longer reads the code-page fields as `sxHeight`.
+
 ## Cross references
 `opentype/mod.rs.md` (`vmetrics` preference), `truetype.rs.md` (same rule for the `true` format),
 `opentype/post.rs.md`.

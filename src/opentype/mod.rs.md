@@ -39,6 +39,25 @@ the GSUB/GPOS common building blocks (`parse_lookup_list`, `coverage_table`,
   platform 0/3 from UTF-16BE. Tests `c33_name_picks_the_best_record_not_the_last`,
   `c33_name_decodes_mac_roman`.
 
+## Audit PR #7 (2026-11-03)
+* **B3 (optional layout):** `GSUB`, `GPOS` and `GDEF` go through `optional_layout`, and
+  `parse_lookup_list` warns about a subtable it cannot read and keeps the others: a broken
+  layout table costs shaping data, not the font.
+* **F30/F31 — the stale bullets below, resolved:** "Differences" still says that
+  `numberOfHMetrics` is never validated, that `unitsPerEm` is unchecked and that `maxp`'s version
+  is ignored; those describe the code before 2026-11-02. The policy since audit §4 is: fatal
+  only where a value would panic, overflow or divide by zero, otherwise clamped with a warning.
+  `hmtx` clamps `numberOfHMetrics` into `1..=numGlyphs` and keeps a truncated trailing bearing
+  array; `metrics_for_gid` and `advance` answer `None` / 0 from `numGlyphs` on; `head` requires
+  `unitsPerEm != 0` and takes a value outside 16..=16384 as it is; `loca` warns when the offsets
+  run backwards or the last one passes `glyf` (those glyphs stay empty); `maxp` warns about an
+  unknown version and still requires `numGlyphs >= 1`.
+* **F3:** the `b"gdef"` bullet under "Differences" is historic too — GDEF is read as `b"GDEF"`
+  and `OpenTypeFont::gdef` is populated (see "Fixed").
+* **C3/§3:** `Hmtx::advance(gid)` returns the advance in font units (0 beyond `numGlyphs`), and
+  `Font::position` hands it to `GPos::position_with_advances`, which is what lets mark and
+  cursive attachment place their offsets relative to the pen.
+
 ## Differences from the specifications
 * **F3 (OT §GDEF):** `:139` looks up `b"gdef"`. The tag is `GDEF`; `Tables::get` is an exact
   `[u8; 4]` match, so GDEF is always `None`. (Same class of bug would apply to any mixed-case

@@ -28,6 +28,12 @@ and stored, so `Font::svg_glyph(gid)` can return `(document, element)`.
   crates never enable it, so a PDF with an OpenType SVG font today renders nothing for those
   glyphs because the table is not parsed at all.
 
+## Audit PR #7 (2026-11-03)
+* **§3 (gzip):** a document is inflated through `inflate_limited::deflate` with the size the
+  gzip `ISIZE` field announces, capped at `MAX_SVG_BYTES = 64 MiB`.
+* **§4 (policy):** a document that cannot be decompressed is skipped with a warning, the way a
+  document the SVG parser rejects already was; it no longer costs the whole table.
+
 ## Cross references
 `opentype/mod.rs.md` (`parse_svg` is called from `from_hmtx_glyf_and_tables`),
 `lib.rs.md` (`Font::svg_glyph`, a defaulted trait method).

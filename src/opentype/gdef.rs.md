@@ -33,6 +33,14 @@ attachment* class definition into `GDef::mark_classes` and exposes
 * `attachList` (attachment point lists) and `ligCaretList` (carets) are read as offsets and
   dropped, i.e. not validated either.
 
+## Audit PR #7 (2026-11-03)
+* **C8c:** `glyph_ignored` honours `UseMarkFilteringSet` (0x0010): for that lookup only the
+  marks its MarkFilteringSet names count as marks.
+* **C8:** a ligature's components may be separated by glyphs the lookup's flag ignores.
+* **§5 (semantics):** `GDef::mark_class` reads `glyphClassDef` (base / ligature / mark /
+  component); the `markAttachClassDef` of the same table is `mark_attach_class`. Callers that
+  used `mark_class` for the attachment classes must switch to `mark_attach_class`.
+
 ## Cross references
 `opentype/mod.rs.md` (table directory, tag lookup), `opentype/gpos.rs.md` (mark attachment uses
 the classes GDEF should provide).

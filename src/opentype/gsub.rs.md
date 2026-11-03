@@ -96,6 +96,22 @@ through `Font::substitute`) applies them to a glyph run.
 * **F21:** (fixed above) the GSUB copy of the GPOS version panic.
 * The version-1.1 `featureVariationsOffset` is read and ignored.
 
+## Audit PR #7 (2026-11-03)
+* **C1 (lookup model):** the lookups are applied one at a time across the whole run — lookup
+  list order, each over every position, before the next starts — instead of position by
+  position across all lookups. `apply_lookup_at` returns the `Step{hgrown, advance}` of the
+  application, and `substitute_with` moves on by the glyphs a rule produced.
+* **§3 (operation budget):** following the lookups a context rule names spends an `OpBudget`
+  (32 × run length + 1024 applications, one warning when it runs out), so a rule with R records
+  that each name the same context lookup can no longer cost R⁸.
+* **§3 (rule index):** `Context` keeps a `RuleIndex` built at parse time — rules by first glyph,
+  rules by first class, unconditional rules — and `matched_rule` merges those three ordered
+  lists instead of walking every rule at every position.
+* **§3 (one pass):** a lookup without a context subtable substitutes into a fresh run instead of
+  splicing into the old one; a splice moves the whole tail, which made a long run quadratic
+  (a million glyphs took minutes). Context lookups still work in place, because their records
+  address glyphs by absolute position.
+
 ## Cross references
 `opentype/mod.rs.md` (`parse_lookup_list`, `coverage_table`), `opentype/gpos.rs.md` (same
 skeleton, same Extension gap), `lib.rs.md` (`Font::gid_for_name` is the only substitution-ish

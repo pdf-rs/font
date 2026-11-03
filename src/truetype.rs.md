@@ -48,6 +48,18 @@ midpoint insertion, and closing the contour with a quadratic back to the start p
 * `is_empty_glyph` (`:145-155`) returns `false` for a composite whose components are all empty.
 * `parse_coord(false, true)` (x/y not short, "same" set) correctly yields 0.
 
+## Audit PR #7 (2026-11-03)
+* **C8b (component flags):** `SCALED_COMPONENT_OFFSET` (0x0800) and `UNSCALED_COMPONENT_OFFSET`
+  (0x1000) are read and applied: the Apple-style scaled offset, the Microsoft default of an
+  offset applied after the matrix.
+* **C8e (point numbering):** `spec_points()` no longer drops the last point when it equals the
+  first, so point-number matching of a composite glyph uses the original glyf numbers.
+* **§3 (expansion budget):** `expand_outline` spends a `ComponentBudget` of
+  `MAX_COMPONENT_EXPANSIONS = 10_000` component expansions, so a glyph with k components nested
+  `MAX_COMPONENT_DEPTH = 16` deep can no longer fan out to k¹⁶.
+* **§4 (loca):** a last offset past the end of `glyf` only warns now; the glyphs it covers are
+  read as empty, which is what the per-glyph branch was for.
+
 ## Cross references
 `lib.rs.md` (shared `State`), `opentype/mod.rs.md` (`parse_loca`, `parse_hmtx`, `Head`),
 `woff.rs.md` (the WOFF2 *transformed* glyf reuses `compound`/`contour`).

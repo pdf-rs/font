@@ -55,6 +55,14 @@
 * No WOFF2 `hmtx` transform for `vmtx` (proportional to the above), and no support for the
   `glyf` transform's `overlapSimpleBitmap` flags beyond the 0x80 bit.
 
+## Audit PR #7 (2026-11-03)
+* **§3 (inflate):** a compressed table is inflated through `inflate_limited::zlib` with a limit
+  of its `origLength`, and `origLength` itself is capped by `MAX_TABLE_BYTES = 256 MiB`. The
+  WOFF2 entry buffer is charged against `totalSfntSize` (`MAX_SFNT_BYTES`), so an
+  attacker-chosen `entry.length` can no longer allocate up to 4 GiB.
+* **§3 (triplet stream):** the accumulating point position of `glyf` transform 0 is `i32`, so a
+  crafted triplet stream cannot overflow an `i16`.
+
 ## Cross references
 `opentype/mod.rs.md` (`Tables`, `parse_hmtx*`), `truetype.rs.md` (`compound`, `contour`,
 `parse_shapes` are reused by the WOFF2 transformed path). The triplet LUT lives here

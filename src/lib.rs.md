@@ -58,5 +58,18 @@
   (correct), but `args()` accepts a stack that is longer than `N` and silently ignores the
   extra entries.
 
+## Audit PR #7 (2026-11-03)
+* **B3 (optional tables):** GSUB, GPOS and GDEF are read through `optional_layout` — a table
+  that cannot be parsed is dropped with a warning and the font still loads, and
+  `parse_lookup_list` logs a subtable it cannot read and keeps the others. Shaping data is lost,
+  the font is not.
+* **§3 (new module):** `inflate_limited` (compiled for feature `woff` or `svg`) holds
+  `zlib(data, limit)` and `deflate(data, limit)`: they drive `InflateStream::update` and stop at
+  `limit` bytes instead of using the unbounded `inflate_bytes*`. See `inflate_limited.rs.md`.
+* **§5 (semver):** `Info` gained fields and `Default`; `Context`/`State` have public fields;
+  `CffSlot::outlines()` returns a four-tuple `(outline, width, lsb, seac)`; `GDef::mark_class`
+  now reads `glyphClassDef` where it used to read `markAttachClassDef` — a behaviour change for
+  callers, with `mark_attach_class` as the other accessor.
+
 ## Cross references
-`truetype.rs.md`, `type1.rs.md`, `type2.rs.md`, `opentype/mod.rs.md`.
+`truetype.rs.md`, `type1.rs.md`, `type2.rs.md`, `opentype/mod.rs.md`, `inflate_limited.rs.md`.

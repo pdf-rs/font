@@ -46,6 +46,12 @@ version 1 (Apple, `0x00010000`) → 32-bit subtable headers, format 0 only. Both
   (`:69`/`:73`) — harmless, but the outer `be_u16` only consumes the high half of Apple's 32-bit
   version, which is why both reads exist.
 
+## Audit PR #7 (2026-11-03)
+* **C5 (format 2):** a left or right "class" is a byte offset, and offset 0 means "not in a
+  class" — it is skipped instead of being used as a class index, so `address = 0 + col` no
+  longer reads the subtable header as kerning. `left_first + n` is a `checked_add`, and an
+  unreadable `(row, column)` pair is skipped rather than failing the whole table.
+
 ## Cross references
 `opentype/gpos.rs.md` (`KernTable`, whose class-pair path this table's format 2 now feeds
 directly), `truetype.rs.md` (`Font::kerning`).

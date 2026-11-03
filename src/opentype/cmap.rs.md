@@ -55,6 +55,11 @@ OT §cmap's "platform/encoding priority" intent.
   c" symbol convention is not applied. This is usually what you want for PDF, but it is a
   difference worth stating.
 
+## Audit PR #7 (2026-11-03)
+* **§3 (merge):** `codepoints(max_ranges)` builds the runs, sorts the gaps between them once and
+  closes the widest `n − max_ranges` of them, instead of rescanning every window and splicing
+  once per merge (O(n²) on the many scattered runs of a large CJK font).
+
 ## Cross references
 `opentype/mod.rs.md` (Coverage/ClassDef), `cff.rs.md` (CFF has its own 8-bit encoding),
 `type1.rs.md` (Type 1 `/Encoding`).

@@ -72,6 +72,14 @@ The SID tables (`STANDARD_STRINGS`, `ISO_ADOBE_CHARSET`, `EXPERT_CHARSET`,
   Type 1 *width* (`hsbw`, opcode 13) is the only source there, so `delta_width` handling differs.
 * No subr-bias validation and no recursion depth limit — see `type2.rs.md`.
 
+## Audit PR #7 (2026-11-03)
+* **C6 (`weight_class`):** the whole weight string is normalised first (alphanumerics only,
+  lowercase) and matched as one word, then as adjacent word pairs, and only then word by word
+  and only when every recognised word agrees. "Semi Bold", "Demi-Bold" and "Extra Light" used
+  to read as 700 / 700 / 300; "Light Bold" stays unknown instead of guessing.
+* **§3 (`seac`):** `composed_outlines` reads the `Charset` operator once and hands the SIDs to
+  `seac_gid`, instead of parsing the whole charset twice per `seac` glyph.
+
 ## Cross references
 `type1.rs.md`, `type2.rs.md`, `lib.rs.md` (`State`/`Context`), `opentype/mod.rs.md`
 (`OpenTypeFont::from_hmtx_glyf_and_tables` calls `read_cff` for `CFF `).

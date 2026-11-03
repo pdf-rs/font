@@ -109,6 +109,22 @@ GPOS is absent (`mod.rs`).
 * The version-1.1 `featureVariationsOffset` is read as `u32` ✓ (OT §GPOS header), and then
   ignored.
 
+## Audit PR #7 (2026-11-03)
+* **C2 (pair classes):** every class-based pair subtable keeps its own `(coverage, classDef1,
+  classDef2, matrix)`; classes are resolved per subtable, class 0 is "not listed", and the
+  format 2 coverage offset is honoured.
+* **C3 (mark attachment):** mark-to-base attaches to the nearest preceding base (marks in
+  between are skipped), mark-to-mark to the immediately preceding mark, and the offset is placed
+  relative to the run's pen positions — the advances between base and mark are subtracted.
+  Mark-to-ligature uses the anchor of the component the mark sits under, not always the first.
+* **C3 (cursive):** the offset is `prev_exit − this_entry − Σ advances between them` (added for
+  `RIGHT_TO_LEFT`), and a NULL anchor offset is `None` rather than `(0,0)`, so a glyph without
+  an exit anchor is not moved.
+* **C8d (pair advance):** a pair subtable with a second value record consumes both glyphs, so
+  the lookup resumes at the second glyph's successor.
+* **§3 (budget):** `position_with_advances` spends the same `OpBudget` as GSUB; it is also what
+  gives the attachment rules the advances of `Hmtx`.
+
 ## Cross references
 `opentype/mod.rs.md` (`parse_lookup_list`, `coverage_table`, `parse_class_def`),
 `opentype/kern.rs.md` (the legacy table that fills the same `KernTable`).

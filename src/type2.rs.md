@@ -74,6 +74,14 @@ Implemented: all path operators (1, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24
   `12 1/2/6/7/8/13/15/16/17/19/25/31/32/33`) — the spec says undefined operators' behaviour is
   unspecified, so erroring is defensible, but a single reserved byte then disables the whole font.
 
+## Audit PR #7 (2026-11-03)
+* **B2 (`ifelse`):** TN5177 §4.4 is `s1 s2 v1 v2 ifelse` — the operators pop `v2, v1, s2, s1`
+  and push `s1` when `v1 <= v2`, else `s2`. The crate compared the two returned values and
+  pushed `v1`, so every `ifelse` in a real font picked the wrong branch; `c28` encoded the same
+  misreading and was corrected.
+* **C8a (`endchar`):** the `seac` form is taken only from exactly four operands (five with the
+  optional width). A longer or shorter stack is an ordinary `endchar`, with a warning.
+
 ## Cross references
 `lib.rs.md` (`State`, `maybe_width`, `Context`), `cff.rs.md` (`CffSlot::outlines` is the only
 caller), `type1.rs.md` (the other dialect of the same state machine).

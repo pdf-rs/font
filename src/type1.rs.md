@@ -87,6 +87,16 @@ The interpreter covers the Type 1 path operators (`hsbw`, `hstem`/`vstem`, `vmov
 * `unicode_map` uses `glyphname_to_unicode` and a `uniXXXX` fallback (`:154-168`); `uXXXX`-style
   names and `f`-ligature names beyond the table are not covered.
 
+## Audit PR #7 (2026-11-03)
+* **B1 (flex):** `othersubr 2` *starts* a flex and real fonts call it again after every move, so
+  resetting the flex sequence on 1 and on 2 threw the first point of every flex away. Only
+  `othersubr 1` closes the sequence now, and the flex end pushes the two curves from the current
+  contour end instead of emitting the reference point `p[0]` (the `(1, 3)` alternative is gone).
+* **`/Subrs`:** the subroutines are read at the Private dictionary's `/Subrs` offset measured
+  from the start of the Private dictionary, not from the start of the file.
+* **C4 (`seac`):** `Seac` carries the composite's `sbx` and the accent's `asb`, and `compose`
+  shifts the accent by `sbx + adx − asb` (T1 §6.5) instead of `adx` alone.
+
 ## Cross references
 `postscript.rs.md` (the interpreter that produces the `Vm`), `eexec.rs.md` (the `lenIV`-based
 decoder), `lib.rs.md` (`State`), `cff.rs.md` (Type 1 charstrings inside CFF reuse this file).
