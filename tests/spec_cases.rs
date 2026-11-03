@@ -957,6 +957,44 @@ fn c25b_hhea_metrics_without_use_typo_metrics() {
     );
 }
 
+// ---------------------------- F16: vhea version fields ----------------------------
+
+/// `vhea` (OT §vhea), 36 bytes: two `u16` versions, ascent/descent/lineGap, then the
+/// vertical metrics, four reserved words, metricDataFormat and numOfLongVerMetrics.
+pub fn vhea_table(ascender: i16, descender: i16, line_gap: i16) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_u16(&mut t, 1);        // majorVersion
+    push_u16(&mut t, 1);        // minorVersion
+    push_i16(&mut t, ascender); // vertTypoAscender
+    push_i16(&mut t, descender);// vertTypoDescender
+    push_i16(&mut t, line_gap); // vertTypoLineGap
+    push_u16(&mut t, 1000);     // advanceHeightMax
+    push_i16(&mut t, 0);        // minTopSideBearing
+    push_i16(&mut t, 0);        // minBottomSideBearing
+    push_i16(&mut t, 1000);     // yMaxExtent
+    push_i16(&mut t, 0);        // caretSlopeRise
+    push_i16(&mut t, 1);        // caretSlopeRun
+    push_i16(&mut t, 0);        // caretOffset
+    for _ in 0 .. 4 { push_i16(&mut t, 0); } // reserved
+    push_i16(&mut t, 0);        // metricDataFormat
+    push_u16(&mut t, 1);        // numOfLongVerMetrics
+    assert_eq!(t.len(), 36);
+    t
+}
+
+#[test]
+fn c16d_vhea_reads_both_version_fields() {
+    // F16: `version` was read as one `u16`, so `minorVersion` was taken as `vertTypoAscender`
+    // and every following field came from two bytes too early.
+    let table = vhea_table(880, -120, 40);
+    let (rest, metrics) = font::opentype::parse_vhea(&table).expect("vhea parses");
+    assert!(rest.is_empty(), "the whole 36-byte table is consumed");
+    assert_eq!(
+        (metrics.ascent, metrics.descent, metrics.line_gap),
+        (880.0, -120.0, 40.0)
+    );
+}
+
 // ---------------------------- F39: gzip-compressed SVG documents ----------------------------
 
 /// `SVG ` (OT §SVG): version, document list offset, reserved, then the document list

@@ -7,6 +7,11 @@
   parses `OS/2` before the metrics and uses `Os2::typo_metrics()` when the font asks for it
   (`fsSelection` bit 7, USE_TYPO_METRICS), falling back to `hhea`; `sxHeight`, `sCapHeight` and
   `ulUnicodeRange1..4` are passed on to `Info`. Tests: `c25`, `c25b` in `tests/spec_cases.rs`.
+* **F16 (2026-11-03):** `parse_vhea` reads both version fields (`majorVersion`,
+  `minorVersion`) before `vertTypoAscender`, so every following field is at its proper offset;
+  the whole 36-byte table (ascender..numOfLongVerMetrics, 4 reserved words included) is
+  consumed. `vmetrics()` still prefers `OS/2`/`hhea`, so the effect is latent either way.
+  Test: `c16d` in `tests/spec_cases.rs`.
 * **F28 (2026-11-02):** `parse_hmtx_woff2_format1` computed `maxp.numGlyphs - numberOfHMetrics`
   as `usize` and wrapped to a huge count when the WOFF2 hmtx transform claimed more metrics
   than glyphs (debug: "attempt to subtract with overflow"). It now uses `checked_sub` and
@@ -32,9 +37,9 @@ the GSUB/GPOS common building blocks (`parse_lookup_list`, `coverage_table`,
 * **F3 (OT §GDEF):** `:139` looks up `b"gdef"`. The tag is `GDEF`; `Tables::get` is an exact
   `[u8; 4]` match, so GDEF is always `None`. (Same class of bug would apply to any mixed-case
   tag; `OS/2`, `BASE`, `MATH`, `SVG ` are spelled correctly.)
-* **F16 (OT §vhea):** `parse_vhea` (`:430-442`) reads one `u16` version field and then takes
-  `minorVersion` as `vertTypoAscender`. `vmetrics()` uses `hhea` instead (`:129`), so this is
-  latent.
+* **F16 (OT §vhea):** `parse_vhea` (`:430-442`) read one `u16` version field and then took
+  `minorVersion` as `vertTypoAscender`. **Fixed 2026-11-03** (test `c16d`); `vmetrics()` still
+  prefers `hhea` (`:129`), so it was latent.
 * **F30 (OT §hmtx):** `parse_hmtx` (`:409-421`) reads `numberOfHMetrics` pairs and then
   `many0(be_i16)` over *all remaining bytes* as left-side bearings. The spec fixes the trailing
   count at `numGlyphs - numberOfHMetrics`; extra bytes are accepted, missing ones silently become

@@ -526,10 +526,24 @@ pub fn parse_hmtx_woff2_format1<'a>(i: &'a [u8], head: &Head, hhea: &Hhea, maxp:
 }
 
 pub fn parse_vhea(i: &[u8]) -> R<VMetrics> {
-    let (i, _version) = be_u16(i)?;
+    // OT §vhea: `majorVersion` and `minorVersion` are two separate `u16`s.  Reading them as one
+    // field shifted every value after it by two bytes, so the parsed "ascender" was the minor
+    // version (0 or 1).  v1.0 and v1.1 are both 36 bytes and differ only in the reserved words.
+    let (i, _major_version) = be_u16(i)?;
+    let (i, _minor_version) = be_u16(i)?;
     let (i, ascent) = be_i16(i)?;
     let (i, descent) = be_i16(i)?;
     let (i, line_gap) = be_i16(i)?;
+    let (i, _advance_height_max) = be_u16(i)?;
+    let (i, _min_top_side_bearing) = be_i16(i)?;
+    let (i, _min_bottom_side_bearing) = be_i16(i)?;
+    let (i, _y_max_extent) = be_i16(i)?;
+    let (i, _caret_slope_rise) = be_i16(i)?;
+    let (i, _caret_slope_run) = be_i16(i)?;
+    let (i, _caret_offset) = be_i16(i)?;
+    let (i, _reserved) = count(be_i16, 4)(i)?;
+    let (i, _metric_data_format) = be_i16(i)?;
+    let (i, _num_of_long_ver_metrics) = be_u16(i)?;
     Ok((i, VMetrics {
         ascent: ascent as f32,
         descent: descent as f32,
