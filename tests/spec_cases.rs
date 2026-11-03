@@ -402,6 +402,23 @@ fn codepoints_of(data: &[u8], max_ranges: usize) -> Vec<std::ops::RangeInclusive
     parse_cmap(data).expect("cmap parses").0.codepoints(max_ranges)
 }
 
+/// A `cmap` with one Unicode (platform 3, encoding 10) format 12 subtable mapping each of
+/// `codes` to its own glyph id. Groups are one code wide, so every code is its own run.
+fn cmap_format12(codes: &[u32]) -> Vec<u8> {
+    let mut sub = Vec::new();
+    push_u16(&mut sub, 12);                           // format
+    push_u16(&mut sub, 0);                            // reserved
+    push_u32(&mut sub, 16 + 12 * codes.len() as u32); // length
+    push_u32(&mut sub, 0);                            // language
+    push_u32(&mut sub, codes.len() as u32);           // numGroups
+    for (ix, code) in codes.iter().enumerate() {
+        push_u32(&mut sub, *code);            // startCharCode
+        push_u32(&mut sub, *code);            // endCharCode
+        push_u32(&mut sub, ix as u32 + 1);    // startGlyphID
+    }
+    cmap_multi(&[(3, 10, sub)])
+}
+
 #[test]
 fn c10_codepoints_keeps_the_last_range() {
     // F13: the range being built at the end of the walk is never pushed, so a contiguous
@@ -424,6 +441,26 @@ fn c10c_codepoints_with_zero_max_ranges_does_not_panic() {
     let got = codepoints_of(&cmap_format4(&[(0x41, 0x43, 1)]), 0);
     assert_eq!(got, vec![0x41 ..= 0x43]);
 }
+
+#[test]
+fn c10d_codepoints_reduces_many_scattered_runs_quickly() {
+    // Audit §3: the merge loop rescanned every window of the range list and spliced once per
+    // merge, which is O(n²) on a font whose codepoints are scattered (large CJK fonts).
+    // Closing the widest gaps last means one sort of the gaps, whatever their number.
+    // Format 12: one group per code, twenty thousand codes, every gap the same width.
+    let codes: Vec<u32> = (0 .. 20_000u32).map(|ix| 0x100 + ix * 2).collect();
+    let data = cmap_format12(&codes);
+    let started = std::time::Instant::now();
+    let got = codepoints_of(&data, 10);
+    let elapsed = started.elapsed();
+    let covered: u32 = got.iter().map(|r| r.end() - r.start() + 1).sum();
+    assert_eq!(got.len(), 10, "reduced to max_ranges");
+    assert_eq!(got[0], 0x100 ..= 0x100, "the wide gaps are the ones kept open");
+    assert_eq!(covered, 39_990, "every code is covered, and the merged tail spans the gaps");
+    assert_eq!(*got.last().unwrap().end(), 0x100 + 19_999 * 2, "the tail is one range");
+    assert!(elapsed < std::time::Duration::from_secs(2), "took {:?}", elapsed);
+}
+
 
 // ---------------------------------------------------------------------------------------------
 // F14 — cmap format 4: the glyph index array is addressed relative to &idRangeOffset[i]

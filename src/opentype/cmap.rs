@@ -38,18 +38,28 @@ impl CMap {
             }
         }
 
-        // Reduce to `max_ranges` runs by repeatedly closing the smallest gap.
+        // Reduce to `max_ranges` runs (audit §3). Closing the boundary between two runs costs
+        // exactly the gap in front of it, so the widest gaps stay open and every other boundary
+        // is closed. That is one sort of the gaps, instead of a full rescan and a `splice` for
+        // every merge — the old loop was O(n²) on a font whose codepoints are scattered.
         let max_ranges = max_ranges.max(1);
-        while ranges.len() > max_ranges {
-            // `ranges` is sorted and disjoint, so merging neighbours is always possible.
-            let smallest = ranges
-                .windows(2)
-                .enumerate()
-                .map(|(ix, w)| (ix, w[1].start() - w[0].end() - 1))
-                .min_by_key(|&(_, gap)| gap);
-            let Some((ix, _)) = smallest else { break };
-            let merged = *ranges[ix].start() ..= *ranges[ix + 1].end();
-            ranges.splice(ix ..= ix + 1, std::iter::once(merged));
+        if ranges.len() > max_ranges {
+            let mut gaps: Vec<(u32, usize)> = (1 .. ranges.len())
+                .map(|ix| (ranges[ix].start() - ranges[ix - 1].end() - 1, ix))
+                .collect();
+            // Widest first; equal gaps are broken by position so the result is stable.
+            gaps.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            gaps.truncate(max_ranges - 1);
+            gaps.sort_unstable_by_key(|&(_, ix)| ix);
+
+            let mut merged: Vec<RangeInclusive<u32>> = Vec::with_capacity(max_ranges);
+            let mut start = *ranges[0].start();
+            for &(_, ix) in &gaps {
+                merged.push(start ..= *ranges[ix - 1].end());
+                start = *ranges[ix].start();
+            }
+            merged.push(start ..= *ranges[ranges.len() - 1].end());
+            return merged;
         }
 
         ranges
