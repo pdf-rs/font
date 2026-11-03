@@ -1123,3 +1123,63 @@ fn c26b_plain_svg_documents_still_parse() {
     let font = font_with_svg(SVG_DOC);
     assert!(font.svg_glyph(GlyphId(65)).is_some());
 }
+
+// ---------------------------------------------------------------------------------------------
+// Audit B3 — a broken layout table is shaping data lost, not a font that fails to load
+
+/// A GPOS table with one lookup carrying two subtables (OT §"Lookup List Table").
+fn gpos_two_subtables(lookup_type: u16, first: &[u8], second: &[u8]) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_u16(&mut t, 1);            // majorVersion
+    push_u16(&mut t, 0);            // minorVersion
+    push_u16(&mut t, 0);            // scriptListOffset
+    push_u16(&mut t, 0);            // featureListOffset
+    push_u16(&mut t, 10);           // lookupListOffset
+    push_u16(&mut t, 1);            // lookupCount
+    push_u16(&mut t, 4);            // lookup offset, from the lookup list
+    push_u16(&mut t, lookup_type);
+    push_u16(&mut t, 0);            // lookupFlag
+    push_u16(&mut t, 2);            // subtableCount
+    push_u16(&mut t, 10);           // subtable offset 0, from the lookup
+    push_u16(&mut t, (10 + first.len()) as u16); // subtable offset 1
+    assert_eq!(t.len(), 24);
+    t.extend_from_slice(first);
+    t.extend_from_slice(second);
+    t
+}
+
+#[test]
+fn c48_a_broken_gpos_subtable_does_not_cost_the_other_subtables() {
+    // Audit B3: one unreadable subtable used to fail `parse`, so a font whose other
+    // subtable is perfectly good became unloadable.
+    let tables = {
+        let mut t = base_tables(8);
+        t.push((*b"GPOS", gpos_two_subtables(2, &[0, 1], &pair_pos_1(1, &[(2, -30)]))));
+        t
+    };
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("font with a broken GPOS subtable parses");
+    assert_eq!(font.kerning(GlyphId(1), GlyphId(2)), -30.0,
+               "the readable subtable of the same lookup still kerns");
+}
+
+#[test]
+fn c48b_a_broken_gsub_drops_the_table_not_the_font() {
+    // Audit B3: `lookupListOffset` pointing past the end used to be fatal.
+    let mut gsub = gsub_table(0);
+    gsub[8..10].copy_from_slice(&0xffffu16.to_be_bytes()); // lookupListOffset, past the end
+    let mut tables = base_tables(8);
+    tables.push((*b"GSUB", gsub));
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("font with an unreadable GSUB parses");
+    assert!(font.gsub.is_none(), "the GSUB that cannot be read is dropped");
+}
+
+#[test]
+fn c48c_a_truncated_gdef_drops_the_table_not_the_font() {
+    // Audit B3: GDEF is optional; half a header is not a reason to refuse the font.
+    let mut gdef = gdef_table(Some(class_def_1(1, &[1, 2, 3, 4])), None);
+    gdef.truncate(8);
+    let mut tables = base_tables(8);
+    tables.push((*b"GDEF", gdef));
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("font with a truncated GDEF parses");
+    assert!(font.gdef.is_none(), "the GDEF that cannot be read is dropped");
+}
