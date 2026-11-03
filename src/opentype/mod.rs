@@ -269,7 +269,22 @@ impl Font for OpenTypeFont {
     }
     fn position(&self, glyphs: &[GlyphId], features: &[&[u8; 4]]) -> Vec<GlyphPosition> {
         match self.gpos.as_ref() {
-            Some(gpos) => gpos.position_with(glyphs, &|tag| features.iter().any(|&feature| tag.0 == *feature), self.gdef.as_ref()),
+            // Cursive and mark attachment place a glyph relative to another one, so they need
+            // the advance of the base glyph to know where that one ends.
+            Some(gpos) => gpos.position_with_advances(
+                glyphs,
+                &|tag| features.iter().any(|&feature| tag.0 == *feature),
+                self.gdef.as_ref(),
+                &|glyph| {
+                    self.hmtx.as_ref().map_or(0, |hmtx| {
+                        if glyph.0 > u16::max_value() as u32 {
+                            0
+                        } else {
+                            hmtx.advance(glyph.0 as u16)
+                        }
+                    })
+                },
+            ),
             None => vec![GlyphPosition::default(); glyphs.len()],
         }
     }
@@ -468,6 +483,17 @@ impl Hmtx {
             advance: advance as f32,
             lsb: lsb as f32,
         })
+    }
+    /// The horizontal advance of `gid` in font units, 0 for a glyph id at or beyond
+    /// `numGlyphs` (OT §hmtx: there is no metric for it).
+    pub fn advance(&self, gid: u16) -> i16 {
+        if gid >= self.num_glyphs {
+            return 0;
+        }
+        match self.metrics.get(gid as usize) {
+            Some(&(advance, _)) => advance as i16,
+            None => self.last_advance as i16,
+        }
     }
 }
 pub fn parse_hmtx(i: &[u8], hhea: &Hhea, maxp: &Maxp) -> Result<Hmtx, FontError> {

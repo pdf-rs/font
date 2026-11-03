@@ -7,7 +7,7 @@ use nom::{
 use crate::{R, GlyphId, GlyphPosition, FontError};
 use crate::parsers::{*};
 use crate::opentype::{Maxp, Tag, parse_extension, parse_lookup_list, coverage_table, parse_class_def};
-use crate::opentype::gdef::{GDef, glyph_ignored, LookupFlags};
+use crate::opentype::gdef::{GDef, MarkClass, glyph_ignored, LookupFlags};
 use crate::opentype::gsub::{
     Context, Feature, Script, MAX_NESTING, enabled_lookups, parse_chain_context_subst,
     parse_context_subst, parse_feature_list, parse_script_list, visible_after, visible_before,
@@ -42,16 +42,62 @@ enum PosSubtable {
     /// OT §GPOS "Pair Adjustment" (2): both value records of a glyph or class pair.
     Pair(PairSets),
     /// OT §GPOS "Cursive Attachment" (3): entry and exit anchor of one glyph.
-    Cursive(HashMap<u16, ((i16, i16), (i16, i16))>),
+    Cursive(HashMap<u16, CursiveAnchors>),
     /// OT §GPOS "Mark-to-Base Attachment" (4): (base, mark) -> offset.
     MarkToBase(HashMap<(u16, u16), (i16, i16)>),
-    /// OT §GPOS "Mark-to-Ligature Attachment" (5): (ligature, mark) -> offset, from the first
-    /// component of the ligature.
-    MarkToLigature(HashMap<(u16, u16), (i16, i16)>),
+    /// OT §GPOS "Mark-to-Ligature Attachment" (5): an anchor per mark class per component.
+    MarkToLigature(LigatureMarks),
     /// OT §GPOS "Mark-to-Mark Attachment" (6): (base mark, mark) -> offset.
     MarkToMark(HashMap<(u16, u16), (i16, i16)>),
     /// OT §GPOS "Context Positioning" (7) and "Chaining Context Positioning" (8).
     Context(Context),
+}
+
+/// OT §GPOS "Cursive Attachment" (3): the entry and exit anchor of one glyph. A NULL offset in
+/// the table means the glyph has no such anchor — a hole in the chain — which is not the same as
+/// the anchor `(0, 0)`; a real anchor there is legal and must not be confused with "absent".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CursiveAnchors {
+    pub entry: Option<(i16, i16)>,
+    pub exit: Option<(i16, i16)>,
+}
+
+/// OT §GPOS "Mark-to-Ligature Attachment" (5): a ligature carries one anchor per mark class per
+/// component, and the mark array says which class each mark belongs to.
+///
+/// A run of glyphs does not record which component of the ligature a mark sits over — the
+/// substitution that made the ligature dropped that — so a mark takes the component given by the
+/// number of marks between the ligature and itself: the first mark over a two-component ligature
+/// belongs to the first component, the second to the second, and a third stays on the last.
+#[derive(Debug, Clone, Default)]
+struct LigatureMarks {
+    /// mark glyph -> (mark class, anchor).
+    marks: HashMap<u16, (u16, (i16, i16))>,
+    /// ligature glyph -> per component, per mark class.
+    ligatures: HashMap<u16, Vec<Vec<Option<(i16, i16)>>>>,
+}
+
+impl LigatureMarks {
+    /// The offset of `mark` over `component` of `ligature`: the component's anchor minus the
+    /// mark's, or `None` if either the ligature or the mark has no anchor for that class.
+    fn delta(&self, ligature: u16, mark: u16, component: usize) -> Option<(i16, i16)> {
+        let &(mark_class, mark_anchor) = self.marks.get(&mark)?;
+        let components = self.ligatures.get(&ligature)?;
+        let anchors = components.get(component).or_else(|| components.last())?;
+        let (base_x, base_y) = anchors.get(usize::from(mark_class)).copied().flatten()?;
+        Some((base_x - mark_anchor.0, base_y - mark_anchor.1))
+    }
+}
+
+/// Which glyph a mark attaches to (OT §GPOS "Mark Attachment").
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum AttachTo {
+    /// Mark-to-base (4) and mark-to-ligature (5): the nearest preceding glyph that is not a
+    /// mark of its own. The marks in between belong to the same base.
+    Base,
+    /// Mark-to-mark (6): the nearest preceding glyph that is a mark, which is how two accents
+    /// stack on one letter.
+    Mark,
 }
 
 /// One pair positioning subtable: explicit glyph pairs (format 1) or a class matrix (format 2).
@@ -72,6 +118,10 @@ struct PairSets {
     class_based: bool,
     left_classes: HashMap<u16, u16>,
     right_classes: HashMap<u16, u16>,
+    /// Whether the subtable carries a value record for the second glyph of a pair. OT §GPOS
+    /// "Pair Adjustment": when it does, the lookup resumes at the glyph *after* the second one,
+    /// because that record may have changed the advance the next pair is measured from.
+    second_advance: bool,
 }
 
 impl PairSets {
@@ -118,11 +168,12 @@ impl GPos {
             _ => None,
         })
     }
-    /// OT §GPOS "Cursive Attachment": `(entry, exit)` anchors of one glyph.
-    pub fn get_cursive(&self, glyph: GlyphId) -> Option<((i16, i16), (i16, i16))> {
+    /// OT §GPOS "Cursive Attachment": the entry and exit anchors of one glyph, each absent when
+    /// the table has a NULL offset for it.
+    pub fn get_cursive(&self, glyph: GlyphId) -> Option<CursiveAnchors> {
         let key = glyph_key(glyph)?;
         self.subtables().find_map(|subtable| match subtable {
-            PosSubtable::Cursive(anchors) => anchors.get(&key).cloned(),
+            PosSubtable::Cursive(anchors) => anchors.get(&key).copied(),
             _ => None,
         })
     }
@@ -131,7 +182,7 @@ impl GPos {
     pub fn get_mark_to_ligature(&self, ligature: GlyphId, mark: GlyphId) -> Option<(i16, i16)> {
         let key = (glyph_key(ligature)?, glyph_key(mark)?);
         self.subtables().find_map(|subtable| match subtable {
-            PosSubtable::MarkToLigature(marks) => marks.get(&key).cloned(),
+            PosSubtable::MarkToLigature(marks) => marks.delta(key.0, key.1, 0),
             _ => None,
         })
     }
@@ -173,38 +224,65 @@ impl GPos {
         self.position_with(glyphs, enabled, None)
     }
 
-    /// `position`, with the `GDEF` table the font carries: it tells a lookup which glyphs to
+        /// `position`, with the `GDEF` table the font carries: it tells a lookup which glyphs to
     /// skip (OT §"Lookup Flags"), which needs the glyph classes only `GDEF` has.
     pub fn position_with(&self, glyphs: &[GlyphId], enabled: &dyn Fn(Tag) -> bool, gdef: Option<&GDef>) -> Vec<GlyphPosition> {
+        self.position_with_advances(glyphs, enabled, gdef, &|_glyph| 0)
+    }
+
+    /// `position_with`, plus the horizontal advance the font gives each glyph.
+    ///
+    /// OT §GPOS "Cursive Attachment" and "Mark Attachment" place a glyph on an *anchor* of
+    /// another glyph, and an anchor is a point in that glyph's own coordinate system. The run
+    /// being positioned carries no origins, only per-glyph advances, so the distance between the
+    /// two origins has to be summed from them — that is what `advance` is for.
+    pub fn position_with_advances(
+        &self,
+        glyphs: &[GlyphId],
+        enabled: &dyn Fn(Tag) -> bool,
+        gdef: Option<&GDef>,
+        advance: &dyn Fn(GlyphId) -> i16,
+    ) -> Vec<GlyphPosition> {
         let mut out = vec![GlyphPosition::default(); glyphs.len()];
         let lookup_indices = enabled_lookups(&self.scripts, &self.features, enabled);
         if lookup_indices.is_empty() {
             return out;
         }
-        // OT §"Lookups": every lookup runs, in lookup-list order; unlike a substitution a
+        // OT §"Lookups": each lookup runs across the whole run before the next one does. A
         // positioning lookup never changes the length of the run, so nothing moves under us.
-        for position in 0 .. glyphs.len() {
-            for &lookup_idx in &lookup_indices {
-                self.apply_lookup_at(lookup_idx, glyphs, &mut out, position, 0, gdef);
+        for &lookup_idx in &lookup_indices {
+            let mut position = 0;
+            while position < glyphs.len() {
+                // A pair adjustment that carries a value record for the second glyph resumes
+                // after that glyph (OT §GPOS "Pair Adjustment"); anything else moves on by one.
+                position += match self.apply_lookup_at(lookup_idx, glyphs, &mut out, position, 0, gdef, advance) {
+                    Some(step) => step.max(1),
+                    None => 1,
+                };
             }
         }
         out
     }
 
-    /// Applies one lookup at `position`; `true` if one of its subtables applied there.
-    fn apply_lookup_at(&self, lookup_idx: u16, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, depth: u8, gdef: Option<&GDef>) -> bool {
-        let subtables = match self.lookups.get(lookup_idx as usize) {
-            Some(subtables) => subtables,
-            None => return false,
-        };
+
+        /// Applies one lookup at `position`: how many glyphs of the run it used up, or `None` if no
+    /// subtable of the lookup applied there.
+    fn apply_lookup_at(
+        &self,
+        lookup_idx: u16,
+        glyphs: &[GlyphId],
+        positions: &mut [GlyphPosition],
+        position: usize,
+        depth: u8,
+        gdef: Option<&GDef>,
+        advance: &dyn Fn(GlyphId) -> i16,
+    ) -> Option<usize> {
+        let subtables = self.lookups.get(lookup_idx as usize)?;
         let flag = self.flags.get(lookup_idx as usize).copied().unwrap_or_default();
-        let glyph = match glyphs.get(position).and_then(|&glyph| glyph_key(glyph)) {
-            Some(glyph) => glyph,
-            None => return false,
-        };
+        let glyph = glyph_key(*glyphs.get(position)?)?;
         // OT §"Lookup Flags": a lookup skips the glyph classes its flag names.
         if glyph_ignored(gdef, flag, glyph) {
-            return false;
+            return None;
         }
         let skip = |gid: u16| glyph_ignored(gdef, flag, gid);
         // OT §"Lookups": only the first subtable of a lookup that matches is used.
@@ -213,98 +291,141 @@ impl GPos {
                 PosSubtable::Single(values) => match values.get(&glyph) {
                     Some(value) => {
                         add(positions, position, value);
-                        true
+                        Some(1)
                     }
-                    None => false,
+                    None => None,
                 },
                 PosSubtable::Pair(sets) => self.apply_pair(sets, glyphs, positions, position, glyph, &skip),
-                PosSubtable::Cursive(anchors) => self.apply_cursive(anchors, glyphs, positions, position, glyph, &skip),
-                PosSubtable::MarkToBase(marks) | PosSubtable::MarkToLigature(marks) | PosSubtable::MarkToMark(marks) =>
-                    self.apply_mark_attachment(marks, glyphs, positions, position, glyph, &skip),
-                PosSubtable::Context(context) => self.apply_context(context, glyphs, positions, position, depth, flag, gdef),
+                PosSubtable::Cursive(anchors) =>
+                    self.apply_cursive(anchors, glyphs, positions, position, glyph, &skip, flag, advance),
+                PosSubtable::MarkToBase(marks) =>
+                    self.apply_mark_attachment(marks, glyphs, positions, position, glyph, &skip, gdef, advance, AttachTo::Base),
+                PosSubtable::MarkToMark(marks) =>
+                    self.apply_mark_attachment(marks, glyphs, positions, position, glyph, &skip, gdef, advance, AttachTo::Mark),
+                PosSubtable::MarkToLigature(marks) =>
+                    self.apply_ligature_attachment(marks, glyphs, positions, position, glyph, &skip, gdef, advance),
+                PosSubtable::Context(context) =>
+                    self.apply_context(context, glyphs, positions, position, depth, flag, gdef, advance),
             };
-            if applied {
-                return true;
+            if applied.is_some() {
+                return applied;
             }
         }
-        false
+        None
     }
 
-    /// OT §GPOS "Pair Adjustment": the value records of the pair starting at `position` go on
+
+        /// OT §GPOS "Pair Adjustment": the value records of the pair starting at `position` go on
     /// the first glyph and on the second one.
-    fn apply_pair(&self, sets: &PairSets, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, glyph: u16, skip: &dyn Fn(u16) -> bool) -> bool {
-        let second_index = match visible_after(glyphs, position, 1, skip) {
-            Some(index) => index,
-            None => return false,
-        };
-        let second = match glyphs.get(second_index).and_then(|&glyph| glyph_key(glyph)) {
-            Some(glyph) => glyph,
-            None => return false,
-        };
-        let (first_value, second_value) = match sets.lookup(glyph, second) {
-            Some(pair) => pair,
-            None => return false,
-        };
+    fn apply_pair(&self, sets: &PairSets, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, glyph: u16, skip: &dyn Fn(u16) -> bool) -> Option<usize> {
+        let second_index = visible_after(glyphs, position, 1, skip)?;
+        let second = glyph_key(*glyphs.get(second_index)?)?;
+        let (first_value, second_value) = sets.lookup(glyph, second)?;
         add(positions, position, &first_value);
         add(positions, second_index, &second_value);
-        true
+        // OT §GPOS "Pair Adjustment": a subtable with a value record for the second glyph resumes
+        // at the glyph *after* it — the record may have changed the advance the next pair is
+        // measured from — so the second glyph is used up.
+        Some(if sets.second_advance { 2 } else { 1 })
     }
 
-    /// OT §GPOS "Cursive Attachment": the entry anchor of a glyph is laid onto the exit anchor
-    /// of the glyph before it, which moves the glyph by the difference.
-    fn apply_cursive(&self, anchors: &HashMap<u16, ((i16, i16), (i16, i16))>, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, glyph: u16, skip: &dyn Fn(u16) -> bool) -> bool {
-        let (entry, _exit) = match anchors.get(&glyph) {
-            Some(anchors) => *anchors,
-            None => return false,
+
+        /// OT §GPOS "Cursive Attachment": the entry anchor of a glyph is laid onto the exit anchor
+    /// of the glyph before it. Both are points in their own glyph's coordinates, so the move is
+    /// the anchor difference less the distance between the two origins.
+    fn apply_cursive(
+        &self,
+        anchors: &HashMap<u16, CursiveAnchors>,
+        glyphs: &[GlyphId],
+        positions: &mut [GlyphPosition],
+        position: usize,
+        glyph: u16,
+        skip: &dyn Fn(u16) -> bool,
+        flag: LookupFlags,
+        advance: &dyn Fn(GlyphId) -> i16,
+    ) -> Option<usize> {
+        let entry = anchors.get(&glyph)?.entry?;
+        let previous = visible_before(glyphs, position, 0, skip)?;
+        let previous_glyph = glyph_key(*glyphs.get(previous)?)?;
+        let exit = anchors.get(&previous_glyph)?.exit?;
+        let shift: i32 = (previous .. position)
+            .map(|index| advance_at(glyphs, positions, index, advance))
+            .sum();
+        // OT §"Lookup Flags": `RIGHT_TO_LEFT` (0x0001) says the chain runs against the glyph
+        // order, so the advance in between brings the origins closer instead of further apart.
+        let dx = if flag.flag & 0x0001 != 0 {
+            i32::from(exit.0) - i32::from(entry.0) + shift
+        } else {
+            i32::from(exit.0) - i32::from(entry.0) - shift
         };
-        let previous = match visible_before(glyphs, position, 0, skip).and_then(|index| glyphs.get(index)).and_then(|&glyph| glyph_key(glyph)) {
-            Some(previous) => previous,
-            None => return false,
-        };
-        let (_entry, exit) = match anchors.get(&previous) {
-            Some(anchors) => *anchors,
-            None => return false,
-        };
+        let dy = i32::from(exit.1) - i32::from(entry.1);
         if let Some(slot) = positions.get_mut(position) {
-            slot.x_offset = slot.x_offset.saturating_add(exit.0.saturating_sub(entry.0));
-            slot.y_offset = slot.y_offset.saturating_add(exit.1.saturating_sub(entry.1));
+            slot.x_offset = clamp_i16(i32::from(slot.x_offset) + dx);
+            slot.y_offset = clamp_i16(i32::from(slot.y_offset) + dy);
         }
-        true
+        Some(1)
     }
 
-    /// OT §GPOS "Mark Attachment" (4, 5, 6): a mark moves to the anchor its base — base glyph,
-    /// ligature or another mark — carries for its class. The maps hold that difference already.
-    fn apply_mark_attachment(&self, marks: &HashMap<(u16, u16), (i16, i16)>, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, glyph: u16, skip: &dyn Fn(u16) -> bool) -> bool {
-        let mut n = 0;
-        while let Some(index) = visible_before(glyphs, position, n, skip) {
-            let base = match glyphs.get(index).and_then(|&glyph| glyph_key(glyph)) {
-                Some(base) => base,
-                None => return false,
-            };
-            if let Some(&(dx, dy)) = marks.get(&(base, glyph)) {
-                if let Some(slot) = positions.get_mut(position) {
-                    slot.x_offset = slot.x_offset.saturating_add(dx);
-                    slot.y_offset = slot.y_offset.saturating_add(dy);
-                }
-                return true;
-            }
-            n += 1;
-        }
-        false
+
+        /// OT §GPOS "Mark Attachment" (4 and 6): a mark moves to the anchor its base carries for its
+    /// class; the map holds that difference already. The base is the nearest preceding base glyph
+    /// (4) or the nearest preceding mark (6) — not just any earlier glyph that happens to have an
+    /// anchor for this mark, which is what made a mark jump over its own base.
+    fn apply_mark_attachment(
+        &self,
+        marks: &HashMap<(u16, u16), (i16, i16)>,
+        glyphs: &[GlyphId],
+        positions: &mut [GlyphPosition],
+        position: usize,
+        glyph: u16,
+        skip: &dyn Fn(u16) -> bool,
+        gdef: Option<&GDef>,
+        advance: &dyn Fn(GlyphId) -> i16,
+        attach: AttachTo,
+    ) -> Option<usize> {
+        let base_index = attach_index(glyphs, position, skip, gdef, attach)?;
+        let base = glyph_key(*glyphs.get(base_index)?)?;
+        let &(dx, dy) = marks.get(&(base, glyph))?;
+        place_mark(positions, position, base_index, glyphs, dx, dy, advance);
+        Some(1)
     }
 
-    /// OT §GPOS "Context Positioning" (7, 8): run the lookups the first matching rule names at
-    /// the glyphs of the run. Positioning never changes the length of the run.
-    fn apply_context(&self, context: &Context, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, depth: u8, flag: LookupFlags, gdef: Option<&GDef>) -> bool {
+    /// OT §GPOS "Mark-to-Ligature Attachment" (5): like mark-to-base, except that the ligature
+    /// carries one anchor per component and the mark takes the one for its component.
+    fn apply_ligature_attachment(
+        &self,
+        marks: &LigatureMarks,
+        glyphs: &[GlyphId],
+        positions: &mut [GlyphPosition],
+        position: usize,
+        glyph: u16,
+        skip: &dyn Fn(u16) -> bool,
+        gdef: Option<&GDef>,
+        advance: &dyn Fn(GlyphId) -> i16,
+    ) -> Option<usize> {
+        let base_index = attach_index(glyphs, position, skip, gdef, AttachTo::Base)?;
+        let ligature = glyph_key(*glyphs.get(base_index)?)?;
+        // The run does not record which component a mark sits over; the marks already stacked on
+        // the ligature are the components used up so far.
+        let component = (base_index + 1 .. position)
+            .filter(|&index| glyphs.get(index).and_then(|&gid| glyph_key(gid)).map_or(false, |gid| is_mark(gdef, gid)))
+            .count();
+        let (dx, dy) = marks.delta(ligature, glyph, component)?;
+        place_mark(positions, position, base_index, glyphs, dx, dy, advance);
+        Some(1)
+    }
+
+
+        /// OT §GPOS "Context Positioning" (7, 8): run the lookups the first matching rule names at
+    /// the glyphs of the run. Positioning never changes the length of the run, so this consumes
+    /// exactly one glyph.
+    fn apply_context(&self, context: &Context, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, depth: u8, flag: LookupFlags, gdef: Option<&GDef>, advance: &dyn Fn(GlyphId) -> i16) -> Option<usize> {
         if depth >= MAX_NESTING {
             debug!("GPOS: not following context lookups nested deeper than {}", MAX_NESTING);
-            return false;
+            return None;
         }
         let skip = |gid: u16| glyph_ignored(gdef, flag, gid);
-        let rule = match context.matched_rule(glyphs, position, &skip) {
-            Some(rule) => rule,
-            None => return false,
-        };
+        let rule = context.matched_rule(glyphs, position, &skip)?;
         let targets: Vec<usize> = (0 ..= rule.input_len())
             .filter_map(|n| visible_after(glyphs, position, n, &skip))
             .collect();
@@ -315,10 +436,13 @@ impl GPos {
                 Some(&target) => target,
                 None => continue,
             };
-            applied |= self.apply_lookup_at(lookup_index, glyphs, positions, target, depth + 1, gdef);
+            applied |= self
+                .apply_lookup_at(lookup_index, glyphs, positions, target, depth + 1, gdef, advance)
+                .is_some();
         }
-        applied
+        if applied { Some(1) } else { None }
     }
+
 }
 
 /// Adds a value record to the position of one glyph, saturating: a font may pile adjustments
@@ -330,6 +454,88 @@ fn add(positions: &mut [GlyphPosition], position: usize, value: &ValueRecord) {
         slot.x_offset = slot.x_offset.saturating_add(value.x_placement);
         slot.y_offset = slot.y_offset.saturating_add(value.y_placement);
     }
+}
+
+/// How many glyphs back a mark may look for its base. A real font stacks a few accents on a
+/// letter, not dozens, and the bound keeps a run of nothing but marks from costing O(n²).
+const MAX_MARK_CHAIN: usize = 64;
+
+/// Whether `gid` is a mark, as `GDEF` says. Without `GDEF` nothing is known to be one.
+fn is_mark(gdef: Option<&GDef>, gid: u16) -> bool {
+    gdef.and_then(|gdef| gdef.mark_class(gid)) == Some(MarkClass::Mark)
+}
+
+/// The index of the glyph a mark attaches to: the nearest preceding glyph that is not a mark
+/// (`AttachTo::Base`) or the nearest preceding mark (`AttachTo::Mark`).
+///
+/// OT §GPOS "Mark Attachment": the base of a mark is the closest preceding base glyph — the
+/// marks between the two belong to the same base — and a mark-to-mark lookup stacks onto the
+/// mark immediately before it. Searching further back for *any* glyph that happens to have an
+/// anchor for this mark is not what the spec says.
+fn attach_index(
+    glyphs: &[GlyphId],
+    position: usize,
+    skip: &dyn Fn(u16) -> bool,
+    gdef: Option<&GDef>,
+    attach: AttachTo,
+) -> Option<usize> {
+    let gdef = match gdef {
+        Some(gdef) => gdef,
+        // Without `GDEF` no glyph is known to be a mark, so the nearest preceding glyph is the
+        // only candidate there is.
+        None => return visible_before(glyphs, position, 0, skip),
+    };
+    for n in 0 .. MAX_MARK_CHAIN {
+        let index = visible_before(glyphs, position, n, skip)?;
+        let mark = glyphs.get(index).and_then(|&gid| glyph_key(gid)).map_or(false, |gid| is_mark(Some(gdef), gid));
+        match attach {
+            AttachTo::Base if !mark => return Some(index),
+            AttachTo::Mark if mark => return Some(index),
+            // A mark-to-mark lookup whose nearest neighbour is not a mark has no base at all.
+            AttachTo::Mark => return None,
+            AttachTo::Base => {}
+        }
+    }
+    None
+}
+
+/// The device-space advance of the glyph at `index`: what the font says plus any adjustment a
+/// pair lookup has already put on it.
+fn advance_at(glyphs: &[GlyphId], positions: &[GlyphPosition], index: usize, advance: &dyn Fn(GlyphId) -> i16) -> i32 {
+    let font_advance = glyphs.get(index).map_or(0, |&glyph| i32::from(advance(glyph)));
+    let adjusted = positions.get(index).map_or(0, |position| i32::from(position.x_advance));
+    font_advance + adjusted
+}
+
+/// Places a mark at the anchor its base carries for it. The anchor difference is relative to the
+/// two glyph origins, so the marks move back by the advance of the base and of every glyph in
+/// between, which is what makes them sit over the base instead of to the right of it.
+fn place_mark(
+    positions: &mut [GlyphPosition],
+    position: usize,
+    base_index: usize,
+    glyphs: &[GlyphId],
+    dx: i16,
+    dy: i16,
+    advance: &dyn Fn(GlyphId) -> i16,
+) {
+    if position <= base_index {
+        return;
+    }
+    let shift: i32 = (base_index .. position)
+        .map(|index| advance_at(glyphs, positions, index, advance))
+        .sum();
+    let base_x_offset = positions.get(base_index).map_or(0, |base| i32::from(base.x_offset));
+    let base_y_offset = positions.get(base_index).map_or(0, |base| i32::from(base.y_offset));
+    if let Some(slot) = positions.get_mut(position) {
+        slot.x_offset = clamp_i16(i32::from(dx) - shift + base_x_offset);
+        slot.y_offset = clamp_i16(i32::from(dy) + base_y_offset);
+    }
+}
+
+/// Keeps a position that does not fit an `i16` inside one instead of wrapping around.
+fn clamp_i16(value: i32) -> i16 {
+    value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
 /// The tables are keyed by u16 glyph ids; a larger id cannot be in one.
@@ -504,6 +710,7 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<PairSets
             let (i, value_format_1) = be_u16(i)?;
             let (i, value_format_2) = be_u16(i)?;
             let (i, pair_set_count) = be_u16(i)?;
+            pairs.second_advance = value_format_2 != 0;
 
             let mut coverage = coverage_table(coverage_off.of(data)?)?;
             for offset in iterator_n(i, be_u16, pair_set_count) {
@@ -532,6 +739,9 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<PairSets
             let (i, class_2_count) = be_u16(i)?;
 
             pairs.class_based = true;
+            // OT §GPOS "Pair Adjustment": with a value record for the second glyph the lookup
+            // resumes after that glyph, since the record may move the next pair's origin.
+            pairs.second_advance = value_format_2 != 0;
             // OT §GPOS "Pair Adjustment" format 2: the coverage lists the glyphs that may start
             // a pair. It is not optional — a glyph it does not list has no pair here, however
             // the ClassDefs classify it.
@@ -683,8 +893,9 @@ fn parse_single_adjustment(data: &[u8]) -> Result<HashMap<u16, ValueRecord>, Fon
 }
 
 /// OT §GPOS "Cursive Attachment" (lookup type 3), format 1: an entry and an exit anchor per
-/// glyph. A NULL offset means the glyph has no such anchor, which is stored as `(0, 0)`.
-fn parse_cursive(data: &[u8]) -> Result<HashMap<u16, ((i16, i16), (i16, i16))>, FontError> {
+/// glyph. A NULL offset means the glyph has no such anchor — a hole in the chain — which is not
+/// the same as an anchor at `(0, 0)`, so it is kept as `None`.
+fn parse_cursive(data: &[u8]) -> Result<HashMap<u16, CursiveAnchors>, FontError> {
     let mut anchors = HashMap::new();
     let (i, format) = be_u16(data)?;
     require_eq!(format, 1);
@@ -693,17 +904,21 @@ fn parse_cursive(data: &[u8]) -> Result<HashMap<u16, ((i16, i16), (i16, i16))>, 
     let coverage = coverage_table(slice!(data, coverage_offset as usize ..))?;
     for (glyph, (entry_offset, exit_offset)) in coverage.zip(iterator_n(i, tuple((be_u16, be_u16)), entry_exit_count)) {
         let entry = match Offset(entry_offset).of_opt(data) {
-            Some(anchor) => anchor_coordinates(anchor)?,
-            None => (0, 0),
+            Some(anchor) => Some(anchor_coordinates(anchor)?),
+            None => None,
         };
         let exit = match Offset(exit_offset).of_opt(data) {
-            Some(anchor) => anchor_coordinates(anchor)?,
-            None => (0, 0),
+            Some(anchor) => Some(anchor_coordinates(anchor)?),
+            None => None,
         };
-        anchors.insert(glyph, (entry, exit));
+        if entry.is_none() && exit.is_none() {
+            continue;
+        }
+        anchors.insert(glyph, CursiveAnchors { entry, exit });
     }
     Ok(anchors)
 }
+
 
 /// OT §GPOS "Anchor Tables": only the `(x, y)` pair is used. Formats 2 and 3 carry a contour
 /// point as well, but the coordinates are the same leading fields.
@@ -712,11 +927,11 @@ fn anchor_coordinates(data: &[u8]) -> Result<(i16, i16), FontError> {
     Ok((anchor.x, anchor.y))
 }
 
-/// OT §GPOS "Mark-to-Ligature Attachment" (lookup type 5), format 1. A ligature can carry an
-/// anchor per component; this crate keeps the first component's, which is where a mark after
-/// the whole ligature goes.
-fn parse_mark_to_ligature_attachment(data: &[u8]) -> Result<HashMap<(u16, u16), (i16, i16)>, FontError> {
-    let mut marks_to_ligatures = HashMap::new();
+/// OT §GPOS "Mark-to-Ligature Attachment" (lookup type 5), format 1. A ligature carries one
+/// anchor per mark class per component, and the mark array says which class each mark belongs
+/// to; the component is decided when the mark is placed (see `LigatureMarks`).
+fn parse_mark_to_ligature_attachment(data: &[u8]) -> Result<LigatureMarks, FontError> {
+    let mut ligature_marks = LigatureMarks::default();
     let (i, format) = be_u16(data)?;
     require_eq!(format, 1);
     let (i, mark_coverage_offset) = be_u16(i)?;
@@ -730,7 +945,6 @@ fn parse_mark_to_ligature_attachment(data: &[u8]) -> Result<HashMap<(u16, u16), 
     let mark_array = parse_mark_array_table(slice!(data, mark_array_offset as usize ..))?;
 
     // The marks with their class and anchor, once, instead of once per ligature.
-    let mut marks = Vec::new();
     for (mark_gid, entry) in mark_coverage.zip(mark_array.iter()) {
         let (mark_class, mark_anchor) = entry?;
         if mark_class >= mark_class_count {
@@ -738,7 +952,7 @@ fn parse_mark_to_ligature_attachment(data: &[u8]) -> Result<HashMap<(u16, u16), 
                   mark_gid, mark_class, mark_class_count);
             continue;
         }
-        marks.push((mark_gid, mark_class, (mark_anchor.x, mark_anchor.y)));
+        ligature_marks.marks.insert(mark_gid, (mark_class, (mark_anchor.x, mark_anchor.y)));
     }
 
     let ligature_array = slice!(data, ligature_array_offset as usize ..);
@@ -753,29 +967,39 @@ fn parse_mark_to_ligature_attachment(data: &[u8]) -> Result<HashMap<(u16, u16), 
             warn!("GPOS: ligature {} has componentCount 0, skipping it", ligature_gid);
             continue;
         }
-        // The first ComponentRecord: one anchor offset per mark class.
-        let anchors = match array::<uint16, _>(usize::from(mark_class_count))(i) {
-            Ok((_, anchors)) => anchors,
-            Err(_) => continue,
-        };
-        for &(mark_gid, mark_class, (mark_x, mark_y)) in &marks {
-            let anchor = match anchors.get(usize::from(mark_class)) {
-                // A NULL offset: no anchor for this class.
-                Ok(0) => continue,
-                Ok(offset) => match AnchorTable::parse(slice!(attach, offset as usize ..)) {
-                    Ok(anchor) => anchor,
-                    Err(_) => continue,
-                },
-                Err(_) => continue,
+        // One ComponentRecord per component: one anchor offset per mark class. A NULL offset
+        // means the component has no anchor for that class.
+        let mut components = Vec::with_capacity(usize::from(component_count.min(64)));
+        let mut rest = i;
+        for _ in 0 .. component_count {
+            let offsets = match array::<uint16, _>(usize::from(mark_class_count))(rest) {
+                Ok((after, offsets)) => (after, offsets),
+                // Short data: keep the components read so far rather than the whole table.
+                Err(_) => break,
             };
-            marks_to_ligatures.insert(
-                (ligature_gid, mark_gid),
-                (anchor.x - mark_x, anchor.y - mark_y),
-            );
+            rest = offsets.0;
+            let mut anchors: Vec<Option<(i16, i16)>> = Vec::new();
+            for offset in offsets.1.iter() {
+                let anchor = match offset {
+                    Ok(offset) if offset != 0 => attach
+                        .get(offset as usize ..)
+                        .and_then(|bytes| AnchorTable::parse(bytes).ok())
+                        .map(|anchor| (anchor.x, anchor.y)),
+                    // A NULL offset: no anchor for this class. Short data: the same.
+                    _ => None,
+                };
+                anchors.push(anchor);
+            }
+            components.push(anchors);
         }
+        if components.is_empty() {
+            continue;
+        }
+        ligature_marks.ligatures.insert(ligature_gid, components);
     }
-    Ok(marks_to_ligatures)
+    Ok(ligature_marks)
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -994,7 +1218,10 @@ mod tests {
         let data = words_to_bytes(&words);
         let mut gpos = GPos::default();
         parse_positioning(&data, 3, &mut gpos, 100).expect("cursive attachment parses");
-        assert_eq!(gpos.get_cursive(GlyphId(40)), Some(((5, 6), (7, 8))));
+        assert_eq!(
+            gpos.get_cursive(GlyphId(40)),
+            Some(CursiveAnchors { entry: Some((5, 6)), exit: Some((7, 8)) })
+        );
     }
 
     #[test]
@@ -1184,5 +1411,126 @@ mod tests {
         // Glyph 101 is not a mark (no GDEF class), so IgnoreMarks does not hide it.
         let positions = gpos.position_with(&[GlyphId(101)], &kern_enabled, Some(&gdef));
         assert_eq!(positions[0].x_advance, -5);
+    }
+
+    #[test]
+    fn a_mark_attaches_to_the_nearest_base_only() {
+        // Audit C3: base 200 carries the class-0 anchor (30,40), mark 100 its own at (10,10),
+        // so the mark moves by (20,30) when it follows 200. After the unclassed glyph 201 it
+        // must not fall back over that glyph to 200: the nearest preceding glyph is where a
+        // mark looks, not every earlier one that happens to have an anchor for it.
+        let words: [u16; 23] = [
+            1, 34, 40, 1, 12, 24, // format, markCov, baseCov, markClassCount, markArray, baseArray
+            1, 0, 6,              // MarkArray: one mark, class 0, anchor at +6
+            1, 10, 10,            // mark anchor (10,10)
+            1, 4,                 // BaseArray: one base, anchor at +4
+            1, 30, 40,            // base anchor (30,40)
+            1, 1, 100,            // mark coverage
+            1, 1, 200,            // base coverage
+        ];
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 4, &mut gpos, 100).expect("mark-to-base parses");
+        let gpos = gpos_with(gpos, vec![0]);
+
+        let positions = gpos.position(&[GlyphId(200), GlyphId(100)], &kern_enabled);
+        assert_eq!(positions[1].x_offset, 20);
+        assert_eq!(positions[1].y_offset, 30);
+
+        let positions = gpos.position(&[GlyphId(200), GlyphId(100), GlyphId(201), GlyphId(100)], &kern_enabled);
+        assert_eq!(positions[1].x_offset, 20);
+        // The second mark's base is 201, which has no anchor for it.
+        assert_eq!(positions[3], GlyphPosition::default());
+    }
+
+    #[test]
+    fn a_mark_attaches_to_the_nearest_mark_not_a_base() {
+        // Audit C3: mark-to-mark (6) looks for the nearest preceding mark, skipping bases.
+        // Mark 202 sits between the anchored mark 201 and mark 100, so 100 follows 202 — which
+        // has no anchor for it — and must not jump back to 201.
+        let words: [u16; 23] = [
+            1, 34, 40, 1, 12, 24, // format, mark1Cov, mark2Cov, markClassCount, mark1Array, mark2Array
+            1, 0, 6,              // MarkArray: one mark, class 0, anchor at +6
+            1, 10, 10,            // mark anchor (10,10)
+            1, 4,                 // Mark2Array: one mark, anchor at +4
+            1, 30, 40,            // mark2 anchor (30,40)
+            1, 1, 100,            // mark1 coverage
+            1, 1, 201,            // mark2 coverage
+        ];
+        let gdef_words: [u16; 14] = [
+            1, 0, 12, 0, 0, 0,    // GDEF 1.0, glyphClassDefOffset 12
+            2, 2, 100, 100, 3,    // classDef format 2: 100 -> class 3 (mark)
+            201, 202, 3,          // 201..202 -> class 3 (mark)
+        ];
+        let gdef = crate::opentype::gdef::parse_gdef(&words_to_bytes(&gdef_words)).expect("GDEF parses");
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 6, &mut gpos, 100).expect("mark-to-mark parses");
+        let gpos = gpos_with(gpos, vec![0]);
+
+        // Directly after 201 the mark moves.
+        let positions = gpos.position_with(&[GlyphId(201), GlyphId(100)], &kern_enabled, Some(&gdef));
+        assert_eq!(positions[1].x_offset, 20);
+
+        // With mark 202 in between, the nearest mark has no anchor for 100.
+        let positions = gpos.position_with(
+            &[GlyphId(201), GlyphId(202), GlyphId(100)],
+            &kern_enabled,
+            Some(&gdef),
+        );
+        assert_eq!(positions[2], GlyphPosition::default());
+    }
+
+    #[test]
+    fn cursive_attachment_subtracts_the_advance_in_between() {
+        // Audit C3: glyph 40 exits at (100,20), glyph 41 enters at (10,4). The origins of the
+        // two glyphs are 500 units apart, so laying the entry anchor onto the exit anchor moves
+        // glyph 41 by 100 - 10 - 500 = -410 horizontally and 20 - 4 = 16 vertically.
+        let words: [u16; 20] = [
+            1, 32, 2,       // format, coverageOffset, entryExitCount
+            14, 20, 26, 0,  // entry40, exit40, entry41, (no exit for 41)
+            1, 5, 6,        // entry anchor of 40
+            1, 100, 20,     // exit anchor of 40
+            1, 10, 4,       // entry anchor of 41
+            1, 2, 40, 41,   // coverage
+        ];
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 3, &mut gpos, 100).expect("cursive attachment parses");
+        let gpos = gpos_with(gpos, vec![0]);
+
+        let positions = gpos.position_with_advances(
+            &[GlyphId(40), GlyphId(41)],
+            &kern_enabled,
+            None,
+            &|_| 500,
+        );
+        assert_eq!(positions[1].x_offset, -410);
+        assert_eq!(positions[1].y_offset, 16);
+    }
+
+    #[test]
+    fn a_pair_with_a_second_value_record_consumes_both_glyphs() {
+        // Audit C8d: with a value record for the second glyph the lookup resumes after it, so
+        // the pair (21,20) must not be applied on top of the pair (20,21) it overlaps.
+        let words: [u16; 19] = [
+            1, 30,          // format 1, coverageOffset
+            4, 4,           // valueFormat1 = X_ADVANCE, valueFormat2 = X_ADVANCE
+            2,              // pairSetCount
+            14, 22,         // pairSetOffsets
+            1, 21, (-40i16) as u16, 5,   // pairSet for 20: (21 -> -40, 5)
+            1, 20, (-7i16) as u16, 0,    // pairSet for 21: (20 -> -7, 0)
+            1, 2, 20, 21,   // coverage
+        ];
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        parse_positioning(&data, 2, &mut gpos, 100).expect("pair adjustment parses");
+        let gpos = gpos_with(gpos, vec![0]);
+
+        let positions = gpos.position(&[GlyphId(20), GlyphId(21), GlyphId(20)], &kern_enabled);
+        assert_eq!(positions[0].x_advance, -40);
+        assert_eq!(positions[1].x_advance, 5);
+        // The lookup moved past both glyphs, so (21,20) never applies.
+        assert_eq!(positions[2], GlyphPosition::default());
     }
 }
