@@ -81,16 +81,20 @@ fn pfa_len_iv(charstrings: &[(&str, &[u8])], encoding: Option<&str>, len_iv: i32
         .iter()
         .map(|(name, bytes)| (*name, bytes.as_slice()))
         .collect();
-    pfa_with_raw_strings(&borrowed, encoding, len_iv)
+    pfa_with_raw_strings(&borrowed, encoding, len_iv, &[])
 }
 
 /// Assemble a PFA font whose `/CharStrings` entries are written **verbatim** — the
 /// caller has already encrypted them (or not, for `lenIV < 0`). Needed to build fonts
 /// whose charstrings are shorter than `lenIV`.
+///
+/// `subrs` are also written verbatim and only emitted when non-empty, so the common
+/// case keeps a one-entry `/Private` dict.
 fn pfa_with_raw_strings(
     charstrings: &[(&str, &[u8])],
     encoding: Option<&str>,
     len_iv: i32,
+    subrs: &[Vec<u8>],
 ) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"%!PS-AdobeFont-1.0: Test\n");
@@ -108,9 +112,22 @@ fn pfa_with_raw_strings(
     }
     out.extend_from_slice(b"end readonly def\n");
 
-    out.extend_from_slice(
-        format!("/Private 1 dict dup begin\n/lenIV {} def\nend readonly def\n", len_iv).as_bytes(),
-    );
+    if subrs.is_empty() {
+        out.extend_from_slice(
+            format!("/Private 1 dict dup begin\n/lenIV {} def\nend readonly def\n", len_iv).as_bytes(),
+        );
+    } else {
+        out.extend_from_slice(
+            format!("/Private 2 dict dup begin\n/lenIV {} def\n", len_iv).as_bytes(),
+        );
+        out.extend_from_slice(format!("/Subrs {} array\n", subrs.len()).as_bytes());
+        for (i, subr) in subrs.iter().enumerate() {
+            out.extend_from_slice(format!("dup {} ", i).as_bytes());
+            push_ps_string(&mut out, subr);
+            out.extend_from_slice(b" put\n");
+        }
+        out.extend_from_slice(b"end readonly def\n");
+    }
     if let Some(encoding) = encoding {
         out.extend_from_slice(b"/Encoding ");
         out.extend_from_slice(encoding.as_bytes());
@@ -259,42 +276,67 @@ fn seac(adx: i32, ady: i32, base: i32, accent: i32) -> Vec<u8> {
 
 // ---------------------------- flex (F40)
 
-/// A charstring drawing a 100 unit wide flex: `rmoveto` to the reference point, two
-/// `rrcurveto`, then `flexheight x y 3 0 callothersubr` and `pop pop setcurrentpoint`.
+/// The three flex subroutines a Type 1 font carries in its `/Private` dict
+/// (TN5015 §10, T1 §8; FreeType `psaux/t1decode.c`, othersubrs 0–2), as plain
+/// charstrings — the caller encrypts them.
+///
+/// Subr 1 starts the flex, subr 2 acknowledges each of the seven `rmoveto`s, and
+/// subr 0 ends it with `flexheight endx endy 3 0 callothersubr pop pop setcurrentpoint`.
+/// The operand order is `n othersubr# callothersubr`, i.e. the subr number is on top.
+fn flex_subrs() -> Vec<Vec<u8>> {
+    let mut start = vec![139, 140]; // 0 1
+    start.extend_from_slice(&[12, 16, 11]); // callothersubr return
+    let mut add = vec![139, 141]; // 0 2
+    add.extend_from_slice(&[12, 16, 11]);
+    let mut end = vec![142, 139]; // 3 0
+    end.extend_from_slice(&[12, 16, 12, 17, 12, 17, 12, 33, 11]);
+    vec![end, start, add]
+}
+
+/// A flex exactly as a real font writes it: a normal `rmoveto` to the start of the
+/// flexed segment, `0 1 callsubr` (flex start), then seven `dx dy rmoveto 2 callsubr`
+/// steps — the first of which only moves to the reference point — and finally
+/// `flexheight endx endy 0 callsubr` followed by `endchar`.
 fn flex_glyph() -> Vec<u8> {
     let mut cs = HSBW.to_vec(); // hsbw 0 500
-    num(&mut cs, 0); // n = 0
-    num(&mut cs, 1); // otherSubr 1: flex start
-    cs.extend_from_slice(&[12, 16]);
-    num(&mut cs, 10); // rmoveto, reference point (10, 10)
-    num(&mut cs, 10);
+    num(&mut cs, 20); // rmoveto to the flex start point (20, 0)
+    num(&mut cs, 0);
     cs.push(21);
-    for &d in &[0, 50, 50, 50, 40, 0] { // first curve, ends (100, 110)
-        num(&mut cs, d);
+    num(&mut cs, 1); // 1 callsubr -> `0 1 callothersubr`, flex start
+    cs.push(10);
+    // reference point (30, 50), then the six points of the two cubics:
+    // (40,100) (60,100) (70,50) | (80,50) (100,20) (110,0)
+    for &(dx, dy) in &[(10, 50), (10, 50), (20, 0), (10, -50), (10, 0), (20, -30), (10, -20)] {
+        num(&mut cs, dx);
+        num(&mut cs, dy);
+        cs.push(21);
+        num(&mut cs, 2); // 2 callsubr -> `0 2 callothersubr`
+        cs.push(10);
     }
-    cs.push(8); // rrcurveto
-    for &d in &[10, -50, 40, -50, 0, 0] { // second curve, ends (150, 10)
-        num(&mut cs, d);
-    }
-    cs.push(8); // rrcurveto
     num(&mut cs, 10); // flex height
-    num(&mut cs, 150); // final x
-    num(&mut cs, 10); // final y
-    num(&mut cs, 3); // n = 3
-    num(&mut cs, 0); // otherSubr 0: flex end
-    cs.extend_from_slice(&[12, 16]);
-    cs.extend_from_slice(&[12, 17, 12, 17, 12, 33]); // pop pop setcurrentpoint
+    num(&mut cs, 110); // end point x
+    num(&mut cs, 0); // end point y
+    num(&mut cs, 0); // 0 callsubr -> `3 0 callothersubr pop pop setcurrentpoint`
+    cs.push(10);
     cs.push(14); // endchar
     cs
 }
 
 #[test]
 fn c24_type1_flex_draws_two_cubics() {
-    // F40: only `rmoveto` fed the flex sequence, so the seven points were never
-    // complete and the glyph was dropped (`TupleElements` failed).
-    let data = pfa(
-        &[(".notdef", &notdef()), ("flex", &flex_glyph())],
+    // F40 / audit B1: only `rmoveto` fed the flex sequence, so the seven points were
+    // never complete and the glyph was dropped. `callsubr` 2 — which every flex emits
+    // after each `rmoveto` — used to reset the sequence as well. The reference point
+    // (the first of the seven) must not end up in the outline.
+    let subrs: Vec<Vec<u8>> = flex_subrs().iter().map(|s| encrypt(s, 4)).collect();
+    let data = pfa_with_raw_strings(
+        &[
+            (".notdef", &encrypt(&notdef(), 4)),
+            ("flex", &encrypt(&flex_glyph(), 4)),
+        ],
         Some("{/.notdef /flex}"),
+        4,
+        &subrs,
     );
     let font = parse(&data);
     let gid = font.gid_for_name("flex").expect("glyph flex");
@@ -304,19 +346,22 @@ fn c24_type1_flex_draws_two_cubics() {
     let contours = glyph.path.contours();
     assert_eq!(contours.len(), 1);
     let points = contours[0].points();
+    // start of the flex, then the two cubics: 1 + 3 + 3
     let expected = [
-        (10., 10.),   // reference point, the start of the flex
-        (10., 60.),   // first control point
-        (60., 110.),  // second control point
-        (100., 110.), // joining point
-        (110., 60.),  // third control point
-        (150., 10.),  // fourth control point
-        (150., 10.),  // end point
+        (20., 0.),    // where the charstring was when flex started
+        (40., 100.),  // first control point
+        (60., 100.),  // second control point
+        (70., 50.),   // joining point
+        (80., 50.),   // third control point
+        (100., 20.),  // fourth control point
+        (110., 0.),   // end point
     ];
     assert_eq!(points.len(), expected.len(), "{:?}", points);
     for (p, &(x, y)) in points.iter().zip(expected.iter()) {
         assert_eq!((p.x(), p.y()), (x, y));
     }
+    // the flex reference point exists only for the flex-height test
+    assert!(!points.iter().any(|p| p.x() == 30. && p.y() == 50.), "{:?}", points);
 }
 
 #[test]
@@ -407,6 +452,7 @@ fn c26_type1_charstring_shorter_than_leniv_is_skipped() {
         ],
         Some("{/.notdef /A /B}"),
         4,
+        &[],
     );
     let font = parse(&data);
     // `.notdef` and `/B` survive, `/A` is gone.

@@ -363,19 +363,16 @@ fn decode_charstring(data: &[u8], len_iv: Option<usize>) -> Option<Vec<u8>> {
     }
 }
 
-/// Append one cubic Bézier to the contour — or, while a Type 1 flex sequence is open,
-/// to the list of flex points (T1 §6, F40). The flex machinery in `callothersubr`
-/// needs the control points, not just the endpoints.
+/// Append one cubic Bézier to the contour.
+///
+/// Type 1 flex does **not** come through here: the standard flex protocol (T1 §6,
+/// TN5015 §10) collects its seven points as `rmoveto`s between `1 callsubr` and
+/// `0 callsubr`, never as curve operators.
 #[inline]
 fn push_curve(s: &mut State, c1: Vector2F, c2: Vector2F, p: Vector2F) {
-    if let Some(points) = s.flex_sequence.as_mut() {
-        points.push(c1);
-        points.push(c2);
-        points.push(p);
-    } else {
-        s.contour.push_cubic(c1, c2, p);
-    }
+    s.contour.push_cubic(c1, c2, p);
 }
+
 
 pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State) -> Result<(), FontError>
     where T: TryIndex + 'a, U: TryIndex + 'a
@@ -518,21 +515,29 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         let n = s.pop()?.to_int()? as usize;
                         
                         match (subr_nr, n) {
-                            // flex start: `1 0 callothersubr` (T1 §6)
-                            (1, 0) | (2, 0) => {
+                            // flex start: Subr 1 is `1 0 callothersubr return` (T1 §6,
+                            // TN5015 §10). The seven `dx dy rmoveto 2 callsubr` steps
+                            // that follow are collected in `flex_sequence` by `rmoveto`
+                            // instead of being drawn.
+                            (1, 0) => {
+                                // The curve starts where the charstring currently is
+                                // (FreeType t1decode.c, othersubr 1: `start_point`).
+                                // Everything the seven following `rmoveto`s collect is
+                                // relative to it; the first of them only moves the
+                                // current point to the flex reference point and is not
+                                // part of the outline.
+                                if s.contour.is_empty() {
+                                    s.contour.push_endpoint(s.current);
+                                }
                                 s.flex_sequence = Some(Vec::with_capacity(7));
-                                
-                                // first moveto: referece point
-                                // then first control point of first curve
-                                // second control point of first curve
-                                // joining point
-                                // first control point of second curve
-                                // second control point of second curve
-                                // endpoint of second curve
-                                // (flex height, final x, final y) 0 callsubr
                             }
-                            // flex end: `flexheight x y 3 0 callothersubr`
-                            (0, 3) | (1, 3) => {
+                            // Subr 2 is `0 2 callothersubr return` and runs after *every*
+                            // one of those rmovetos. It only acknowledges the point that
+                            // has just been added, so it must leave `flex_sequence` alone.
+                            (2, 0) => {}
+                            // flex end: Subr 0 is
+                            // `3 0 callothersubr pop pop setcurrentpoint return`.
+                            (0, 3) => {
                                 if s.stack.len() < 3 {
                                     warn!("flex end with {} operands, expected flexheight and a point", s.stack.len());
                                     s.stack.clear();
@@ -542,8 +547,12 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                                     let _flex_height = s.pop()?;
                                     match s.flex_sequence.take() {
                                         Some(points) if points.len() == 7 => {
-                                            // reference point, c1, c2, join, c3, c4, end
-                                            s.contour.push_endpoint(points[0]);
+                                            // points[0] is the flex reference point: it
+                                            // exists only for the flex-height test and is
+                                            // not part of the outline (FreeType ignores
+                                            // index 0 of the seven flex vectors). The
+                                            // first cubic starts where the contour already
+                                            // is — the position at flex start.
                                             s.contour.push_cubic(points[1], points[2], points[3]);
                                             s.contour.push_cubic(points[4], points[5], points[6]);
                                             s.current = points[6];
