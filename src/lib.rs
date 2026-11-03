@@ -378,6 +378,12 @@ pub struct Context<T=(), U=()> {
 /// 16 leaves room for the fonts that nest a little deeper than the spec allows.
 pub const MAX_SUBR_DEPTH: u32 = 16;
 
+/// Entries in the Type 2 transient array that `put` (12 20) and `get` (12 21) address.
+///
+/// TN5177 §4.4 leaves the size to the implementation; Adobe's has 32 entries, and no
+/// real font is known to use more.
+pub const TRANSIENT_SIZE: usize = 32;
+
 impl<T, U> Context<T, U> where T: TryIndex, U: TryIndex {
     #[inline]
     pub fn subr(&self, idx: i32) -> Result<&[u8], FontError> {
@@ -410,6 +416,9 @@ pub struct State {
     /// Current depth of `callsubr`/`callgsubr` nesting; guards against cyclic subrs
     /// recursing until the process runs out of stack (see `MAX_SUBR_DEPTH`).
     pub subr_depth: u32,
+    /// The Type 2 transient array addressed by `put` (12 20) and `get` (12 21);
+    /// `TRANSIENT_SIZE` entries, all zero at the start of each glyph.
+    pub transient: [Value; TRANSIENT_SIZE],
     /// Set by Type 1 `seac` (12 6) and Type 2 `endchar` with four arguments: the glyph
     /// is not drawn by its own charstring but composed of two other glyphs.
     pub seac: Option<Seac>
@@ -454,6 +463,7 @@ impl State {
             first_stack_clearing_operator: true,
             flex_sequence: None,
             subr_depth: 0,
+            transient: [Value::Int(0); TRANSIENT_SIZE],
             seac: None
         }
     }
@@ -471,6 +481,7 @@ impl State {
         self.first_stack_clearing_operator = true;
         self.flex_sequence = None;
         self.subr_depth = 0;
+        self.transient = [Value::Int(0); TRANSIENT_SIZE];
         self.seac = None;
     }
 

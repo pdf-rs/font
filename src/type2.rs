@@ -1,4 +1,4 @@
-use crate::{State, Seac, v, Value, Context, TryIndex, FontError, MAX_SUBR_DEPTH};
+use crate::{State, Seac, v, Value, Context, TryIndex, FontError, MAX_SUBR_DEPTH, TRANSIENT_SIZE};
 use nom::{IResult,
     bytes::complete::{take},
     number::complete::{be_u8, be_i16, be_i32}
@@ -62,6 +62,14 @@ fn alternating_curve(s: &mut State, mut horizontal: bool) -> Result<(), FontErro
         horizontal = !horizontal;
     }
     Ok(())
+}
+
+/// An operand used as a boolean counts as true when it is non-zero (TN5177 §4.4).
+fn is_true(value: Value) -> bool {
+    match value {
+        Value::Int(i) => i != 0,
+        Value::Float(f) => f != 0.
+    }
 }
 
 #[inline]
@@ -200,9 +208,27 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         i
                     }
                     1 | 2 => error!("reserved: 12 {}", b1),
-                    3 => error!("unimplemented: and"),
-                    4 => error!("unimplemented: or"),
-                    5 => error!("unimplemented: not"),
+                    3 => { // num1 num2 and (12 3) bool
+                        // TN5177 §4.4: 1 when *both* operands are non-zero, else 0.
+                        trace!("and");
+                        let num2 = s.pop()?;
+                        let num1 = s.pop()?;
+                        s.push(if is_true(num1) && is_true(num2) { 1 } else { 0 });
+                        i
+                    }
+                    4 => { // num1 num2 or (12 4) bool
+                        trace!("or");
+                        let num2 = s.pop()?;
+                        let num1 = s.pop()?;
+                        s.push(if is_true(num1) || is_true(num2) { 1 } else { 0 });
+                        i
+                    }
+                    5 => { // num1 not (12 5) bool
+                        trace!("not");
+                        let num1 = s.pop()?;
+                        s.push(if is_true(num1) { 0 } else { 1 });
+                        i
+                    }
                     6 | 7 | 8 => error!("reserved"),
                     9 => { // num abs (12 9) num2
                         trace!("abs");
@@ -252,9 +278,35 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         i
                     }
                     19 => error!("reserved {}", b1),
-                    20 => error!("unimplemented: put"),
-                    21 => error!("unimplemented: get"),
-                    22 => error!("unimplemented: ifelse"),
+                    20 => { // val i put (12 20) –
+                        trace!("put");
+                        let idx = s.pop()?.to_int()?;
+                        let val = s.pop()?;
+                        if idx < 0 || idx as usize >= TRANSIENT_SIZE {
+                            error!("put: transient array index {} out of range (0..{})", idx, TRANSIENT_SIZE);
+                        }
+                        s.transient[idx as usize] = val;
+                        i
+                    }
+                    21 => { // i get (12 21) val
+                        trace!("get");
+                        let idx = s.pop()?.to_int()?;
+                        if idx < 0 || idx as usize >= TRANSIENT_SIZE {
+                            error!("get: transient array index {} out of range (0..{})", idx, TRANSIENT_SIZE);
+                        }
+                        s.push(s.transient[idx as usize]);
+                        i
+                    }
+                    22 => { // num1 num2 v1 v2 ifelse (12 22) v
+                        // TN5177 §4.4: `v1` when `num1 <= num2`, otherwise `v2`.
+                        trace!("ifelse");
+                        let v2 = s.pop()?.to_float();
+                        let v1 = s.pop()?.to_float();
+                        let num2 = s.pop()?.to_float();
+                        let num1 = s.pop()?.to_float();
+                        s.push(if num1 <= num2 { v1 } else { v2 });
+                        i
+                    }
                     23 => { // random (12 23) num2
                         trace!("random");
                         use rand::{thread_rng, Rng};

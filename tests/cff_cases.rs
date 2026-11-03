@@ -554,3 +554,92 @@ fn c27b_type2_nested_gsubr_still_runs() {
     let glyph = font.glyph(GlyphId(1)).expect("glyph 1");
     assert_eq!(points(&glyph), vec![(0.0, 0.0)]);
 }
+
+#[test]
+fn c28_type2_deprecated_logic_and_transient_operators() {
+    // F42: `and`/`or`/`not`, `put`/`get` and `ifelse` were `error!("unimplemented")`, which
+    // failed the whole font — they are deprecated but legal (TN5177 §4.4).
+    //
+    // The charstring stores the results of the logic operators in the transient array,
+    // uses `ifelse` to pick one of two values, and then draws a path whose points are
+    // read back with `get`: any wrong result moves a point.
+    let mut cs = Vec::new();
+
+    // and: 1 1 -> 1, 1 0 -> 0
+    for (a, b, slot) in [(1, 1, 0), (1, 0, 1)] {
+        push_int(a, &mut cs);
+        push_int(b, &mut cs);
+        cs.extend_from_slice(&[12, 3]);
+        push_int(slot, &mut cs);
+        cs.extend_from_slice(&[12, 20]); // put
+    }
+    // or: 0 0 -> 0, 0 1 -> 1
+    for (a, b, slot) in [(0, 0, 2), (0, 1, 3)] {
+        push_int(a, &mut cs);
+        push_int(b, &mut cs);
+        cs.extend_from_slice(&[12, 4]);
+        push_int(slot, &mut cs);
+        cs.extend_from_slice(&[12, 20]);
+    }
+    // not: 1 -> 0, 0 -> 1
+    for (a, slot) in [(1, 4), (0, 5)] {
+        push_int(a, &mut cs);
+        cs.extend_from_slice(&[12, 5]);
+        push_int(slot, &mut cs);
+        cs.extend_from_slice(&[12, 20]);
+    }
+    // ifelse: 0 1 3 7 -> 3 (0 <= 1), 2 1 3 7 -> 7 (2 > 1)
+    for (num1, num2, slot) in [(0, 1, 6), (2, 1, 7)] {
+        push_int(num1, &mut cs);
+        push_int(num2, &mut cs);
+        push_int(3, &mut cs);
+        push_int(7, &mut cs);
+        cs.extend_from_slice(&[12, 22]);
+        push_int(slot, &mut cs);
+        cs.extend_from_slice(&[12, 20]);
+    }
+
+    // 0 0 rmoveto, then two rlineto segments built from the stored values.
+    push_int(0, &mut cs);
+    push_int(0, &mut cs);
+    cs.push(21); // rmoveto
+    push_int(0, &mut cs); // get t[0] -> 1
+    cs.extend_from_slice(&[12, 21]);
+    push_int(6, &mut cs); // get t[6] -> 3
+    cs.extend_from_slice(&[12, 21]);
+    cs.push(5); // rlineto -> (1, 3)
+    push_int(4, &mut cs); // get t[4] -> 0 (not 1)
+    cs.extend_from_slice(&[12, 21]);
+    push_int(5, &mut cs); // get t[5] -> 1 (not 0)
+    cs.extend_from_slice(&[12, 21]);
+    cs.push(5); // rlineto -> (1, 4)
+    push_int(3, &mut cs); // get t[3] -> 1
+    cs.extend_from_slice(&[12, 21]);
+    push_int(7, &mut cs); // get t[7] -> 7
+    cs.extend_from_slice(&[12, 21]);
+    cs.push(5); // rlineto -> (2, 11)
+    cs.push(14); // endchar
+
+    let data = build_cff(&[14], &cs);
+    let glyph = glyph(&data, 1);
+    assert_eq!(
+        points(&glyph),
+        vec![(0.0, 0.0), (1.0, 3.0), (1.0, 4.0), (2.0, 11.0)],
+        "and 1,1 = 1, and 1,0 = 0, or 0,0 = 0, or 0,1 = 1, not 1 = 0, not 0 = 1, \
+         ifelse(0,1,3,7) = 3, ifelse(2,1,3,7) = 7"
+    );
+}
+
+#[test]
+fn c28b_type2_transient_index_out_of_range_is_an_error() {
+    // The transient array has a fixed size; a font indexing past it gets an error for
+    // that glyph instead of an out-of-bounds write.
+    let mut cs = Vec::new();
+    push_int(1, &mut cs);
+    push_int(32, &mut cs); // `put` index 32: the array holds 0 .. 31
+    cs.extend_from_slice(&[12, 20]);
+    cs.push(14); // endchar
+
+    let data = build_cff(&[14], &cs);
+    assert!(CffFont::parse(&data, 0).is_err());
+}

@@ -32,6 +32,14 @@ Implemented: all path operators (1, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24
   process. The counter (`State::subr_depth`, shared with Type 1) is restored on every path, so a
   bad glyph does not poison the next one. Tests: `c27` (`tests/cff_cases.rs`, self-recursive
   global subr) and `c27b` (positive control, a legal two-level nesting still works).
+* **F42 (2026-11-03):** the deprecated operators work instead of failing the font. `and` (12 3),
+  `or` (12 4) and `not` (12 5) are the logical forms of TN5177 §4.4 — a non-zero operand is true,
+  the result is `1`/`0` (new `is_true`). `put` (12 20) and `get` (12 21) address the new
+  `State::transient` array (`crate::TRANSIENT_SIZE` = 32 entries, zeroed by `State::clear`); an
+  index outside `0 .. 32` is an error rather than an out-of-bounds write. `ifelse` (12 22) pushes
+  `v1` when `num1 <= num2` and `v2` otherwise, as the spec describes. Tests: `c28` (logic results
+  stored with `put`, then read back with `get` into the outline, plus both `ifelse` branches) and
+  `c28b` (index 32 → error).
 
 ## Differences from the specifications
 * **F7 — withdrawn (2026-11-02):** `flex1` consumes exactly 11 arguments (6 for the first curve,
@@ -41,8 +49,9 @@ Implemented: all path operators (1, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24
   vertical cases.
 * ~~**F11 (TN5177 Appendix C):**~~ `endchar` with four arguments is the deprecated accent
   composition (`adx ady bchar achar`) — implemented, see "Fixed" above.
-* **F42:** `and`/`or`/`not` (12 3/4/5), `put`/`get`/`ifelse` (12 20/21/22) and the
-  storage `put`/`get` return an error, which fails the whole font. They are deprecated but legal.
+* ~~**F42:**~~ `and`/`or`/`not` (12 3/4/5), `put`/`get`/`ifelse` (12 20/21/22) used to return an
+  error, which failed the whole font — implemented now (see "Fixed" above); they are deprecated
+  but legal.
 * **F44 (TN5177 §4.4 `index`):** "if `i` is negative, the top element is copied"; the code calls
   `to_usize()` (`:287`) and errors instead.
 * ~~**F43:**~~ `callsubr`/`callgsubr` used to recurse with no depth limit (`:161`, `:490`), so a

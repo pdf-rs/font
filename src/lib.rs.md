@@ -15,6 +15,10 @@
   `callsubr`/`callgsubr` frames. Type 2 uses it in `type2.rs::call_subr`, Type 1 in its own
   `callsubr` arm; both restore the counter when the subr returns *or* fails. Without it a cyclic
   subr recursed until the native stack was gone (see `src/type2.rs.md`, `src/type1.rs.md`).
+* **F42 (2026-11-03):** `State` gained `transient: [Value; TRANSIENT_SIZE]` — the 32-entry array
+  addressable by the deprecated Type 2 `put` (12 20) / `get` (12 21) — and the crate root defines
+  `pub const TRANSIENT_SIZE: usize = 32` (TN5177 §4.4 leaves the size to the implementation;
+  Adobe's has 32). `State::clear` zeroes it for the next glyph.
 * **F29 (2026-11-02):** the private `print_err(e: nom::Err<VerboseError<&[u8]>>) -> !` is gone. It
   was never called (no caller in the crate), and it panicked with "need more data" / "error
   converting an `Err::Failure`" / "error converting an `Err::Incomplete`" — so it was dead code
@@ -31,7 +35,7 @@
   `0x25 0x21` → Type 1 PFA, `0x01 xx xx xx` → bare CFF).
 * `State` — the shared interpreter state for Type 1 and Type 2 charstrings (`stack`, `outline`,
   `contour`, `current`, `lsb`, `char_width`, `delta_width`, `stem_hints`, `flex_sequence`,
-  `subr_depth`, `seac`).
+  `subr_depth`, `transient`, `seac`).
 * `Context` — subr index + bias table for both charstring dialects.
 
 ## Differences from the specifications
