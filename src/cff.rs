@@ -399,9 +399,11 @@ impl<'a> CffSlot<'a> {
 
     /// The gid a StandardEncoding character code names, for the deprecated `seac` form.
     /// CID-keyed fonts never match: their charset holds CIDs, not name SIDs.
-    fn seac_gid(&self, code: u8) -> Option<usize> {
+    ///
+    /// Takes the charset rather than reading it: `sids()` parses the whole `Charset` operator,
+    /// and a base/accent pair would otherwise pay for it twice per seac glyph (audit §3).
+    fn seac_gid(sids: &[SID], code: u8) -> Option<usize> {
         let sid = seac_sid(code)?;
-        let sids = self.sids().ok()?;
         sids.iter().position(|&s| s == sid).map(|n| n + 1)
     }
 
@@ -417,8 +419,18 @@ impl<'a> CffSlot<'a> {
             }
             outlines.push((outline, width, lsb));
         }
+        // Audit §3: parse the charset once for the whole pass, not per lookup.
+        let sids = if seac_glyphs.is_empty() { None } else { self.sids().ok() };
+        let sids: Option<&[SID]> = sids.as_deref();
         for (gid, seac) in seac_glyphs {
-            let (base, accent) = match (self.seac_gid(seac.base), self.seac_gid(seac.accent)) {
+            let sids = match sids {
+                Some(sids) => sids,
+                None => {
+                    warn!("endchar seac: glyph {gid} cannot be composed (charset unreadable)");
+                    continue;
+                }
+            };
+            let (base, accent) = match (Self::seac_gid(sids, seac.base), Self::seac_gid(sids, seac.accent)) {
                 (Some(base), Some(accent)) if base != gid && accent != gid => (base, accent),
                 _ => {
                     warn!("endchar seac: glyph {gid} cannot be composed (base {}, accent {})",

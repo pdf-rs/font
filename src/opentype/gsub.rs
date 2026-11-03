@@ -642,15 +642,57 @@ impl GSub {
         // what it produced). `budget` bounds the work the lookups the rules name may cost.
         let mut budget = OpBudget::new(out.len());
         for &lookup_idx in &lookup_indices {
-            let mut position = 0;
-            while position < out.len() {
-                position += match self.apply_lookup_at(lookup_idx, &mut out, position, 0, gdef, &mut budget) {
-                    // A rule that produces nothing has still consumed the glyphs it matched,
-                    // so the run shrank under `position`: it names the next glyph already.
-                    Some(step) => step.advance.max(1),
-                    None => 1,
-                };
+            let subtables = match self.lookup.get(lookup_idx as usize) {
+                Some(subtables) => subtables,
+                None => continue,
+            };
+            let flag = self.flags.get(lookup_idx as usize).copied().unwrap_or_default();
+            if subtables.iter().any(|s| matches!(s, LookupSubtable::Context(_))) {
+                // A context rule names glyphs by their position in the whole run, and its
+                // records may edit any of them, so this lookup works on the run in place.
+                let mut position = 0;
+                while position < out.len() {
+                    position += match self.apply_lookup_at(lookup_idx, &mut out, position, 0, gdef, &mut budget) {
+                        // A rule that produces nothing has still consumed the glyphs it matched,
+                        // so the run shrank under `position`: it names the next glyph already.
+                        Some(step) => step.advance.max(1),
+                        None => 1,
+                    };
+                }
+                continue;
             }
+            // Audit §3: without a context subtable no rule looks at a glyph before the one it
+            // applies to, so this pass can append to a fresh run instead of splicing into the
+            // old one — a splice moves the whole tail, which made a long run quadratic.
+            let run = std::mem::replace(&mut out, Vec::new());
+            let mut next = Vec::with_capacity(run.len());
+            let mut position = 0;
+            while position < run.len() {
+                let matched = match first_glyph_of(run[position]) {
+                    Some(glyph) if !glyph_ignored(gdef, flag, glyph) => subtables.iter()
+                        .find_map(|subtable| self.substitution_at(subtable, &run, position, flag, gdef)),
+                    _ => None,
+                };
+                match matched {
+                    Some((consumed, replacement)) => {
+                        next.extend(replacement);
+                        if consumed == 0 {
+                            // A subtable that matched without consuming a glyph: keep the glyph
+                            // and move past it rather than matching it again for ever.
+                            next.push(run[position]);
+                            position += 1;
+                        } else {
+                            position = (position + consumed).min(run.len());
+                        }
+                    }
+                    None => {
+                        next.push(run[position]);
+                        position += 1;
+                    }
+                }
+            }
+            next.extend_from_slice(&run[position ..]);
+            out = next;
         }
 
         // OT §GSUB "Reverse Chaining Contextual Single Substitution": that lookup type is
@@ -685,36 +727,36 @@ impl GSub {
             return None;
         }
         for subtable in subtables {
-            let applied = match subtable {
+            if let LookupSubtable::Context(context) = subtable {
                 // The rule names other lookups to run, so these need the whole table.
-                LookupSubtable::Context(context) => self.apply_context(context, glyphs, position, depth, flag, gdef, budget),
-                // Applied in the right-to-left pass of `substitute`.
-                LookupSubtable::ReverseChain(_) => None,
-                substitution => {
-                    // OT §"Lookup Flags": ignored glyphs are invisible to the match, so a
-                    // ligature may skip the marks between its components.
-                    let skip = |gid: u16| glyph_ignored(gdef, flag, gid);
-                    let step = match substitution {
-                        LookupSubtable::Substitution(substitution) =>
-                            substitution.apply_skipping(&glyphs[position ..], &skip)
-                                .map(|(consumed, glyph)| (consumed, vec![glyph])),
-                        _ => substitution.apply_with(&glyphs[position ..], 0),
-                    };
-                    match step {
-                        Some((consumed, replacement)) => {
-                            let produced = replacement.len();
-                            glyphs.splice(position .. position + consumed, replacement);
-                            Some(Step { grown: produced as isize - consumed as isize, advance: produced })
-                        }
-                        None => None,
-                    }
+                if let Some(step) = self.apply_context(context, glyphs, position, depth, flag, gdef, budget) {
+                    return Some(step);
                 }
-            };
-            if applied.is_some() {
-                return applied;
+                continue;
+            }
+            if let Some((consumed, replacement)) = self.substitution_at(subtable, glyphs, position, flag, gdef) {
+                let produced = replacement.len();
+                glyphs.splice(position .. position + consumed, replacement);
+                return Some(Step { grown: produced as isize - consumed as isize, advance: produced });
             }
         }
         None
+    }
+
+    /// One substitution subtable at `position`, as `(glyphs consumed, glyphs it produced)`.
+    /// `None` for a subtable that does not apply there, and for the two that are not
+    /// substitutions of a span at all (context and reverse chaining).
+    fn substitution_at(&self, subtable: &LookupSubtable, run: &[GlyphId], position: usize, flag: LookupFlags, gdef: Option<&GDef>) -> Option<(usize, Vec<GlyphId>)> {
+        // OT §"Lookup Flags": ignored glyphs are invisible to the match, so a
+        // ligature may skip the marks between its components.
+        let skip = |gid: u16| glyph_ignored(gdef, flag, gid);
+        match subtable {
+            LookupSubtable::Substitution(substitution) =>
+                substitution.apply_skipping(&run[position ..], &skip)
+                    .map(|(consumed, glyph)| (consumed, vec![glyph])),
+            LookupSubtable::Context(_) | LookupSubtable::ReverseChain(_) => None,
+            substitution => substitution.apply_with(&run[position ..], 0),
+        }
     }
 
     /// Applies the first rule of `context` that matches at `position`, which means running the
@@ -1908,6 +1950,33 @@ mod tests {
             gsub.substitute(&[GlyphId(9), GlyphId(10)], &|tag| tag.0 == *b"ccmp"),
             vec![GlyphId(9), GlyphId(20), GlyphId(21)]
         );
+    }
+
+    #[test]
+    fn a_long_run_is_substituted_in_one_pass() {
+        // Audit §3: the pass used to splice every replacement into the run, which moves the
+        // whole tail — O(n²) on a long run. Through the splice this takes seconds; one pass
+        // does not care how long the run is.
+        let words: [u16; 13] = [
+            1, 18, 2, 10, 16, // format, coverage offset, sequenceCount, sequence offsets
+            2, 20, 21,        // sequence for 10
+            0,                // sequence for 11
+            1, 2, 10, 11,     // coverage
+        ];
+        let data = words_to_bytes(&words);
+        let substitution = parse_multiple_subst(&data).expect("multiple substitution parses");
+        let gsub = gsub_with(
+            vec![feature(b"ccmp", vec![0])],
+            vec![vec![substitution]],
+        );
+        let run = vec![GlyphId(10); 1_000_000];
+        let started = std::time::Instant::now();
+        let out = gsub.substitute(&run, &|tag| tag.0 == *b"ccmp");
+        let elapsed = started.elapsed();
+        assert_eq!(out.len(), 2_000_000);
+        assert_eq!(&out[.. 3], &[GlyphId(20), GlyphId(21), GlyphId(20)]);
+        assert_eq!(out[out.len() - 1], GlyphId(21));
+        assert!(elapsed < std::time::Duration::from_secs(2), "took {:?}", elapsed);
     }
 
     #[test]
