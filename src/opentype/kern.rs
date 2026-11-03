@@ -38,36 +38,68 @@ fn parse_kern_format2<'a>(data: &'a [u8], table: &mut KernTable) -> Result<(), F
     let (i, _row_width) = be_u16(data)?;
     let (i, left_class_table_off) = be_u16(i)?;
     let (i, right_class_table_off) = be_u16(i)?;
-    let (i, _array_off) = be_u16(i)?;
+    let (i, array_off) = be_u16(i)?;
+    let array_off = array_off as usize;
 
     let (left_first, left_offsets) = class_table(data, left_class_table_off)?;
     let (right_first, right_offsets) = class_table(data, right_class_table_off)?;
 
-    // Each entry is the offset of that glyph's row (left table) or column (right table),
-    // so a glyph's class is its offset. The values only exist for the rows/columns that
-    // are actually in the tables — expanding every *glyph* pair instead made a legitimate
-    // 5 000-glyph class table allocate 25 M map entries (F45).
-    for (n, &offset) in left_offsets.iter().enumerate() {
-        table.left_classes.insert(left_first + n as u16, offset);
+    // MS §kern format 2 (`KernSubtableFormat2`): a class value is the row (left) or column
+    // (right) already multiplied by `rowWidth` resp. by the size of one value, and the
+    // kerning value lives at `kerningArrayOffset + leftClass + rightClass`. Class 0 is the
+    // "does not kern" row/column the spec says always holds zeros: keeping it as a class
+    // made `array + 0 + column` read the subtable header as kerning values (audit C5).
+    for (n, &class) in left_offsets.iter().enumerate() {
+        // `firstGlyph + n` can overflow a `u16` in a hostile table, and the glyph is past
+        // the class range anyway.
+        if let (true, Some(gid)) = (class != 0, left_first.checked_add(n as u16)) {
+            table.left_classes.insert(gid, class);
+        }
     }
-    for (n, &offset) in right_offsets.iter().enumerate() {
-        table.right_classes.insert(right_first + n as u16, offset);
+    for (n, &class) in right_offsets.iter().enumerate() {
+        if let (true, Some(gid)) = (class != 0, right_first.checked_add(n as u16)) {
+            table.right_classes.insert(gid, class);
+        }
     }
 
     // One `class_pairs` entry per distinct row/column pair — that is the size of the
-    // array the subtable really carries, not `num_left_glyphs * num_right_glyphs`.
+    // array the subtable really carries, not `num_left_glyphs * num_right_glyphs` (F45).
     let mut rows = left_offsets;
+    rows.retain(|&class| class != 0);
     rows.sort_unstable();
     rows.dedup();
     let mut columns = right_offsets;
+    columns.retain(|&class| class != 0);
     columns.sort_unstable();
     columns.dedup();
-    for &left_off in &rows {
-        for &right_off in &columns {
-            let address = left_off as usize + right_off as usize;
-            let (_, kern) = be_i16(slice!(data, address ..))?;
-            table.class_pairs.insert((left_off, right_off), kern);
+    let mut skipped = 0usize;
+    for &left_class in &rows {
+        for &right_class in &columns {
+            // The cross product invents combinations the font may never have written, so an
+            // address past the end of the subtable skips that cell instead of failing the
+            // whole table (audit C5).
+            let address = array_off + left_class as usize + right_class as usize;
+            let kern = match data.get(address ..) {
+                Some(rest) => {
+                    let parsed: R<i16> = be_i16(rest);
+                    match parsed {
+                        Ok((_, kern)) => kern,
+                        Err(_) => {
+                            skipped += 1;
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            table.class_pairs.insert((left_class, right_class), kern);
         }
+    }
+    if skipped > 0 {
+        warn!("kern: format 2 class array is truncated; {} cell(s) skipped", skipped);
     }
     Ok(())
 }
@@ -173,26 +205,27 @@ mod tests {
     /// absolute byte offset of its row, the right table maps glyphs to the column offset
     /// *inside* the row — so the value of a pair is at `left_offset + right_offset`.
     fn format2_body(
-        left_glyphs: u16,
-        left_row_offsets: &[u16],
-        right_glyphs: u16,
+        row_width: u16,
+        left_first: u16,
+        left_classes: &[u16],
+        right_first: u16,
+        right_classes: &[u16],
         right_table_at: u16,
         array_at: u16,
         values: &[i16],
     ) -> Vec<u8> {
         let mut data = Vec::new();
-        data.extend_from_slice(&be_words(&[4, 8, right_table_at, array_at])); // rowWidth, left, right, array
-        // left class table at 8
-        data.extend_from_slice(&be_words(&[left_glyphs, left_row_offsets.len() as u16]));
-        data.extend_from_slice(&be_words(left_row_offsets));
+        data.extend_from_slice(&be_words(&[row_width, 8, right_table_at, array_at]));
+        // left class table at 8: the class values are premultiplied row offsets
+        data.extend_from_slice(&be_words(&[left_first, left_classes.len() as u16]));
+        data.extend_from_slice(&be_words(left_classes));
         // pad to `right_table_at`
         while data.len() < right_table_at as usize {
             data.push(0);
         }
-        // right class table: one column offset per glyph
-        let column_offsets: Vec<u16> = (0 .. right_glyphs).map(|n| n * 2).collect();
-        data.extend_from_slice(&be_words(&[6, right_glyphs]));
-        data.extend_from_slice(&be_words(&column_offsets));
+        // right class table: the class values are premultiplied column offsets
+        data.extend_from_slice(&be_words(&[right_first, right_classes.len() as u16]));
+        data.extend_from_slice(&be_words(right_classes));
         // pad to the array
         while data.len() < array_at as usize {
             data.push(0);
@@ -203,10 +236,15 @@ mod tests {
 
     #[test]
     fn kern_format2_maps_classes_to_values() {
-        // Two glyphs on each side (10/11 left, 6/7 right), a 2x2 array: 10/6 -> 0,
-        // 10/7 -> -5, 11/6 -> 3, 11/7 -> 7. Rows start at 40 and 44 (rowWidth 4),
-        // columns at 0 and 2.
-        let data = format2_body(10, &[40, 44], 2, 28, 40, &[0, -5, 3, 7]);
+        // Two left classes (rows 1 and 2 of a three-value, six-byte row) and two right
+        // classes (columns 1 and 2). Row 0 and column 0 are the "glyph does not kern"
+        // ones the spec reserves. The array starts at 46 and holds three rows of three.
+        let values = [
+            0, 0, 0,      // row 0: glyphs that do not kern
+            0, -5, 3,     // row 1 (left class 6)
+            0, 7, -20,    // row 2 (left class 12)
+        ];
+        let data = format2_body(6, 10, &[6, 12], 6, &[2, 4], 20, 46, &values);
         let mut table = KernTable::default();
         parse_kern_format2(&data, &mut table).expect("format 2 parses");
 
@@ -215,10 +253,10 @@ mod tests {
         assert_eq!(table.left_classes.len(), 2);
         assert_eq!(table.right_classes.len(), 2);
         assert_eq!(table.class_pairs.len(), 4);
-        assert_eq!(table.get(10, 6), Some(0));
-        assert_eq!(table.get(10, 7), Some(-5));
-        assert_eq!(table.get(11, 6), Some(3));
-        assert_eq!(table.get(11, 7), Some(7));
+        assert_eq!(table.get(10, 6), Some(-5));
+        assert_eq!(table.get(10, 7), Some(3));
+        assert_eq!(table.get(11, 6), Some(7));
+        assert_eq!(table.get(11, 7), Some(-20));
         // A glyph outside the class tables has no kerning.
         assert_eq!(table.get(12, 6), None);
         assert_eq!(table.get(10, 5), None);
@@ -229,8 +267,8 @@ mod tests {
         // F45: 5 000 glyphs sharing one row used to fill `glyph_pairs` with 25 M entries
         // (and reserve them up front). The storage is the array: one row times two
         // columns.
-        let rows: Vec<u16> = std::iter::repeat(10020u16).take(5000).collect();
-        let data = format2_body(100, &rows, 2, 10012, 10020, &[0, -5]);
+        let rows: Vec<u16> = std::iter::repeat(6u16).take(5000).collect();
+        let data = format2_body(6, 100, &rows, 6, &[2, 4], 10012, 10020, &[0, 0, 0, 0, -5, 9]);
         let mut table = KernTable::default();
         parse_kern_format2(&data, &mut table).expect("format 2 parses");
 
@@ -238,7 +276,52 @@ mod tests {
         assert_eq!(table.left_classes.len(), 5000);
         assert_eq!(table.right_classes.len(), 2);
         assert_eq!(table.class_pairs.len(), 2, "one row, two columns");
-        assert_eq!(table.get(100, 6), Some(0));
-        assert_eq!(table.get(5099, 7), Some(-5));
+        assert_eq!(table.get(100, 6), Some(-5));
+        assert_eq!(table.get(5099, 7), Some(9));
+    }
+
+    #[test]
+    fn kern_format2_skips_the_do_not_kern_class() {
+        // Audit C5: class 0 is the "glyph does not kern" row/column. Keeping it as a class
+        // made `array + 0 + column` read the subtable header — rowWidth and the table
+        // offsets — as kerning values.
+        let data = format2_body(6, 10, &[0, 6], 6, &[0, 2], 20, 46, &[0, 0, 0, 0, -5, 3]);
+        let mut table = KernTable::default();
+        parse_kern_format2(&data, &mut table).expect("format 2 parses");
+
+        assert_eq!(table.left_classes.get(&10), None, "class 0 is not a class");
+        assert_eq!(table.left_classes.get(&11), Some(&6));
+        assert_eq!(table.right_classes.get(&6), None);
+        assert_eq!(table.right_classes.get(&7), Some(&2));
+        assert_eq!(table.class_pairs.len(), 1, "only the one real row/column");
+        assert_eq!(table.get(10, 7), None, "the glyph that does not kern");
+        assert_eq!(table.get(11, 7), Some(-5));
+    }
+
+    #[test]
+    fn kern_format2_skips_unreadable_array_addresses() {
+        // The row/column cross product invents pairs the font never wrote; an address past
+        // the end of the subtable must cost that cell, not the whole table (audit C5).
+        let values = [0, 0, 0, 0, -5, 3];
+        let data = format2_body(6, 10, &[6, 12], 6, &[2, 4], 20, 46, &values);
+        let mut table = KernTable::default();
+        parse_kern_format2(&data, &mut table).expect("format 2 parses");
+
+        assert_eq!(table.get(10, 6), Some(-5));
+        assert_eq!(table.get(10, 7), Some(3));
+        assert_eq!(table.get(11, 6), None, "row 2 is past the end");
+        assert_eq!(table.get(11, 7), None);
+    }
+
+    #[test]
+    fn kern_format2_class_range_does_not_overflow_a_glyph_id() {
+        // `firstGlyph + n` overflowed a u16 and panicked in a debug build (audit C5).
+        let data = format2_body(6, 65534, &[6, 6, 6], 6, &[2], 20, 46, &[0, 0, 0, 0, -5, 3]);
+        let mut table = KernTable::default();
+        parse_kern_format2(&data, &mut table).expect("format 2 parses");
+
+        assert_eq!(table.left_classes.get(&65535), Some(&6));
+        assert_eq!(table.left_classes.len(), 2, "the id that does not fit is dropped");
+        assert_eq!(table.get(65535, 6), Some(-5));
     }
 }
