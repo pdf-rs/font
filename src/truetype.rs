@@ -358,11 +358,47 @@ fn point_at(outline: &Outline, index: u16) -> Option<Vector2F> {
 /// bounded here so a malformed font cannot loop or overflow the stack.
 const MAX_COMPONENT_DEPTH: usize = 16;
 
-pub fn get_outline(shapes: &[Shape], idx: u32) -> Option<Outline> {
-    expand_outline(shapes, idx, &mut Vec::new())
+/// The depth cap alone is not enough: one level may hold many components, so a chain of
+/// composites that each name two components still asks for `2 ^ 16` expanded outlines. The
+/// expansion as a whole is therefore bounded too, counted over every level.
+const MAX_COMPONENT_EXPANSIONS: usize = 10_000;
+
+/// What is left of `MAX_COMPONENT_EXPANSIONS` for the glyph being expanded.
+struct ComponentBudget {
+    left: usize,
+    reported: bool,
 }
 
-fn expand_outline(shapes: &[Shape], idx: u32, stack: &mut Vec<u32>) -> Option<Outline> {
+impl ComponentBudget {
+    fn new() -> ComponentBudget {
+        ComponentBudget { left: MAX_COMPONENT_EXPANSIONS, reported: false }
+    }
+
+    /// Whether one more component may be expanded; reports the truncation once.
+    fn take(&mut self) -> bool {
+        match self.left.checked_sub(1) {
+            Some(left) => {
+                self.left = left;
+                true
+            }
+            None => {
+                if !self.reported {
+                    self.reported = true;
+                    warn!("glyf: composite glyphs expand more than {} outlines; dropping the rest",
+                          MAX_COMPONENT_EXPANSIONS);
+                }
+                false
+            }
+        }
+    }
+}
+
+pub fn get_outline(shapes: &[Shape], idx: u32) -> Option<Outline> {
+    let mut budget = ComponentBudget::new();
+    expand_outline(shapes, idx, &mut Vec::new(), &mut budget)
+}
+
+fn expand_outline(shapes: &[Shape], idx: u32, stack: &mut Vec<u32>, budget: &mut ComponentBudget) -> Option<Outline> {
     if stack.contains(&idx) {
         warn!("glyf: composite glyph {} contains itself", idx);
         return Some(Outline::new());
@@ -379,7 +415,10 @@ fn expand_outline(shapes: &[Shape], idx: u32, stack: &mut Vec<u32>) -> Option<Ou
         Some(&Shape::Compound(ref parts)) => {
             let mut outline = Outline::new();
             for part in parts {
-                let mut child = match expand_outline(shapes, part.gid, stack) {
+                if !budget.take() {
+                    break;
+                }
+                let mut child = match expand_outline(shapes, part.gid, stack, budget) {
                     Some(child) => child,
                     None => {
                         warn!("glyf: glyph {} references missing glyph {}", idx, part.gid);
@@ -563,4 +602,59 @@ pub fn contour(points: impl Iterator<Item=(bool, Vector2F)>) -> Option<Contour> 
 
     contour.close();
     Some(contour)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// One triangle.
+    fn leaf() -> Shape {
+        let mut outline = Outline::new();
+        let contour = contour(
+            vec![
+                (true, Vector2F::new(0., 0.)),
+                (true, Vector2F::new(100., 0.)),
+                (true, Vector2F::new(100., 100.)),
+            ].into_iter(),
+        ).expect("triangle");
+        outline.push_contour(contour);
+        Shape::Simple(outline)
+    }
+
+    /// Glyph `n` is two components of glyph `n + 1`, the last one is a plain leaf: the
+    /// expansion is `2 ^ depth` outlines.
+    fn doubling_chain(depth: u32) -> Vec<Shape> {
+        let component = |gid| Component {
+            gid,
+            matrix: Matrix2x2F::row_major(1., 0., 0., 1.),
+            offset: ComponentOffset::Vector(Vector2F::zero()),
+            scaled_offset: false,
+        };
+        let mut shapes = Vec::new();
+        for level in 0 .. depth {
+            shapes.push(Shape::Compound(vec![component(level + 1), component(level + 1)]));
+        }
+        shapes.push(leaf());
+        shapes
+    }
+
+    #[test]
+    fn a_doubling_composite_chain_expands_within_the_budget() {
+        // Audit §3: the depth cap alone does not bound the work — a chain of composites that
+        // each name two components asks for 2 ^ 14 outlines. Without the budget every leaf is
+        // expanded; with it the expansion stops at MAX_COMPONENT_EXPANSIONS.
+        let shapes = doubling_chain(14);
+        let start = Instant::now();
+        let outline = get_outline(&shapes, 0).expect("composite glyph 0");
+        let contours = outline.contours().len();
+        assert!(start.elapsed().as_secs() < 2, "expansion took {:?}", start.elapsed());
+        assert!(contours > 0, "the budget must leave some of the glyph");
+        assert!(
+            contours <= MAX_COMPONENT_EXPANSIONS,
+            "{} contours: the component budget did not stop the expansion",
+            contours
+        );
+    }
 }
