@@ -347,7 +347,9 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     }
                     29 => { // numX ... num0 i index (12 29) numX ... num0 numi
                         trace!("index");
-                        let j = s.pop()?.to_usize()?.max(0);
+                        let j = s.pop()?.to_int()?;
+                        // TN5177 §4.4: "if i is negative, the top element is copied".
+                        let j = if j < 0 { 0 } else { j as usize };
                         require!(j < s.stack.len());
                         let idx = s.stack.len() - j - 1;
                         let val = s.stack[idx];

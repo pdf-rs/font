@@ -40,6 +40,10 @@ Implemented: all path operators (1, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24
   `v1` when `num1 <= num2` and `v2` otherwise, as the spec describes. Tests: `c28` (logic results
   stored with `put`, then read back with `get` into the outline, plus both `ifelse` branches) and
   `c28b` (index 32 → error).
+* **F44 (2026-11-03):** `index` (12 29) follows TN5177 §4.4: "if `i` is negative, the top element
+  is copied". The operand was cast with `to_usize()`, which errors on a negative number and failed
+  the whole glyph; it is read with `to_int()` and a negative value means 0 (the top). Test: `c29`
+  (`tests/cff_cases.rs`).
 
 ## Differences from the specifications
 * **F7 — withdrawn (2026-11-02):** `flex1` consumes exactly 11 arguments (6 for the first curve,
@@ -52,8 +56,8 @@ Implemented: all path operators (1, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24
 * ~~**F42:**~~ `and`/`or`/`not` (12 3/4/5), `put`/`get`/`ifelse` (12 20/21/22) used to return an
   error, which failed the whole font — implemented now (see "Fixed" above); they are deprecated
   but legal.
-* **F44 (TN5177 §4.4 `index`):** "if `i` is negative, the top element is copied"; the code calls
-  `to_usize()` (`:287`) and errors instead.
+* ~~**F44 (TN5177 §4.4 `index`):**~~ "if `i` is negative, the top element is copied" — the code
+  used `to_usize()` (`:287`) and errored instead; fixed, see "Fixed" above.
 * ~~**F43:**~~ `callsubr`/`callgsubr` used to recurse with no depth limit (`:161`, `:490`), so a
   cyclic subroutine was a stack overflow — a process abort, not an error (guarded by
   `call_subr` now, see "Fixed" above).

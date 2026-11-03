@@ -643,3 +643,25 @@ fn c28b_type2_transient_index_out_of_range_is_an_error() {
     let data = build_cff(&[14], &cs);
     assert!(CffFont::parse(&data, 0).is_err());
 }
+
+#[test]
+fn c29_type2_index_with_negative_i_copies_the_top() {
+    // F44: TN5177 §4.4 — "if i is negative, the top element is copied"; the operand was
+    // cast with `to_usize()`, which errors on a negative number and failed the glyph.
+    //
+    // `3 -1 index` leaves [3, 3] on the stack (the -1 is popped first, so the copy is
+    // the 3), which the rlineto then uses as (dx, dy).
+    let mut cs = Vec::new();
+    push_int(0, &mut cs);
+    push_int(0, &mut cs);
+    cs.push(21); // rmoveto
+    push_int(3, &mut cs);
+    push_int(-1, &mut cs);
+    cs.extend_from_slice(&[12, 29]); // index
+    cs.push(5); // rlineto
+    cs.push(14); // endchar
+
+    let data = build_cff(&[14], &cs);
+    let glyph = glyph(&data, 1);
+    assert_eq!(points(&glyph), vec![(0.0, 0.0), (3.0, 3.0)]);
+}
