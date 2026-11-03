@@ -481,6 +481,43 @@ fn to_glyph_ids(ids: &[u16]) -> Vec<GlyphId> {
 /// than a handful deep.
 pub(crate) const MAX_NESTING: u8 = 8;
 
+/// How many nested lookup applications one `substitute` or `position` call may make.
+///
+/// `MAX_NESTING` bounds the depth of context recursion and nothing else: a rule whose records
+/// each name the same context lookup costs about R^MAX_NESTING applications (R = records per
+/// rule), which a small crafted font turns into an unbounded amount of work. This counter is
+/// shared by the whole call, so the work stays bounded whatever the font's rule graph is.
+pub(crate) struct OpBudget {
+    left: usize,
+    reported: bool,
+}
+
+impl OpBudget {
+    /// Generous for real text — nested lookups are rare and shallow — while small enough that
+    /// a font which tries to recurse cannot cost more than a moment.
+    pub(crate) fn new(glyphs: usize) -> Self {
+        OpBudget { left: glyphs.saturating_mul(32).saturating_add(1024), reported: false }
+    }
+
+    /// `true` if one more nested application may run, `false` once the budget is spent; the
+    /// first refusal is reported, so a font that trips it is visible without spamming.
+    pub(crate) fn take(&mut self) -> bool {
+        match self.left.checked_sub(1) {
+            Some(left) => {
+                self.left = left;
+                true
+            }
+            None => {
+                if !self.reported {
+                    self.reported = true;
+                    warn!("GSUB/GPOS: context lookup budget spent; ignoring deeper applications");
+                }
+                false
+            }
+        }
+    }
+}
+
 /// What one application of a lookup did at a position. `grown` is the net change in the
 /// length of the run (negative when the rule deleted glyphs); `advance` is how many glyphs of
 /// the result the match produced — OT §"Lookup List" has the lookup carry on after them, not
@@ -514,11 +551,12 @@ impl GSub {
         // OT §"Lookup List": the lookups run in list order, and each one is applied across the
         // whole glyph run before the next starts — so a later lookup sees what the earlier
         // ones produced, and a lookup never applies to its own output (its position moves past
-        // what it produced).
+        // what it produced). `budget` bounds the work the lookups the rules name may cost.
+        let mut budget = OpBudget::new(out.len());
         for &lookup_idx in &lookup_indices {
             let mut position = 0;
             while position < out.len() {
-                position += match self.apply_lookup_at(lookup_idx, &mut out, position, 0, gdef) {
+                position += match self.apply_lookup_at(lookup_idx, &mut out, position, 0, gdef, &mut budget) {
                     // A rule that produces nothing has still consumed the glyphs it matched,
                     // so the run shrank under `position`: it names the next glyph already.
                     Some(step) => step.advance.max(1),
@@ -545,7 +583,11 @@ impl GSub {
     }
 
     /// Applies one lookup at `position`. `None` if no subtable of the lookup applies there.
-    fn apply_lookup_at(&self, lookup_idx: u16, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8, gdef: Option<&GDef>) -> Option<Step> {
+    /// `depth` > 0 marks an application a context rule asked for; those spend `budget`.
+    fn apply_lookup_at(&self, lookup_idx: u16, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8, gdef: Option<&GDef>, budget: &mut OpBudget) -> Option<Step> {
+        if depth > 0 && !budget.take() {
+            return None;
+        }
         let subtables = self.lookup.get(lookup_idx as usize)?;
         let flag = self.flags.get(lookup_idx as usize).copied().unwrap_or_default();
         // OT §"Lookup Flags": a lookup skips the glyph classes its flag names (marks,
@@ -557,7 +599,7 @@ impl GSub {
         for subtable in subtables {
             let applied = match subtable {
                 // The rule names other lookups to run, so these need the whole table.
-                LookupSubtable::Context(context) => self.apply_context(context, glyphs, position, depth, flag, gdef),
+                LookupSubtable::Context(context) => self.apply_context(context, glyphs, position, depth, flag, gdef, budget),
                 // Applied in the right-to-left pass of `substitute`.
                 LookupSubtable::ReverseChain(_) => None,
                 substitution => {
@@ -589,7 +631,7 @@ impl GSub {
 
     /// Applies the first rule of `context` that matches at `position`, which means running the
     /// lookups its records name at the glyphs of the run.
-    fn apply_context(&self, context: &Context, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8, flag: LookupFlags, gdef: Option<&GDef>) -> Option<Step> {
+    fn apply_context(&self, context: &Context, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8, flag: LookupFlags, gdef: Option<&GDef>, budget: &mut OpBudget) -> Option<Step> {
         if depth >= MAX_NESTING {
             debug!("GSUB: not following context lookups nested deeper than {}", MAX_NESTING);
             return None;
@@ -612,7 +654,7 @@ impl GSub {
             if target < 0 || target as usize >= glyphs.len() {
                 continue;
             }
-            if let Some(step) = self.apply_lookup_at(lookup_index, glyphs, target as usize, depth + 1, gdef) {
+            if let Some(step) = self.apply_lookup_at(lookup_index, glyphs, target as usize, depth + 1, gdef, budget) {
                 shift += step.grown;
             }
         }
@@ -1517,6 +1559,44 @@ mod tests {
             gsub.substitute(&[GlyphId(10)], &|tag| tag.0 == *b"ccmp"),
             vec![GlyphId(10), GlyphId(10)]
         );
+    }
+
+    #[test]
+    fn the_op_budget_is_finite_and_reports_once() {
+        // Audit §3: the work a call may spend following context lookups is bounded, and the
+        // font is told once — not once per glyph it gives up on.
+        let mut budget = OpBudget::new(0);
+        let mut allowed = 0;
+        while budget.take() {
+            allowed += 1;
+        }
+        assert_eq!(allowed, 1024);
+        assert!(budget.reported);
+    }
+
+    #[test]
+    fn a_context_lookup_that_names_itself_stops_when_its_budget_is_spent() {
+        // Audit §3: a context rule whose record names the lookup it sits in recurses. The
+        // nesting cap alone still allows `records^MAX_NESTING` applications — 8 records over 8
+        // levels is 16 million — so the per-call budget has to stop it.
+        const RECORDS: u16 = 8;
+        let coverage_offset = 8 + 4 * RECORDS;
+        let mut words: Vec<u16> = vec![3, 1, RECORDS, coverage_offset];
+        for _ in 0 .. RECORDS {
+            words.push(0); // sequenceIndex: the glyph the rule starts on
+            words.push(0); // lookupListIndex: this very lookup
+        }
+        words.extend_from_slice(&[1, 1, 10]); // coverage: format 1, one glyph, 10
+        let data = words_to_bytes(&words);
+        let context = parse_substitution(&data, 5).expect("context parses").expect("a subtable");
+        let gsub = gsub_with(vec![feature(b"calt", vec![0])], vec![vec![context]]);
+        let calt = |tag: Tag| tag.0 == *b"calt";
+        let run = vec![GlyphId(10); 4];
+        let start = std::time::Instant::now();
+        // The rule substitutes nothing, so the run comes back as it went in — quickly.
+        assert_eq!(gsub.substitute(&run, &calt), run);
+        let spent = start.elapsed();
+        assert!(spent < std::time::Duration::from_secs(2), "took {:?}", spent);
     }
 
     #[test]

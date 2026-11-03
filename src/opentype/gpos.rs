@@ -9,7 +9,7 @@ use crate::parsers::{*};
 use crate::opentype::{Maxp, Tag, parse_extension, parse_lookup_list, coverage_table, parse_class_def};
 use crate::opentype::gdef::{GDef, MarkClass, glyph_ignored, LookupFlags};
 use crate::opentype::gsub::{
-    Context, Feature, Script, MAX_NESTING, enabled_lookups, parse_chain_context_subst,
+    Context, Feature, OpBudget, Script, MAX_NESTING, enabled_lookups, parse_chain_context_subst,
     parse_context_subst, parse_feature_list, parse_script_list, visible_after, visible_before,
 };
 use itertools::{Itertools};
@@ -250,12 +250,13 @@ impl GPos {
         }
         // OT §"Lookups": each lookup runs across the whole run before the next one does. A
         // positioning lookup never changes the length of the run, so nothing moves under us.
+        let mut budget = OpBudget::new(glyphs.len());
         for &lookup_idx in &lookup_indices {
             let mut position = 0;
             while position < glyphs.len() {
                 // A pair adjustment that carries a value record for the second glyph resumes
                 // after that glyph (OT §GPOS "Pair Adjustment"); anything else moves on by one.
-                position += match self.apply_lookup_at(lookup_idx, glyphs, &mut out, position, 0, gdef, advance) {
+                position += match self.apply_lookup_at(lookup_idx, glyphs, &mut out, position, 0, gdef, advance, &mut budget) {
                     Some(step) => step.max(1),
                     None => 1,
                 };
@@ -276,7 +277,13 @@ impl GPos {
         depth: u8,
         gdef: Option<&GDef>,
         advance: &dyn Fn(GlyphId) -> i16,
+        budget: &mut OpBudget,
     ) -> Option<usize> {
+        // A context rule may name the lookup it sits in, so the recursion cap alone still allows
+        // an exponential number of applications; the budget bounds the work per call.
+        if depth > 0 && !budget.take() {
+            return None;
+        }
         let subtables = self.lookups.get(lookup_idx as usize)?;
         let flag = self.flags.get(lookup_idx as usize).copied().unwrap_or_default();
         let glyph = glyph_key(*glyphs.get(position)?)?;
@@ -305,7 +312,7 @@ impl GPos {
                 PosSubtable::MarkToLigature(marks) =>
                     self.apply_ligature_attachment(marks, glyphs, positions, position, glyph, &skip, gdef, advance),
                 PosSubtable::Context(context) =>
-                    self.apply_context(context, glyphs, positions, position, depth, flag, gdef, advance),
+                    self.apply_context(context, glyphs, positions, position, depth, flag, gdef, advance, budget),
             };
             if applied.is_some() {
                 return applied;
@@ -419,7 +426,7 @@ impl GPos {
         /// OT §GPOS "Context Positioning" (7, 8): run the lookups the first matching rule names at
     /// the glyphs of the run. Positioning never changes the length of the run, so this consumes
     /// exactly one glyph.
-    fn apply_context(&self, context: &Context, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, depth: u8, flag: LookupFlags, gdef: Option<&GDef>, advance: &dyn Fn(GlyphId) -> i16) -> Option<usize> {
+    fn apply_context(&self, context: &Context, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, depth: u8, flag: LookupFlags, gdef: Option<&GDef>, advance: &dyn Fn(GlyphId) -> i16, budget: &mut OpBudget) -> Option<usize> {
         if depth >= MAX_NESTING {
             debug!("GPOS: not following context lookups nested deeper than {}", MAX_NESTING);
             return None;
@@ -437,7 +444,7 @@ impl GPos {
                 None => continue,
             };
             applied |= self
-                .apply_lookup_at(lookup_index, glyphs, positions, target, depth + 1, gdef, advance)
+                .apply_lookup_at(lookup_index, glyphs, positions, target, depth + 1, gdef, advance, budget)
                 .is_some();
         }
         if applied { Some(1) } else { None }
