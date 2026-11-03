@@ -117,16 +117,23 @@ impl OpenTypeFont {
         let maxp = t!(tables.get(b"maxp").map(parse_maxp).transpose());
         let num_glyphs = maxp.as_ref().map(|maxp| maxp.num_glyphs as u32).unwrap_or(outlines.len() as u32);
 
-        let gpos = if let Some(data) = tables.get(b"GPOS") {
-            let maxp = expect!(maxp.as_ref(), "no maxp");
-            Some(t!(parse_gpos(data, &maxp)))
-        } else if let Some(data) = tables.get(b"kern") {
-            Some(GPos::from_kern(t!(parse_kern(data))))
-        } else {
-            None
+        // OT §GSUB/§GPOS/§GDEF are shaping data: a font that fails to parse them still draws
+        // every glyph with the right advance, it only loses kerning/ligatures. Treating a
+        // broken optional table as fatal made fonts every other engine renders unloadable
+        // (audit B3), so each one is dropped with a warning instead.
+        let gpos = match (tables.get(b"GPOS"), maxp.as_ref()) {
+            (Some(data), Some(maxp)) => optional_layout("GPOS", || parse_gpos(data, &maxp)),
+            // `parse_gpos` needs `num_glyphs`; without `maxp` the table cannot be read, but
+            // that is still no reason to reject a font that draws fine (audit B3).
+            (Some(_), None) => {
+                warn!("GPOS without maxp — ignored");
+                None
+            }
+            (None, _) => tables.get(b"kern")
+                .and_then(|data| optional_layout("kern", || parse_kern(data).map(GPos::from_kern))),
         };
         
-        let gsub = t!(tables.get(b"GSUB").map(parse_gsub).transpose());
+        let gsub = tables.get(b"GSUB").and_then(|data| optional_layout("GSUB", || parse_gsub(data)));
         
         let (cmap, encoding) = match t!(tables.get(b"cmap").map(|data| parse_cmap(data)).transpose()) {
             Some((cmap, encoding)) => (Some(cmap), Some(encoding)),
@@ -142,7 +149,7 @@ impl OpenTypeFont {
         let vmetrics = os2.as_ref().and_then(|os2| os2.typo_metrics())
             .or_else(|| hhea.map(|hhea| hhea.into()));
         let name = t!(tables.get(b"name").map(parse_name).transpose()).unwrap_or_default();
-        let gdef = t!(tables.get(b"GDEF").map(parse_gdef).transpose());
+        let gdef = tables.get(b"GDEF").and_then(|data| optional_layout("GDEF", || parse_gdef(data)));
         let base = t!(tables.get(b"BASE").map(parse_base).transpose());
         let post = t!(tables.get(b"post").map(parse_post).transpose());
         let mut name_map = HashMap::new();
@@ -585,16 +592,57 @@ pub fn parse_extension(data: &[u8]) -> Result<(u16, &[u8]), FontError> {
     Ok((lookup_type, slice!(data, extension_offset as usize ..)))
 }
 
+/// Parse an optional layout table, dropping it with a warning when it is malformed.
+///
+/// `GSUB`, `GPOS`, `GDEF` and the legacy `kern` table are shaping data: a font whose layout
+/// tables do not parse is still perfectly drawable, it only loses kerning and ligatures.
+/// Failing all of `OpenTypeFont::parse` there rejected fonts that FreeType, HarfBuzz and
+/// every browser render (audit B3).
+fn optional_layout<T>(name: &str, f: impl FnOnce() -> Result<T, FontError>) -> Option<T> {
+    match f() {
+        Ok(v) => Some(v),
+        Err(err) => {
+            warn!("{}: {:?} — ignoring the table, the font itself is still usable", name, err);
+            None
+        }
+    }
+}
+
 pub fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(usize, &[u8], u16, u16) -> Result<(), FontError>) -> Result<(), FontError> {
     let (i, lookup_count) = be_u16(data)?;
     for (lookup_idx, table_off) in iterator_n(i, be_u16, lookup_count).enumerate() {
-        let table_data = slice!(data, table_off as usize ..);
-        let (i, lookup_type) = be_u16(table_data)?;
-        let (i, lookup_flag) = be_u16(i)?;
-        let (i, subtable_count) = be_u16(i)?;
-        
-        for subtable_off in iterator_n(i, be_u16, subtable_count) {
-            inner(lookup_idx, slice!(table_data, subtable_off as usize ..), lookup_type, lookup_flag)?;
+        // One unreadable lookup or subtable must not cost the font all of its others (audit
+        // B3): the callbacks only append to the lookup vector after a successful parse, so
+        // skipping a failing subtable leaves the rest of the table intact.
+        if let Err(err) = parse_one_lookup(data, table_off as usize, lookup_idx, &mut inner) {
+            warn!("shaping lookup {}: {:?} — skipped, keeping the other lookups", lookup_idx, err);
+        }
+    }
+    Ok(())
+}
+
+fn parse_one_lookup(data: &[u8], table_off: usize, lookup_idx: usize,
+                    inner: &mut impl FnMut(usize, &[u8], u16, u16) -> Result<(), FontError>) -> Result<(), FontError> {
+    let table_data = match data.get(table_off ..) {
+        Some(d) => d,
+        None => return Err(FontError::OutOfBounds(file!(), line!())),
+    };
+    let (i, lookup_type) = be_u16(table_data)?;
+    let (i, lookup_flag) = be_u16(i)?;
+    let (i, subtable_count) = be_u16(i)?;
+
+    for subtable_off in iterator_n(i, be_u16, subtable_count) {
+        let subtable = match table_data.get(subtable_off as usize ..) {
+            // `slice!` would fail the whole lookup for one bad offset; keep the others.
+            Some(s) => s,
+            None => {
+                warn!("lookup {} (type {}): subtable offset {} is past the end — skipped",
+                      lookup_idx, lookup_type, subtable_off);
+                continue;
+            }
+        };
+        if let Err(err) = inner(lookup_idx, subtable, lookup_type, lookup_flag) {
+            warn!("lookup {} (type {}): {:?} — subtable skipped", lookup_idx, lookup_type, err);
         }
     }
     Ok(())
