@@ -489,8 +489,14 @@ impl<'a> CffSlot<'a> {
                         .flat_map(|&(first, left)| (first ..).take(left as usize + 1))
                         .enumerate().for_each(|(gid, codepoint)| cmap[codepoint as usize] = gid as u16 + 1),
                 }
+                // TN5176 §"Encoding": a supplement may name an SID the charset does not
+                // contain (the font simply lacks that glyph) — such an entry maps nowhere,
+                // it must not abort the font.
                 supplement.iter()
-                    .for_each(|&(codepoint, sid)| cmap[codepoint as usize] = sid_map[&sid]);
+                    .for_each(|&(codepoint, sid)| match sid_map.get(&sid) {
+                        Some(&gid) => cmap[codepoint as usize] = gid,
+                        None => debug!("encoding supplement: code {} names SID {}, not in the charset", codepoint, sid),
+                    });
                     
                 (cmap, None)
             }

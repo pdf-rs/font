@@ -665,3 +665,42 @@ fn c29_type2_index_with_negative_i_copies_the_top() {
     let glyph = glyph(&data, 1);
     assert_eq!(points(&glyph), vec![(0.0, 0.0), (3.0, 3.0)]);
 }
+
+/// `build_cff_glyphs` plus an `Encoding` entry: `encoding` is appended after the
+/// CharStrings INDEX and the TopDICT operand is iterated to its real offset. No
+/// `Charset` entry is written, so the predefined ISOAdobe charset applies (SIDs
+/// 1..=228, gid == SID).
+fn build_cff_with_encoding(encoding: &[u8], char_strings: &[&[u8]]) -> Vec<u8> {
+    let mut offset = 0i32;
+    let mut data = Vec::new();
+    for _ in 0..8 {
+        let mut top = Vec::new();
+        push_int(offset, &mut top);
+        top.push(16); // Operator::Encoding
+        data = build_cff_glyphs(&top, true, None, char_strings);
+        if data.len() as i32 == offset {
+            break;
+        }
+        offset = data.len() as i32;
+    }
+    data.extend_from_slice(encoding);
+    data
+}
+
+#[test]
+fn c18_encoding_supplement_may_name_a_missing_glyph() {
+    // F18: the supplement was applied with `sid_map[&sid]`, so an SID the charset does
+    // not contain aborted the font. TN5176 §"Encoding" allows it: a supplement names
+    // glyphs, and a font need not have them. The entry is skipped, the rest applies.
+    //
+    // Encoding format 0 with the supplement flag: one encoded code (0 -> SID 0) and two
+    // supplements — code 65 -> SID 34 ("A", present), code 66 -> SID 500 (absent, and
+    // outside the font's empty String INDEX).
+    let encoding = [0x80, 1, 0, 2, 65, 0x00, 34, 66, 0x01, 0xF4];
+    let cs = vec![14]; // endchar
+    let data = build_cff_with_encoding(&encoding, &[&cs, &cs]);
+
+    let font = CffFont::parse(&data, 0).expect("a supplement naming a missing SID is not fatal");
+    assert_eq!(font.gid_for_codepoint(65), Some(GlyphId(34)), "known SID still maps");
+    assert_eq!(font.gid_for_codepoint(66), None, "the missing SID maps to no glyph");
+}
