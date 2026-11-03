@@ -704,3 +704,27 @@ fn c18_encoding_supplement_may_name_a_missing_glyph() {
     assert_eq!(font.gid_for_codepoint(65), Some(GlyphId(34)), "known SID still maps");
     assert_eq!(font.gid_for_codepoint(66), None, "the missing SID maps to no glyph");
 }
+
+#[test]
+fn c17_last_charset_glyph_is_in_the_unicode_map() {
+    // F17: the map must cover every charset entry, not stop one short. Three charstrings and
+    // no `Charset` entry -> the predefined ISOAdobe charset: gid 1 = SID 1 ("space"),
+    // gid 2 = SID 2 ("exclam"), the last glyph in the font.
+    let cs = vec![14]; // endchar
+    let data = build_cff_glyphs(&[], true, None, &[&cs, &cs, &cs]);
+    let font = CffFont::parse(&data, 0).expect("font parses");
+
+    assert_eq!(font.num_glyphs(), 3);
+    assert_eq!(font.gid_for_unicode_codepoint(0x20), Some(GlyphId(1)), "\"space\" is gid 1");
+    assert_eq!(font.gid_for_unicode_codepoint(0x21), Some(GlyphId(2)), "\"exclam\" is the last glyph");
+}
+
+#[test]
+fn c17b_zero_char_strings_does_not_panic() {
+    // F17: `glyphs.len()-1` underflows for a font with no charstrings. `Cff::slot` rejects
+    // such a font outright (`require!(num_glyphs >= 1)`, there is always `.notdef`), so the
+    // subtraction is unreachable today; the loop still uses `saturating_sub` and this asserts
+    // the guarantee it relies on rather than a panic.
+    let data = build_cff_glyphs(&[], true, None, &[]);
+    assert!(CffFont::parse(&data, 0).is_err(), "a font without .notdef is rejected");
+}

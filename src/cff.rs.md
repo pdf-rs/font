@@ -14,6 +14,13 @@
   which only affects outlines), and a charstring that sets both an explicit and a delta width
   keeps the explicit one instead of hitting `panic!("BUG: both char_width and delta_width set")`.
   Tests: `c19`, `c19b`, `c19c`, `c19d` in `tests/cff_cases.rs`.
+* **F17 (2026-11-03):** the glyph-name→Unicode map is built with
+  `sids.iter().enumerate().take(glyphs.len().saturating_sub(1))` instead of `0..glyphs.len()-1`,
+  so there is no `len()-1` underflow left on the path. The report's "the last glyph is never
+  mapped" was wrong: gid 0 is `.notdef` and the charset names gids 1..n, so the old bound already
+  covered every charset entry (verified — `c17` passes on the old code too), and an empty
+  CharStrings INDEX is already rejected by `Cff::slot` (`num_glyphs >= 1`). Hardening only.
+  Tests: `c17`, `c17b` in `tests/cff_cases.rs`.
 * **F18 (2026-11-03):** an encoding supplement is applied through `sid_map.get()` instead of
   `sid_map[&sid]`, so a supplement that names an SID the charset does not contain (legal — a
   supplement may name a glyph the font lacks, TN5176 §"Encoding") leaves that code unmapped
@@ -41,8 +48,6 @@ The SID tables (`STANDARD_STRINGS`, `ISO_ADOBE_CHARSET`, `EXPERT_CHARSET`,
 * **F42 (TN5176 §"Name INDEX"):** the Name INDEX is parsed and thrown away, so `CffFont::name()`
   is `Name::default()` and `info.weight` is always `None` (**F47**) — a bare CFF font reports no
   name at all.
-* **F17:** the glyph-name→Unicode map (`:463-467`) loops `0..glyphs.len()-1` and inserts
-  `(n+1)`; the last glyph is never mapped and an empty font underflows.
 * **F22/F23:** (fixed above) `Private` was treated as mandatory, the charstring/charset paths
   used `panic!` for anything unexpected, and `index()` underflowed on an offset of 0.
 * **F42 (TN5177/TN5176 §"Charstring width"):** width derivation is right — `(Some(w), None)` uses

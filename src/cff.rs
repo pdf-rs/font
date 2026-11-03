@@ -522,10 +522,15 @@ impl<'a> CffSlot<'a> {
             }
         }).collect();
         
-        let mut unicode_map = HashMap::with_capacity(glyphs.len());
-        for n in 0..glyphs.len()-1 {
-            if let Some(c) = sids.get(n).and_then(|&sid| glyph_name(sid).ok()).and_then(|name| glyphname_to_unicode(name)) {
-                unicode_map.insert(c, (n+1) as u16);
+        // CFF §"CharStrings INDEX": gid 0 is `.notdef`, the charset names gids 1..n, so the
+        // pairs here are (gid n+1, charset entry n) — one fewer entry than glyphs.  Both
+        // `len() - 1`s are written as `saturating_sub` so that a font with no charstring at
+        // all (rejected earlier by `require!(num_glyphs >= 1)`) cannot underflow here if that
+        // check ever moves.
+        let mut unicode_map = HashMap::with_capacity(glyphs.len().saturating_sub(1));
+        for (n, &sid) in sids.iter().enumerate().take(glyphs.len().saturating_sub(1)) {
+            if let Some(c) = glyph_name(sid).ok().and_then(|name| glyphname_to_unicode(name)) {
+                unicode_map.insert(c, (n + 1) as u16);
             }
         }
         //info!("unicode_map: {:?}", unicode_map);
