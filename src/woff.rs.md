@@ -57,4 +57,6 @@
 
 ## Cross references
 `opentype/mod.rs.md` (`Tables`, `parse_hmtx*`), `truetype.rs.md` (`compound`, `contour`,
-`parse_shapes` are reused by the WOFF2 transformed path), `woff_lut.rs.md` (duplicate LUT).
+`parse_shapes` are reused by the WOFF2 transformed path). The triplet LUT lives here
+(`Triplet`, `lut!`, `TRIPLET_LUT`, `:300-477`); the second, never-compiled copy that used to sit
+in `src/woff_lut.rs` was deleted (**F48**), so there is only one table.
