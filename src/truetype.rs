@@ -225,7 +225,14 @@ fn fraction_i16(i: &[u8]) -> R<f32> {
 
 pub fn parse_shapes(loca: &[u32], data: &[u8]) -> Result<Vec<Shape>, FontError> {
     // OT §loca: the last offset is the length of `glyf`; anything larger points outside it.
-    require!(loca.last().map_or(true, |&end| end as usize <= data.len()));
+    // Only the glyphs past the end are affected and they are read as empty below, so a font
+    // that overshoots still renders the rest.
+    if let Some(&end) = loca.last() {
+        if end as usize > data.len() {
+            warn!("loca: last offset {} is past glyf's {} bytes — those glyphs stay empty",
+                end, data.len());
+        }
+    }
     let mut shapes = Vec::with_capacity(loca.len() - 1);
     for (i, (start, end)) in loca.iter().cloned().tuple_windows().enumerate() {
         // OT §glyf: one corrupt glyph record must not cost the whole font. `parse_glyph_shape`

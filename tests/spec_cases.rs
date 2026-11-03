@@ -598,24 +598,27 @@ pub fn loca_table_short(offsets: &[u32]) -> Vec<u8> {
 }
 
 #[test]
-fn c13_hmtx_rejects_zero_number_of_hmetrics() {
-    // F30: OT §hmtx requires `1 <= numberOfHMetrics <= numGlyphs`. With 0 the crate used to
-    // build an empty metric list and answer every glyph with advance 0.
+fn c13_hmtx_clamps_zero_number_of_hmetrics() {
+    // F30: OT §hmtx requires `1 <= numberOfHMetrics <= numGlyphs`. Audit §4: a value outside
+    // that range cannot make the metric lookups fail, so it is clamped with a warning rather
+    // than costing the whole font — 0 used to reject.
     let mut tables = base_tables(2);
     tables[1].1 = hhea_table(0);
-    let err = OpenTypeFont::parse(&build_font(tables));
-    assert!(err.is_err(), "numberOfHMetrics = 0 must be rejected");
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("numberOfHMetrics = 0 loads");
+    assert_eq!(font.glyph_metrics(0).map(|m| m.advance), Some(500.0));
 }
 
 #[test]
-fn c13b_hmtx_rejects_missing_trailing_lsbs() {
-    // F30: `numGlyphs - numberOfHMetrics` left side bearings must be there; `many0` used to
-    // accept a short table and fill in 0.
+fn c13b_hmtx_accepts_missing_trailing_lsbs() {
+    // F30: `numGlyphs - numberOfHMetrics` left side bearings are required by the spec, but
+    // truncated tables are common (audit §4): the missing ones are left out, and the glyphs
+    // whose bearing is missing report no metric.
     let mut tables = base_tables(3);
     tables[1].1 = hhea_table(2);
     tables[3].1 = hmtx_table(2);
-    let err = OpenTypeFont::parse(&build_font(tables));
-    assert!(err.is_err(), "a short left-side-bearing array must be rejected");
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("a short bearing array loads");
+    assert_eq!(font.glyph_metrics(0).map(|m| m.advance), Some(500.0));
+    assert!(font.glyph_metrics(2).is_none(), "glyph 2 has no bearing of its own");
 }
 
 #[test]
@@ -629,7 +632,8 @@ fn c13c_hmtx_has_no_metric_for_gid_at_or_beyond_num_glyphs() {
 
 #[test]
 fn c14_head_rejects_units_per_em_zero() {
-    // F31: OT §head allows 16..=16384; 0 turned `font_matrix()` into `1/0 = inf`.
+    // F31: OT §head allows 16..=16384; 0 turned `font_matrix()` into `1/0 = inf`, which is the
+    // one value that stays fatal (audit §4).
     let mut head = head_table();
     head[18] = 0;
     head[19] = 0;
@@ -639,13 +643,29 @@ fn c14_head_rejects_units_per_em_zero() {
 }
 
 #[test]
-fn c14b_maxp_rejects_unknown_version() {
-    // F31: OT §maxp has exactly 0x00005000 and 0x00010000.
+fn c14c_head_keeps_a_units_per_em_outside_the_spec_range() {
+    // Audit §4: the rest of the range is a convention, not a reason to refuse the font —
+    // clamping would move every coordinate.
+    let mut head = head_table();
+    head[18] = 0;
+    head[19] = 8;
+    let mut tables = base_tables(2);
+    tables[0].1 = head;
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("unitsPerEm = 8 loads");
+    assert_eq!(font.num_glyphs(), 2);
+    assert_eq!(font.glyph_metrics(0).map(|m| m.advance), Some(500.0));
+}
+
+#[test]
+fn c14b_maxp_reads_an_unknown_version() {
+    // F31: OT §maxp has exactly 0x00005000 and 0x00010000. Audit §4: the fields are read at the
+    // same offsets in both, so an unknown version is a warning.
     let mut maxp = maxp_table(2);
     maxp[1] = 2; // 0x00020000
     let mut tables = base_tables(2);
     tables[2].1 = maxp;
-    assert!(OpenTypeFont::parse(&build_font(tables)).is_err());
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("maxp 2.0 loads");
+    assert_eq!(font.num_glyphs(), 2);
 }
 
 #[test]
@@ -689,24 +709,30 @@ fn c16_one_corrupt_glyph_does_not_fail_the_font() {
 }
 
 #[test]
-fn c16b_loca_must_be_monotonic() {
-    // F31: OT §loca offsets are non-decreasing; a decreasing pair used to fail deep inside
-    // `parse_shapes` with an out-of-bounds message.
+fn c16b_loca_that_runs_backwards_leaves_the_glyph_empty() {
+    // F31: OT §loca offsets are non-decreasing. Audit §4: a backwards pair can only affect
+    // that glyph, which `parse_shapes` reads as empty, so the font still loads.
     let mut tables = base_tables(2);
     tables.push((*b"loca", loca_table_short(&[0, 10, 4])));
     let mut glyf = vec![0u8; 10];
     glyf[1] = 0; // shape data is irrelevant, the offsets are wrong
     tables.push((*b"glyf", glyf));
-    assert!(OpenTypeFont::parse(&build_font(tables)).is_err());
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("a backwards loca pair loads");
+    assert_eq!(font.num_glyphs(), 2);
+    assert!(font.is_empty_glyph(GlyphId(1)));
 }
 
 #[test]
-fn c16c_loca_may_not_point_past_glyf() {
-    // F31: the last offset is the length of `glyf`.
+fn c16c_loca_past_the_end_of_glyf_leaves_those_glyphs_empty() {
+    // F31: the last offset is the length of `glyf`. Audit §4: only the glyphs past the end
+    // are affected, so the font still loads.
     let mut tables = base_tables(2);
     tables.push((*b"loca", loca_table_short(&[0, 0, 100])));
     tables.push((*b"glyf", vec![0u8; 10]));
-    assert!(OpenTypeFont::parse(&build_font(tables)).is_err());
+    let font = OpenTypeFont::parse(&build_font(tables)).expect("an oversized last loca loads");
+    assert_eq!(font.num_glyphs(), 2);
+    assert!(font.is_empty_glyph(GlyphId(0)));
+    assert!(font.is_empty_glyph(GlyphId(1)));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1256,6 +1282,38 @@ fn c26b_plain_svg_documents_still_parse() {
     // Negative control: an uncompressed document is passed through untouched.
     let font = font_with_svg(SVG_DOC);
     assert!(font.svg_glyph(GlyphId(65)).is_some());
+}
+
+#[cfg(feature = "svg")]
+#[test]
+fn c26c_a_document_that_cannot_be_decompressed_costs_only_itself() {
+    // Audit §4: a bad plain SVG document was only logged, a bad gzip one aborted the whole
+    // table. Both are now skipped per document.
+    let broken: &[u8] = &[0x1f, 0x8b, 8, 0]; // gzip magic, then nothing
+    let good = gzip_stored(SVG_DOC);
+    let mut t = Vec::new();
+    push_u16(&mut t, 0);  // version
+    push_u32(&mut t, 10); // svgDocumentListOffset
+    push_u32(&mut t, 0);  // reserved
+    push_u16(&mut t, 2);  // two documents
+    let offset = (2 + 12 * 2) as u32;
+    push_u16(&mut t, 64); push_u16(&mut t, 64);
+    push_u32(&mut t, offset);
+    push_u32(&mut t, broken.len() as u32);
+    push_u16(&mut t, 65); push_u16(&mut t, 65);
+    push_u32(&mut t, offset + broken.len() as u32);
+    push_u32(&mut t, good.len() as u32);
+    t.extend_from_slice(broken);
+    t.extend_from_slice(&good);
+
+    let (glyf, loca) = glyf_and_loca(&[Vec::new(), Vec::new()]);
+    let mut tables = base_tables(2);
+    tables.push((*b"loca", loca));
+    tables.push((*b"glyf", glyf));
+    tables.push((*b"SVG ", t));
+    let font = font::parse(&build_font(tables)).expect("one broken document must not fail the table");
+    assert!(font.svg_glyph(GlyphId(65)).is_some(), "the readable document still loads");
+    assert!(font.svg_glyph(GlyphId(64)).is_none());
 }
 
 // ---------------------------------------------------------------------------------------------

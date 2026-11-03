@@ -383,8 +383,12 @@ pub fn parse_head(i: &[u8]) -> Result<Head, FontError> {
     let (i, glyph_data_format) = be_u16(i)?;
     require_eq!(glyph_data_format, 0);
     // OT §head: `unitsPerEm` lies in 16..=16384. Zero would turn every coordinate into
-    // `inf` through `font_matrix()`.
-    require!(units_per_em >= 16 && units_per_em <= 16384);
+    // `inf` through `font_matrix()`, so that one is fatal; the rest of the range is only a
+    // convention several real fonts break, and clamping would move every coordinate.
+    require!(units_per_em != 0);
+    if units_per_em < 16 || units_per_em > 16384 {
+        warn!("head: unitsPerEm {} outside 16..=16384 — taken as it is", units_per_em);
+    }
     // OT §head: 0 = short `loca` offsets (u16/2), 1 = long (u32).
     require!(index_to_loc_format == 0 || index_to_loc_format == 1);
     
@@ -400,10 +404,15 @@ pub struct Maxp {
 }
 pub fn parse_maxp(i: &[u8]) -> Result<Maxp, FontError> {
     let (i, version) = be_i32(i)?;
-    // OT §maxp: 0x00005000 (version 0.5) or 0x00010000 (1.0); nothing else exists.
-    require!(version == 0x0000_5000 || version == 0x0001_0000);
+    // OT §maxp: 0x00005000 (version 0.5) or 0x00010000 (1.0); nothing else exists. The
+    // fields read below are at the same offset in both, so an unknown version is only worth
+    // a warning.
+    if version != 0x0000_5000 && version != 0x0001_0000 {
+        warn!("maxp: unknown version {:#010x} — read as 1.0", version);
+    }
     let (i, num_glyphs) = be_u16(i)?;
-    // A font without glyphs cannot be indexed; `loca` has `numGlyphs + 1` entries.
+    // A font without glyphs cannot be indexed: `loca` has `numGlyphs + 1` entries and several
+    // computations below count down from `numGlyphs`, so zero would underflow.
     require!(num_glyphs >= 1);
     Ok(Maxp { num_glyphs })
 }
@@ -413,8 +422,11 @@ pub fn parse_loca<'a>(i: &'a [u8], head: &Head, maxp: &Maxp) -> Result<Vec<u32>,
         1 => count(be_u32, maxp.num_glyphs as usize + 1)(i).get(),
         _ => error!("invalid index_to_loc_format")
     }?;
-    // OT §loca: the offsets are monotonically non-decreasing.
-    require!(loca.windows(2).all(|w| w[0] <= w[1]));
+    // OT §loca: the offsets are monotonically non-decreasing. A glyph whose offsets run
+    // backwards is read as an empty glyph by `parse_shapes`, so this is only a warning.
+    if !loca.windows(2).all(|w| w[0] <= w[1]) {
+        warn!("loca: offsets are not non-decreasing — glyphs with backwards ranges stay empty");
+    }
     Ok(loca)
 }
 
@@ -497,21 +509,30 @@ impl Hmtx {
     }
 }
 pub fn parse_hmtx(i: &[u8], hhea: &Hhea, maxp: &Maxp) -> Result<Hmtx, FontError> {
-    let num_metrics = hhea.number_of_hmetrics;
-    // OT §hmtx: `numberOfHMetrics` is the number of glyphs with a full long metric and
-    // must lie in `1 ..= numGlyphs` (hhea lists the same value).
-    if num_metrics == 0 || num_metrics > maxp.num_glyphs {
-        return Err(FontError::Other(format!(
-            "hmtx: numberOfHMetrics {} outside 1..={}", num_metrics, maxp.num_glyphs)));
-    }
+    // OT §hmtx: `numberOfHMetrics` is the number of glyphs with a full long metric and lies
+    // in `1 ..= numGlyphs`. Truncated and padded tables are common, and neither value can make
+    // the lookups below fail, so both are clamped to the range the table can describe.
+    let num_metrics = match hhea.number_of_hmetrics {
+        n if n == 0 || n > maxp.num_glyphs => {
+            warn!("hmtx: numberOfHMetrics {} outside 1..={} — clamped", n, maxp.num_glyphs);
+            if n == 0 { 1 } else { maxp.num_glyphs }
+        }
+        n => n,
+    };
     let n_metrics = num_metrics as usize;
     let (i, metrics) = count(
         tuple((be_u16, be_i16)),
         n_metrics
     )(i)?;
-    // Exactly `numGlyphs - numberOfHMetrics` left side bearings follow.
+    // `numGlyphs - numberOfHMetrics` left side bearings follow. A table that stops early leaves
+    // the trailing glyphs without one, which `metrics_for_gid` reports as no metric.
     let n_lsbs = (maxp.num_glyphs - num_metrics) as usize;
-    let (i, lsbs) = count(be_i16, n_lsbs)(i)?;
+    let available = i.len() / 2;
+    if n_lsbs > available {
+        warn!("hmtx: {} trailing side bearings expected, {} present — the rest are missing",
+            n_lsbs, available);
+    }
+    let (i, lsbs) = count(be_i16, n_lsbs.min(available))(i)?;
     let last_advance = metrics.last().map(|&(advance, _)| advance).unwrap_or(0);
     
     Ok(Hmtx {

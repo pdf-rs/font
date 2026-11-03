@@ -99,7 +99,15 @@ fn read_document_list(input: &[u8]) -> Result<SvgTable, FontError> {
         data = i;
 
         let svg_data = slice!(input, data_offset as usize .. data_offset as usize + data_len as usize);
-        let svg_data = document_data(svg_data)?;
+        let svg_data = match document_data(svg_data) {
+            Ok(svg_data) => svg_data,
+            // One document that cannot be decompressed must not cost the other documents,
+            // which is how a document the SVG parser rejects is treated below (audit §4).
+            Err(e) => {
+                warn!("SVG: glyphs {}..={}: {:?} — document skipped", start_gid, end_gid, e);
+                continue;
+            }
+        };
         
         // std::fs::write(format!("/tmp/font/{}.svg", start_gid), svg_data);
         let svg = match Svg::from_data(&svg_data) {
