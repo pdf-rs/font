@@ -303,6 +303,50 @@ pub struct Context {
     backtrack_classes: HashMap<u16, u16>,
     lookahead_classes: HashMap<u16, u16>,
     rules: Vec<SequenceRule>,
+    /// The rules grouped by what their first glyph has to be, so a lookup does not try every
+    /// rule of the subtable at every position (audit §3). Built by `with_index`.
+    index: RuleIndex,
+}
+
+/// Which rules can start at a given first glyph (audit §3). Each list keeps table order, and a
+/// rule is only ever in one of them.
+#[derive(Debug, Clone, Default)]
+struct RuleIndex {
+    /// Rules that name their first glyph exactly (context and chaining context format 1).
+    by_glyph: HashMap<u16, Vec<u32>>,
+    /// Rules that name the class their first glyph has to be in (format 2).
+    by_class: HashMap<u16, Vec<u32>>,
+    /// Rules whose coverage table alone decides where they may start (format 3).
+    unconditional: Vec<u32>,
+}
+
+impl RuleIndex {
+    fn build(rules: &[SequenceRule]) -> RuleIndex {
+        let mut index = RuleIndex::default();
+        for (n, rule) in rules.iter().enumerate() {
+            let n = n as u32;
+            match (rule.first_glyph, rule.first_class) {
+                (Some(glyph), _) => index.by_glyph.entry(glyph).or_insert_with(Vec::new).push(n),
+                (None, Some(class)) => index.by_class.entry(class).or_insert_with(Vec::new).push(n),
+                (None, None) => index.unconditional.push(n),
+            }
+        }
+        index
+    }
+
+    fn is_empty(&self) -> bool {
+        self.by_glyph.is_empty() && self.by_class.is_empty() && self.unconditional.is_empty()
+    }
+
+    /// The candidate rules for a first glyph of class `class`: three lists to merge.
+    fn buckets(&self, first: u16, class: u16) -> (&[u32], &[u32], &[u32]) {
+        let none: &[u32] = &[];
+        (
+            self.by_glyph.get(&first).map_or(none, |rules| rules.as_slice()),
+            self.by_class.get(&class).map_or(none, |rules| rules.as_slice()),
+            self.unconditional.as_slice(),
+        )
+    }
 }
 
 pub(crate) fn empty_context() -> Context {
@@ -312,6 +356,7 @@ pub(crate) fn empty_context() -> Context {
         backtrack_classes: HashMap::new(),
         lookahead_classes: HashMap::new(),
         rules: Vec::new(),
+        index: RuleIndex::default(),
     }
 }
 
@@ -368,7 +413,50 @@ impl Context {
 
     /// The first rule that matches at `position`, if any.
     pub(crate) fn matched_rule<'a>(&'a self, glyphs: &[GlyphId], position: usize, skip: &dyn Fn(u16) -> bool) -> Option<&'a SequenceRule> {
-        self.rules.iter().find(|rule| self.matches(rule, glyphs, position, skip))
+        // A context whose rules were filled in by hand has no index; it still matches, it just
+        // scans them all.
+        if self.index.is_empty() {
+            return self.rules.iter().find(|rule| self.matches(rule, glyphs, position, skip));
+        }
+        let first = first_glyph_of(*glyphs.get(position)?)?;
+        let (by_glyph, by_class, unconditional) = self.index.buckets(first, class_of(&self.input_classes, first));
+        // Each list is in table order and no rule is in two of them, so a three-way merge
+        // walks the candidates in table order without building a merged list.
+        let (mut glyph_next, mut class_next, mut plain_next) = (0, 0, 0);
+        loop {
+            let mut candidate = by_glyph.get(glyph_next).copied();
+            if let Some(n) = by_class.get(class_next).copied() {
+                candidate = Some(candidate.map_or(n, |c| c.min(n)));
+            }
+            if let Some(n) = unconditional.get(plain_next).copied() {
+                candidate = Some(candidate.map_or(n, |c| c.min(n)));
+            }
+            let n = match candidate {
+                Some(n) => n,
+                None => return None,
+            };
+            if by_glyph.get(glyph_next).copied() == Some(n) {
+                glyph_next += 1;
+            }
+            if by_class.get(class_next).copied() == Some(n) {
+                class_next += 1;
+            }
+            if unconditional.get(plain_next).copied() == Some(n) {
+                plain_next += 1;
+            }
+            if let Some(rule) = self.rules.get(n as usize) {
+                if self.matches(rule, glyphs, position, skip) {
+                    return Some(rule);
+                }
+            }
+        }
+    }
+
+    /// Groups the rules by what their first glyph has to be. The parse functions call this once
+    /// the rules are known.
+    fn with_index(mut self) -> Context {
+        self.index = RuleIndex::build(&self.rules);
+        self
     }
 }
 
@@ -863,12 +951,13 @@ fn coverage_lists(data: &[u8], offsets: Vec<u16>) -> Result<Vec<Vec<u16>>, FontE
 /// OT §GSUB "Context Substitution" (lookup type 5), formats 1, 2 and 3.
 pub(crate) fn parse_context_subst(data: &[u8]) -> Result<Context, FontError> {
     let (i, format) = be_u16(data)?;
-    match format {
+    let context = match format {
         1 => parse_context_format1(data, i),
         2 => parse_context_format2(data, i),
         3 => parse_context_format3(data, i),
         n => error!("unsupported context substitution format {}", n),
-    }
+    }?;
+    Ok(context.with_index())
 }
 
 /// OT §GSUB "ContextSubstFormat1": rule sets indexed by the position of the first glyph in the
@@ -1059,12 +1148,13 @@ fn parse_chain_sequence(i: &[u8]) -> Result<Option<ChainSequence>, FontError> {
 /// OT §GSUB "Chaining Context Substitution" (lookup type 6), formats 1, 2 and 3.
 pub(crate) fn parse_chain_context_subst(data: &[u8]) -> Result<Context, FontError> {
     let (i, format) = be_u16(data)?;
-    match format {
+    let context = match format {
         1 => parse_chain_format1(data, i),
         2 => parse_chain_format2(data, i),
         3 => parse_chain_format3(data, i),
         n => error!("unsupported chaining context substitution format {}", n),
-    }
+    }?;
+    Ok(context.with_index())
 }
 
 /// OT §GSUB "ChainContextSubstFormat1": rule sets indexed by the position of the first glyph in
@@ -1597,6 +1687,81 @@ mod tests {
         assert_eq!(gsub.substitute(&run, &calt), run);
         let spent = start.elapsed();
         assert!(spent < std::time::Duration::from_secs(2), "took {:?}", spent);
+    }
+
+    /// A rule that only looks at the first glyph (or its class) and substitutes nothing.
+    fn bare_rule(first_glyph: Option<u16>, first_class: Option<u16>, records: Vec<(u16, u16)>) -> SequenceRule {
+        SequenceRule {
+            first_glyph,
+            first_class,
+            backtrack: Vec::new(),
+            input: Vec::new(),
+            lookahead: Vec::new(),
+            records,
+        }
+    }
+
+    #[test]
+    fn context_rules_are_found_through_the_index_not_by_scanning() {
+        // Audit §3: matched_rule tried the subtable's rules in order until one matched, so a
+        // context with one rule per glyph cost O(rules) at every position. The index says which
+        // rules may start at a glyph, and only those are tried. `skip` runs once per rule that
+        // is tried, so counting its calls counts the work.
+        const RULES: u16 = 20_000;
+        let rules: Vec<SequenceRule> = (0 .. RULES)
+            .map(|n| bare_rule(Some(100 + n), None, Vec::new()))
+            .collect();
+        let context = Context {
+            coverage: (100 .. 100 + RULES).collect(),
+            input_classes: HashMap::new(),
+            backtrack_classes: HashMap::new(),
+            lookahead_classes: HashMap::new(),
+            rules,
+            index: RuleIndex::default(),
+        }.with_index();
+
+        let tried = std::cell::Cell::new(0u32);
+        let count = |_: u16| {
+            tried.set(tried.get() + 1);
+            false
+        };
+        // The last rule is the one that matches, so a scan would try all 20 000 of them.
+        let found = context.matched_rule(&[GlyphId(u32::from(100 + RULES - 1))], 0, &count);
+        assert_eq!(found.and_then(|rule| rule.first_glyph), Some(100 + RULES - 1));
+        assert_eq!(tried.get(), 1, "only the rule for that glyph may be tried");
+    }
+
+    #[test]
+    fn the_rule_index_keeps_table_order_across_its_buckets() {
+        // The index splits the rules over three lists — by glyph, by class, and those that only
+        // the coverage decides. The merged walk must still hand back the first matching rule in
+        // table order, and every list must stay reachable.
+        let mut classes: HashMap<u16, u16> = HashMap::new();
+        classes.insert(10, 1);
+        let context = Context {
+            coverage: vec![10, 12],
+            input_classes: classes,
+            backtrack_classes: HashMap::new(),
+            lookahead_classes: HashMap::new(),
+            rules: vec![
+                bare_rule(None, Some(1), vec![(0, 0)]),      // 0: class 1, i.e. glyph 10
+                bare_rule(Some(12), None, vec![(0, 1)]),     // 1: glyph 12 exactly
+                bare_rule(None, None, vec![(0, 2)]),         // 2: any covered glyph
+                bare_rule(None, Some(0), vec![(0, 3)]),      // 3: class 0, i.e. glyph 12
+            ],
+            index: RuleIndex::default(),
+        }.with_index();
+        let never = |_: u16| false;
+
+        // Glyph 10: rules 0 and 2 match, and 0 is first.
+        let found = context.matched_rule(&[GlyphId(10)], 0, &never).expect("a rule matches 10");
+        assert_eq!(found.records(), [(0, 0)]);
+        // Glyph 12: rules 1, 2 and 3 match, and 1 is first — even though it sits in the middle
+        // of the table and the other two are in different buckets.
+        let found = context.matched_rule(&[GlyphId(12)], 0, &never).expect("a rule matches 12");
+        assert_eq!(found.records(), [(0, 1)]);
+        // A glyph the coverage leaves out matches nothing.
+        assert!(context.matched_rule(&[GlyphId(11)], 0, &never).is_none());
     }
 
     #[test]
