@@ -280,7 +280,21 @@ fn seac(adx: i32, ady: i32, base: i32, accent: i32) -> Vec<u8> {
     cs
 }
 
-// ---------------------------- flex (F40)
+/// `hsbw sbx 500` then `asb adx ady bchar achar seac` (12 6) — the side-bearing form,
+/// where the accent is placed at `adx + sbx - asb` (F41/audit C4).
+fn seac_with_bearings(sbx: i32, asb: i32, adx: i32, ady: i32, base: i32, accent: i32) -> Vec<u8> {
+    let mut cs = Vec::new();
+    num(&mut cs, sbx);
+    num(&mut cs, 500);
+    cs.push(13); // hsbw
+    num(&mut cs, asb);
+    num(&mut cs, adx);
+    num(&mut cs, ady);
+    num(&mut cs, base);
+    num(&mut cs, accent);
+    cs.extend_from_slice(&[12, 6]);
+    cs
+}
 
 /// The three flex subroutines a Type 1 font carries in its `/Private` dict
 /// (TN5015 §10, T1 §8; FreeType `psaux/t1decode.c`, othersubrs 0–2), as plain
@@ -409,6 +423,42 @@ fn c23_type1_seac_composes_the_accent() {
     // The base is not moved.
     let base_after = composed.path.contours()[0].points();
     for (s, o) in base_after.iter().zip(base.contours()[0].points()) {
+        assert_eq!(s, o);
+    }
+}
+
+#[test]
+fn c23b_type1_seac_honours_the_side_bearings() {
+    // F41/audit C4: `asb` was read and thrown away, so every accent sat at the raw
+    // `(adx, ady)` and composites were misaligned by the accent's left side bearing.
+    // FreeType (`psaux/t1decode.c::t1operator_seac`) does `adx += left_bearing.x` and
+    // then places the accent at `adx - asb` — the composite's own lsb counts too.
+    let data = pfa(
+        &[
+            (".notdef", &notdef()),
+            ("A", &rect(0, 0, 300, 700, 500)),
+            // the accent carries its own lsb of 10, as a real accent charstring would
+            ("acute", &rect(10, 0, 60, 60, 300)),
+            // composite lsb 40, asb 10 ⇒ accent shift = 100 + 40 - 10
+            ("Aacute", &seac_with_bearings(40, 10, 100, 200, 65, 194)),
+        ],
+        Some("{/.notdef /A /acute /Aacute}"),
+    );
+    let font = parse(&data);
+    let base = font.glyph(font.gid_for_name("A").expect("glyph A")).unwrap().path;
+    let accent = font.glyph(font.gid_for_name("acute").expect("glyph acute")).unwrap().path;
+    let composed = font.glyph(font.gid_for_name("Aacute").expect("glyph Aacute")).unwrap();
+
+    assert_eq!(composed.path.contours().len(), base.contours().len() + accent.contours().len());
+    let shifted = &composed.path.contours()[base.contours().len()];
+    let original = accent.contours()[0].points();
+    assert_eq!(shifted.points().len(), original.len());
+    for (s, o) in shifted.points().iter().zip(original) {
+        assert_eq!(s.x(), o.x() + 130.0);
+        assert_eq!(s.y(), o.y() + 200.0);
+    }
+    // the base stays where it was
+    for (s, o) in composed.path.contours()[0].points().iter().zip(base.contours()[0].points()) {
         assert_eq!(s, o);
     }
 }

@@ -425,21 +425,36 @@ pub struct State {
 }
 
 /// A `seac` accent composition: the base and accent characters, given as
-/// StandardEncoding codes, with the accent shifted by `(adx, ady)` from the origin
-/// of the base character (T1 §6; TN5177 Appendix C for the Type 2 form).
+/// StandardEncoding codes, with the accent shifted relative to the origin of the
+/// base character (T1 §6; TN5177 Appendix C for the Type 2 form).
+///
+/// The shift is `adx + sbx - asb` horizontally and `ady` vertically (F41/audit C4):
+/// Type 1 measures `adx` from the composite character's own left side bearing, and
+/// the accent's `asb` operand is its left side bearing, which the accent's outline
+/// already carries — FreeType `psaux/t1decode.c::t1operator_seac` does exactly
+/// `adx += left_bearing.x` and then places the accent at `adx - asb`. The Type 2
+/// form (TN5177 Appendix C) has no side-bearing operands, so `sbx` and `asb` are 0
+/// there and the shift is plain `(adx, ady)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Seac {
+    /// Horizontal displacement, measured from the composite's left edge in Type 1.
     pub adx: f32,
+    /// Vertical displacement, measured from the base character's baseline.
     pub ady: f32,
+    /// The composite charstring's own left side bearing (`hsbw`/`hsbw`-less ⇒ 0).
+    pub sbx: f32,
+    /// The accent's left side bearing operand of the `seac` operator.
+    pub asb: f32,
     pub base: u8,
     pub accent: u8,
 }
 
 impl Seac {
     /// The composed outline: `base` with `accent` drawn on top, the accent translated
-    /// by `(adx, ady)` from the base character's origin (T1 §6, TN5177 Appendix C).
+    /// by `(adx + sbx - asb, ady)` from the base character's origin.
     pub fn compose(&self, mut base: Outline, accent: Outline) -> Outline {
-        let accent = accent.transformed(&Transform2F::from_translation(v(self.adx, self.ady)));
+        let dx = self.adx + self.sbx - self.asb;
+        let accent = accent.transformed(&Transform2F::from_translation(v(dx, self.ady)));
         for contour in accent.contours() {
             base.push_contour(contour.clone());
         }

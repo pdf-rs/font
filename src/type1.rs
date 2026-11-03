@@ -480,7 +480,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         // `Type1Font::from_vm` once every charstring is decoded.
                         require!(s.stack.len() >= 5);
                         let first = s.stack.len() - 5;
-                        let _asb = s.stack[first].to_float();
+                        let asb = s.stack[first].to_float();
                         let adx = s.stack[first + 1].to_float();
                         let ady = s.stack[first + 2].to_float();
                         let bchar = s.stack[first + 3].to_float();
@@ -488,8 +488,15 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         if !(0.0 ..= 255.0).contains(&bchar) || !(0.0 ..= 255.0).contains(&achar) {
                             warn!("seac: character code out of range ({bchar}, {achar})");
                         } else {
+                            // F41/audit C4: `adx` is measured from this glyph's own left
+                            // side bearing, and `asb` is the accent's left side bearing,
+                            // which the accent's outline already carries. FreeType's
+                            // `t1operator_seac` does `adx += left_bearing.x` and then
+                            // places the accent at `adx - asb`.
                             s.seac = Some(Seac {
                                 adx, ady,
+                                sbx: s.lsb.unwrap_or_default(),
+                                asb,
                                 base: bchar as u8,
                                 accent: achar as u8,
                             });

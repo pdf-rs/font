@@ -469,6 +469,10 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     } else {
                         s.seac = Some(Seac {
                             adx, ady,
+                            // TN5177 Appendix C: the Type 2 form carries no side
+                            // bearings — the accent is placed at plain `(adx, ady)`.
+                            sbx: 0.0,
+                            asb: 0.0,
                             base: bchar as u8,
                             accent: achar as u8,
                         });
