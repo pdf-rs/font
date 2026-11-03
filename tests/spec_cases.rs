@@ -350,6 +350,38 @@ fn format4_subtable(segments: &[(u16, u16, u16)]) -> Vec<u8> {
     sub
 }
 
+/// A format 4 subtable that maps through `idRangeOffset` (the glyph index array) instead of
+/// `idDelta`. `segments` are `(first_code, last_code, first entry in `glyphs`)`; the offsets are
+/// computed the way §cmap defines them — relative to `&idRangeOffset[i]`, whose index is `n`.
+fn format4_subtable_with_glyph_array(segments: &[(u16, u16, usize)], glyphs: &[u16]) -> Vec<u8> {
+    let seg_count = segments.len() as u16 + 1; // + the 0xFFFF terminator
+    let mut sub = Vec::new();
+    push_u16(&mut sub, 4);              // format
+    let len_pos = sub.len();
+    push_u16(&mut sub, 0);              // length, patched below
+    push_u16(&mut sub, 0);              // language
+    push_u16(&mut sub, seg_count * 2);  // segCountX2
+    push_u16(&mut sub, 4);              // searchRange
+    push_u16(&mut sub, 0);              // entrySelector
+    push_u16(&mut sub, 0);              // rangeShift
+    for &(_, last, _) in segments { push_u16(&mut sub, last); }
+    push_u16(&mut sub, 0xFFFF);         // endCode terminator
+    push_u16(&mut sub, 0);              // reservedPad
+    for &(first, _, _) in segments { push_u16(&mut sub, first); }
+    push_u16(&mut sub, 0xFFFF);         // startCode terminator
+    for _ in 0 .. seg_count { push_u16(&mut sub, 0); } // idDelta[]: no delta, glyphs as stored
+    for (n, &(_, _, glyph_start)) in segments.iter().enumerate() {
+        // bytes from &idRangeOffset[n] to &glyphs[glyph_start]
+        let offset = 2 * seg_count as i32 + 2 * glyph_start as i32 - 2 * n as i32;
+        push_u16(&mut sub, offset as u16);
+    }
+    push_u16(&mut sub, 0);              // idRangeOffset terminator
+    for &gid in glyphs { push_u16(&mut sub, gid); }
+    let len = sub.len() as u16;
+    sub[len_pos .. len_pos + 2].copy_from_slice(&be16(len));
+    sub
+}
+
 /// A `cmap` with one encoding record per `(platform, encoding, subtable)`.
 fn cmap_multi(records: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
     let mut t = Vec::new();
@@ -394,7 +426,45 @@ fn c10c_codepoints_with_zero_max_ranges_does_not_panic() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// F12 — an unsupported cmap subtable must not hide the supported ones
+// F14 — cmap format 4: the glyph index array is addressed relative to &idRangeOffset[i]
+
+#[test]
+fn c14c_cmap_format4_reads_the_glyph_index_array() {
+    // F14: the index was computed in u16, so a malformed offset silently wrapped (release) or
+    // panicked (debug).  Segment 1 has n = 1, which pins both the `2 * n` term and the fact
+    // that the offset is relative to &idRangeOffset[n], not to the glyph array.
+    let sub = format4_subtable_with_glyph_array(
+        &[(0x41, 0x41, 0), (0x50, 0x51, 1)],
+        &[10, 20, 21],
+    );
+    let (cmap, _encoding) = parse_cmap(&cmap_multi(&[(3, 1, sub)])).expect("cmap parses");
+    assert_eq!(cmap.get_codepoint(0x41), Some(10), "segment 0 reads glyphs[0]");
+    assert_eq!(cmap.get_codepoint(0x50), Some(20), "segment 1 reads glyphs[1]");
+    assert_eq!(cmap.get_codepoint(0x51), Some(21), "and advances by 2 per code");
+    assert_eq!(cmap.get_codepoint(0x42), None, "code outside every segment");
+}
+
+#[test]
+fn c14d_cmap_format4_glyph_index_past_the_array_is_dropped() {
+    // F14: an idRangeOffset pointing past the end of the subtable must stop the segment, not
+    // panic in `glyph_data.len() - 2` or read a neighbouring byte as a glyph index.
+    let sub = format4_subtable_with_glyph_array(&[(0x41, 0x41, 0)], &[]);
+    let (cmap, _encoding) = parse_cmap(&cmap_multi(&[(3, 1, sub)])).expect("cmap parses");
+    assert_eq!(cmap.get_codepoint(0x41), None);
+}
+
+#[test]
+fn c14e_cmap_format4_offset_before_the_array_is_dropped() {
+    // F14: `... + offset - segCountX2` in u16 wrapped when offset < segCountX2 (a truncated
+    // font), pointing the read at the header.  It must drop the segment instead.
+    let mut sub = format4_subtable_with_glyph_array(&[(0x41, 0x41, 0)], &[10]);
+    // header (7 u16) + endCode[] + reservedPad + startCode[] + idDelta[], 2 segments each
+    let offsets = 2 * (7 + 2 + 1 + 2 + 2);
+    sub[offsets .. offsets + 2].copy_from_slice(&be16(2)); // < segCountX2 = 4
+    let (cmap, _encoding) = parse_cmap(&cmap_multi(&[(3, 1, sub)])).expect("cmap parses");
+    assert_eq!(cmap.get_codepoint(0x41), None);
+}
+
 
 #[test]
 fn c11_unsupported_format_does_not_hide_other_subtables() {

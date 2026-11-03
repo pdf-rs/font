@@ -25,14 +25,19 @@ OT §cmap's "platform/encoding priority" intent.
   builds maximal runs (one `last_mut()` walk), and repeatedly merges the pair with the smallest
   real gap until `max_ranges` is met (`max_ranges` is clamped to at least 1).
   Tests: `c10`, `c10b`, `c10c`.
-* **F14:** format 4's `idRangeOffset` addressing (`:177-186`) is done in `u16`:
-  `2 * (n as u16 + (c - start)) + offset - segCountX2` wraps/overflows for a malformed subtable
-  (panic in debug, wrong glyph in release). The formula itself is right — `glyphIdArray` starts
-  `segCountX2` bytes after the `idRangeOffset` array — and the bound check
-  `index > glyph_data.len() - 2` is correct but underflows when the array is shorter than 2
-  bytes. Also missing: `segCountX2` even check, `searchRange`/`entrySelector`/`rangeShift`
-  consistency, and the spec's requirement that the last segment is `0xFFFF..0xFFFF` (the code
-  `break`s on it, which is fine, but does not reject a missing one).
+* **F14 (fixed 2026-11-03):** format 4's `idRangeOffset` addressing was done in `u16`:
+  `2 * (n as u16 + (c - start)) + offset - segCountX2` wrapped/overflowed for a malformed
+  subtable (panic in debug, wrong glyph in release), and the bound check
+  `index > glyph_data.len() - 2` underflowed when less than 2 bytes were left. The formula
+  itself is right — `glyph_data` is nom's *rest* after the `idRangeOffset` array, so
+  `glyphIdArray` does start `segCountX2` bytes after it. It is now computed in `usize` with
+  `checked_sub(segCountX2)` and `index + 2 <= glyph_data.len()`; an out-of-range offset ends
+  that segment instead of reading a neighbouring byte. The subtable length uses
+  `saturating_sub(4)` too, so `len < 4` no longer underflows. Tests: `c14c` (offsets with
+  `n = 1`), `c14d` (offset past the subtable), `c14e` (offset before the array).
+  Still missing: `segCountX2` even check, `searchRange`/`entrySelector`/`rangeShift`
+  consistency, and rejecting a subtable whose last segment is not `0xFFFF..0xFFFF` (the code
+  `break`s on it, which is fine, but does not require it).
 * Format 0 (`:130-141`): `take(len - 4)` underflows for `len < 4`; the byte count is not checked
   against the 256-entry table.
 * Format 12 (`:200-212`): groups are expanded one codepoint at a time with no check that groups

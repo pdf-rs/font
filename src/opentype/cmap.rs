@@ -123,12 +123,14 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
             }
             4 => {
                 let (i, len) = be_u16(i)?;
-                //let (_i, data) = t!(take(len - 4)(i)); // aleady have 4 header bytes
-                let data = if i.len() < len as usize - 4 {
+                // `len` counts the whole subtable; 4 header bytes are already consumed.
+                // `saturating_sub`: a malformed `len < 4` is not a length, keep what we have.
+                let body_len = (len as usize).saturating_sub(4);
+                let data = if i.len() < body_len {
                     warn!("not enough data. trying anyway");
                     i
                 } else {
-                    &i[.. len as usize - 4]
+                    &i[.. body_len]
                 };
                 
                 let (i, _language) = be_u16(data)?;
@@ -141,6 +143,7 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
                 let (i, startCode) = take(segCountX2)(i)?;
                 let (i, idDelta) = take(segCountX2)(i)?;
                 let (glyph_data, idRangeOffset) = take(segCountX2)(i)?;
+                let seg_count_x2 = segCountX2 as usize;
                 for (n, T4(start, end, delta, offset)) in T4(
                     iterator(startCode, be_u16),
                     iterator(endCode, be_u16),
@@ -160,12 +163,24 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
                             }
                         }
                     } else {
+                        // OT §cmap format 4: idRangeOffset[n] is an address relative to
+                        // `&idRangeOffset[n]`.  `glyph_data` is what follows the whole
+                        // idRangeOffset array (nom's `take` returns the rest first), so the
+                        // start of that array sits `segCountX2` bytes before `glyph_data[0]`.
+                        // All of this in `usize`: the operands are u16, the sum is not.
                         for c in start ..= end {
-                            let index = 2 * (n as u16 + (c - start)) + offset - segCountX2;
-                            if index as usize > glyph_data.len() - 2 {
+                            let index = 2 * n + offset as usize + 2 * (c - start) as usize;
+                            // A malformed offset can point before the array (underflow) or past
+                            // the subtable. Drop the rest of the segment instead of panicking
+                            // on the subtraction or reading a neighbouring byte.
+                            let index = match index.checked_sub(seg_count_x2) {
+                                Some(index) => index,
+                                None => break,
+                            };
+                            if index + 2 > glyph_data.len() {
                                 break;
                             }
-                            let (_, gid) = be_u16(slice!(glyph_data, index as usize ..))?;
+                            let (_, gid) = be_u16(slice!(glyph_data, index ..))?;
                             let gid = gid.wrapping_add(delta);
                             if gid != 0 {
                                 trace!("codepoint {} -> gid {}", c, gid);
