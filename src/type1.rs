@@ -83,7 +83,16 @@ impl Type1Font {
         let (_font_name, font_dict) = expect!(vm.fonts().nth(0), "no font in vm");
         
         let private_dict = expect!(font_dict.get_dict("Private"), "no /Private dict");
-        let len_iv = private_dict.get_int("lenIV").unwrap_or(4) as usize;
+        // `lenIV` is the number of random bytes prepended before encryption; a negative
+        // value (conventionally -1) means the charstrings are *not* encrypted at all,
+        // so they must be used verbatim (TN5015 §2, PLRM `lenIV`).
+        let len_iv_value = private_dict.get_int("lenIV").unwrap_or(4);
+        let len_iv = if len_iv_value < 0 {
+            warn!("Type 1 font has lenIV {len_iv_value}: charstrings are stored unencrypted");
+            None
+        } else {
+            Some(len_iv_value as usize)
+        };
         let font_info = font_dict.get_dict("FontInfo");
         
         debug!("FontDict keys: {:?}", font_dict.iter().map(|(k, _)| k).format(", "));
@@ -114,8 +123,21 @@ impl Type1Font {
         
         let mut subrs = Vec::new();
         if let Some(arr) = private_dict.get_array("Subrs") {
-            for item in arr.iter() {
-                subrs.push(item.as_bytes().map(|data| Decoder::charstring().decode(data, len_iv)));
+            for (i, item) in arr.iter().enumerate() {
+                let decoded = match item.as_bytes() {
+                    Some(data) => {
+                        let r = decode_charstring(data, len_iv);
+                        if r.is_none() {
+                            warn!("subr {i} is shorter than lenIV; skipped");
+                        }
+                        r
+                    }
+                    None => {
+                        warn!("subr {i} is not a string; skipped");
+                        None
+                    }
+                };
+                subrs.push(decoded);
             }
         }
 
@@ -142,7 +164,13 @@ impl Type1Font {
         for (name, item) in char_strings.string_entries() {
             let data = expect!(item.as_bytes(), "data is not bytes");
 
-            let decoded = Decoder::charstring().decode(&data, len_iv);
+            let decoded = match decode_charstring(&data, len_iv) {
+                Some(decoded) => decoded,
+                None => {
+                    warn!("charstring for glyph {name} is shorter than lenIV; skipped");
+                    continue;
+                }
+            };
             //debug!("{} decoded: {:?}", name, String::from_utf8_lossy(&decoded));
             
             if let Err(e) = charstring(&decoded, &context, &mut state) {
@@ -321,6 +349,20 @@ fn parse_pfb(mut vm: &mut Vm, i: &[u8]) -> Result<(), FontError> {
     
     Ok(())
 }
+/// Decrypt one charstring and drop its `lenIV` random leading bytes.
+///
+/// `None` in `len_iv` means the font stores its charstrings unencrypted (`lenIV < 0`,
+/// TN5015 §2), so the bytes are returned untouched. A charstring shorter than `lenIV`
+/// cannot be a valid one — the caller skips it instead of getting an empty string and
+/// failing later with "CharWidth not set".
+fn decode_charstring(data: &[u8], len_iv: Option<usize>) -> Option<Vec<u8>> {
+    match len_iv {
+        None => Some(data.to_vec()),
+        Some(skip) if skip > data.len() => None,
+        Some(skip) => Some(Decoder::charstring().decode(data, skip)),
+    }
+}
+
 /// Append one cubic Bézier to the contour — or, while a Type 1 flex sequence is open,
 /// to the list of flex points (T1 §6, F40). The flex machinery in `callothersubr`
 /// needs the control points, not just the endpoints.

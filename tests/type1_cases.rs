@@ -55,6 +55,43 @@ fn push_ps_string(out: &mut Vec<u8>, data: &[u8]) {
 /// `encoding` is the raw text of the `/Encoding` definition (`None` = no `/Encoding`
 /// entry at all).
 fn pfa(charstrings: &[(&str, &[u8])], encoding: Option<&str>) -> Vec<u8> {
+    pfa_len_iv(charstrings, encoding, 4)
+}
+
+/// Same as `pfa`, but with an explicit `/lenIV`.
+///
+/// A negative `len_iv` writes `/lenIV -1 def` and stores the charstrings *unencrypted*,
+/// which is what a font with `lenIV = -1` really looks like (TN5015 §2).
+fn pfa_len_iv(charstrings: &[(&str, &[u8])], encoding: Option<&str>, len_iv: i32) -> Vec<u8> {
+    // A negative `len_iv` means the charstrings are stored unencrypted (TN5015 §2);
+    // otherwise `len_iv` random bytes are prepended and everything is run through the
+    // charstring cipher.
+    let prepared: Vec<(&str, Vec<u8>)> = charstrings
+        .iter()
+        .map(|&(name, plain)| {
+            let bytes = if len_iv >= 0 {
+                encrypt(plain, len_iv as usize)
+            } else {
+                plain.to_vec()
+            };
+            (name, bytes)
+        })
+        .collect();
+    let borrowed: Vec<(&str, &[u8])> = prepared
+        .iter()
+        .map(|(name, bytes)| (*name, bytes.as_slice()))
+        .collect();
+    pfa_with_raw_strings(&borrowed, encoding, len_iv)
+}
+
+/// Assemble a PFA font whose `/CharStrings` entries are written **verbatim** — the
+/// caller has already encrypted them (or not, for `lenIV < 0`). Needed to build fonts
+/// whose charstrings are shorter than `lenIV`.
+fn pfa_with_raw_strings(
+    charstrings: &[(&str, &[u8])],
+    encoding: Option<&str>,
+    len_iv: i32,
+) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"%!PS-AdobeFont-1.0: Test\n");
     // `/Test` first, the font dict on top: that is the order `definefont` expects.
@@ -64,14 +101,16 @@ fn pfa(charstrings: &[(&str, &[u8])], encoding: Option<&str>) -> Vec<u8> {
     out.extend_from_slice(b"/FontBBox {0 0 1000 1000} def\n");
 
     out.extend_from_slice(format!("/CharStrings {} dict dup begin\n", charstrings.len()).as_bytes());
-    for (name, plain) in charstrings {
+    for (name, bytes) in charstrings {
         out.extend_from_slice(format!("/{} ", name).as_bytes());
-        push_ps_string(&mut out, &encrypt(plain, 4));
+        push_ps_string(&mut out, bytes);
         out.extend_from_slice(b" def\n");
     }
     out.extend_from_slice(b"end readonly def\n");
 
-    out.extend_from_slice(b"/Private 1 dict dup begin\n/lenIV 4 def\nend readonly def\n");
+    out.extend_from_slice(
+        format!("/Private 1 dict dup begin\n/lenIV {} def\nend readonly def\n", len_iv).as_bytes(),
+    );
     if let Some(encoding) = encoding {
         out.extend_from_slice(b"/Encoding ");
         out.extend_from_slice(encoding.as_bytes());
@@ -321,4 +360,68 @@ fn c23_type1_seac_composes_the_accent() {
     for (s, o) in base_after.iter().zip(base.contours()[0].points()) {
         assert_eq!(s, o);
     }
+}
+
+// ---------------------------- lenIV (F41)
+
+#[test]
+fn c25_type1_leniv_minus_one_is_plaintext() {
+    // F41: `lenIV -1` means "charstrings are not encrypted" (TN5015 §2), but the value
+    // was cast to `usize` and every charstring decrypted with a garbage key and skipped.
+    let data = pfa_len_iv(
+        &[(".notdef", &notdef()), ("A", &glyph_a())],
+        Some("{/.notdef /A}"),
+        -1,
+    );
+    let font = parse(&data);
+    assert_eq!(font.num_glyphs(), 2);
+    let a = font.gid_for_name("A").expect("glyph A");
+    // `/Encoding` is positional: array entry 1 is `/A`, so code 1 reaches it.
+    assert_eq!(font.gid_for_codepoint(1), Some(a));
+
+    let glyph = font.glyph(a).unwrap();
+    assert_eq!(glyph.metrics.advance, 500.0);
+    assert_eq!(glyph.metrics.lsb, 0.0);
+    // `100 100 rlineto` after `hsbw`: one contour whose only recorded point is the
+    // rlineto endpoint (the starting point at the origin is implicit).
+    let contours = glyph.path.contours();
+    assert_eq!(contours.len(), 1);
+    let points = contours[0].points();
+    assert_eq!(points.len(), 1, "{:?}", points);
+    assert_eq!((points[0].x(), points[0].y()), (100.0, 100.0));
+}
+
+#[test]
+fn c26_type1_charstring_shorter_than_leniv_is_skipped() {
+    // F41: a charstring shorter than `lenIV` cannot hold the random prefix. Decoding it
+    // produced an empty string, which failed with "CharWidth not set" — the glyph is
+    // skipped with a warning instead, and the rest of the font still loads.
+    let short = b"ab"; // 2 bytes, lenIV is 4
+    let notdef_cs = notdef_encrypted();
+    let b_cs = glyph_a_encrypted();
+    let data = pfa_with_raw_strings(
+        &[
+            (".notdef", notdef_cs.as_slice()),
+            ("A", &short[..]),
+            ("B", b_cs.as_slice()),
+        ],
+        Some("{/.notdef /A /B}"),
+        4,
+    );
+    let font = parse(&data);
+    // `.notdef` and `/B` survive, `/A` is gone.
+    assert!(font.gid_for_name("A").is_none());
+    assert_eq!(font.num_glyphs(), 2);
+    let b = font.gid_for_name("B").expect("glyph B");
+    assert_eq!(font.glyph(b).unwrap().metrics.advance, 500.0);
+}
+
+/// `notdef()` run through the charstring cipher, as `pfa` would store it.
+fn notdef_encrypted() -> Vec<u8> {
+    encrypt(&notdef(), 4)
+}
+
+/// `glyph_a()` run through the charstring cipher, as `pfa` would store it.
+fn glyph_a_encrypted() -> Vec<u8> {
+    encrypt(&glyph_a(), 4)
 }

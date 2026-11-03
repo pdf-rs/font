@@ -25,11 +25,20 @@
   the wrong length or is missing (previously the glyph was dropped). Flex start accepts otherSubr
   1 or 2 with no arguments, flex end otherSubr 0 or 1 with three. `callothersubr` also warns
   instead of underflowing when `n` exceeds the stack. Test: `tests/type1_cases.rs` `c24`.
+* **F41 (2026-11-03):** `lenIV = -1` no longer breaks the font. A negative `lenIV` means the
+  charstrings are stored *unencrypted* (TN5015 §2), so it is kept as `None` (`len_iv` is now
+  `Option<usize>`) and the bytes are used verbatim — no decryption, no skipped prefix (previously
+  the value was cast to `usize` and the charstrings were decrypted with a garbage key and lost).
+  A charstring shorter than `lenIV` is skipped with a warning (new `decode_charstring` returns
+  `None`) instead of decoding to an empty string and failing later with "CharWidth not set";
+  the same applies to `/Subrs`. Tests: `tests/type1_cases.rs` `c25` (`/lenIV -1 def`, plain
+  strings), `c26` (2-byte charstring under `lenIV 4` → glyph skipped, font loads).
 
 ## What it does
 `Type1Font::from_vm` pulls `FontName`, `FontInfo/FullName`, `Weight`, `FontMatrix`, `FontBBox`,
 `/Private` (`lenIV`, `Subrs`) and `/CharStrings` out of a `postscript::Vm`, decodes each
-charstring (eexec charstring key, skipping `lenIV` bytes), runs it through `charstring()` and
+charstring (eexec charstring key, skipping `lenIV` bytes; verbatim when `lenIV < 0`), runs it
+through `charstring()` and
 stores glyphs in an `IndexMap<String, Glyph>` (insertion order = gid). `/Encoding` is turned into
 `codepoint -> gid`, and glyph names into a `unicode_map`.
 
@@ -47,8 +56,9 @@ The interpreter covers the Type 1 path operators (`hsbw`, `hstem`/`vstem`, `vmov
   `TupleElements::from_iter` failed and the glyph was dropped (drawn by `push_curve` now, see
   "Fixed" above).
 * **F24:** (fixed above) `/Encoding` had to be an array.
-* **F41:** `lenIV` is cast with `as usize`; `lenIV = -1` ("charstrings are not encrypted", legal)
-  becomes a gigantic skip. Values > the charstring length silently produce an empty glyph.
+* ~~**F41:**~~ `lenIV` used to be cast with `as usize`, so `lenIV = -1` ("charstrings are not
+  encrypted", legal) became a gigantic skip, and values > the charstring length silently
+  produced an empty glyph — both handled in `decode_charstring` now (see "Fixed" above).
 * Glyph ids follow the `/CharStrings` *dict* iteration order, and `postscript::Dictionary` is a
   `std::collections::HashMap`, so gids differ between runs of the same font. Only name- and
   codepoint-based lookups are stable.
