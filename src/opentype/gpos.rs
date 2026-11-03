@@ -7,7 +7,7 @@ use nom::{
 use crate::{R, GlyphId, GlyphPosition, FontError};
 use crate::parsers::{*};
 use crate::opentype::{Maxp, Tag, parse_extension, parse_lookup_list, coverage_table, parse_class_def};
-use crate::opentype::gdef::{GDef, glyph_ignored};
+use crate::opentype::gdef::{GDef, glyph_ignored, LookupFlags};
 use crate::opentype::gsub::{
     Context, Feature, Script, MAX_NESTING, enabled_lookups, parse_chain_context_subst,
     parse_context_subst, parse_feature_list, parse_script_list, visible_after, visible_before,
@@ -25,8 +25,9 @@ pub struct GPos {
     scripts: Vec<Script>,
     features: Vec<Feature>,
     lookups: Vec<Vec<PosSubtable>>,
-    /// Per lookup: its `lookupFlag` (OT §"Lookup Flags"), which says which glyphs it skips.
-    flags: Vec<u16>,
+    /// Per lookup: its `lookupFlag` (OT §"Lookup Flags"), which says which glyphs it skips,
+    /// and the `markFilteringSet` its `UseMarkFilteringSet` bit names.
+    flags: Vec<LookupFlags>,
 }
 
 /// One subtable of a `GPOS` lookup.
@@ -164,7 +165,7 @@ impl GPos {
             Some(subtables) => subtables,
             None => return false,
         };
-        let flag = self.flags.get(lookup_idx as usize).copied().unwrap_or(0);
+        let flag = self.flags.get(lookup_idx as usize).copied().unwrap_or_default();
         let glyph = match glyphs.get(position).and_then(|&glyph| glyph_key(glyph)) {
             Some(glyph) => glyph,
             None => return false,
@@ -269,7 +270,7 @@ impl GPos {
 
     /// OT §GPOS "Context Positioning" (7, 8): run the lookups the first matching rule names at
     /// the glyphs of the run. Positioning never changes the length of the run.
-    fn apply_context(&self, context: &Context, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, depth: u8, flag: u16, gdef: Option<&GDef>) -> bool {
+    fn apply_context(&self, context: &Context, glyphs: &[GlyphId], positions: &mut [GlyphPosition], position: usize, depth: u8, flag: LookupFlags, gdef: Option<&GDef>) -> bool {
         if depth >= MAX_NESTING {
             debug!("GPOS: not following context lookups nested deeper than {}", MAX_NESTING);
             return false;
@@ -368,7 +369,7 @@ pub fn parse_gpos<'a>(data: &'a [u8], maxp: &Maxp) -> Result<GPos, FontError> {
         debug!("lookup type {}", lookup_type);
         while lookup_idx >= gpos.lookups.len() {
             gpos.lookups.push(Vec::new());
-            gpos.flags.push(0);
+            gpos.flags.push(LookupFlags::default());
         }
         gpos.flags[lookup_idx] = lookup_flag;
         parse_positioning(data, lookup_type, &mut gpos, maxp.num_glyphs)
@@ -384,7 +385,7 @@ fn parse_positioning(data: &[u8], lookup_type: u16, gpos: &mut GPos, num_glyphs:
     // A subtable belongs to the lookup `parse_gpos` has just opened a slot for.
     if gpos.lookups.is_empty() {
         gpos.lookups.push(Vec::new());
-        gpos.flags.push(0);
+        gpos.flags.push(LookupFlags::default());
     }
     let subtable = match lookup_type {
         2 => PosSubtable::Pair(parse_pair_adjustment(data, gpos)?),
@@ -995,7 +996,7 @@ mod tests {
         let mut gpos = GPos::default();
         parse_positioning(&words_to_bytes(&single), 1, &mut gpos, 100).expect("single parses");
         gpos.lookups.push(Vec::new());
-        gpos.flags.push(0);
+        gpos.flags.push(LookupFlags::default());
         parse_positioning(&words_to_bytes(&context), 7, &mut gpos, 100).expect("context parses");
         let gpos = gpos_with(gpos, vec![1]);
 
@@ -1021,7 +1022,7 @@ mod tests {
 
         let mut gpos = GPos::default();
         parse_positioning(&data, 1, &mut gpos, 100).expect("single adjustment parses");
-        gpos.flags = vec![0x0008];
+        gpos.flags = vec![LookupFlags { flag: 0x0008, mark_filtering_set: None }];
         let gpos = gpos_with(gpos, vec![0]);
 
         // Without the flag the mark moves.

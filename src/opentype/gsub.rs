@@ -7,19 +7,40 @@ use nom::{
 use crate::{R, GlyphId, FontError};
 use crate::parsers::{iterator_n, Offset};
 use crate::opentype::{parse_extension, parse_lookup_list, coverage_table, parse_class_def, tag, Tag};
-use crate::opentype::gdef::{GDef, glyph_ignored};
+use crate::opentype::gdef::{GDef, glyph_ignored, LookupFlags};
 
 #[derive(Debug, Clone)]
 pub struct GlyphList(Vec<u16>);
 impl GlyphList {
-    pub fn matches(&self, mut glyphs: impl Iterator<Item=GlyphId>) -> Option<usize> {
-        for &a in &self.0 {
-            match glyphs.next() {
-                Some(b) if a as u32 == b.0 => continue,
-                _ => return None
+    pub fn matches(&self, glyphs: impl Iterator<Item=GlyphId>) -> Option<usize> {
+        self.matches_skipping(glyphs, &|_| false)
+    }
+
+    /// `matches`, but glyphs `skip` accepts are stepped over: OT §"Lookup Flags" makes an
+    /// ignored glyph invisible, so a ligature's components may be separated by marks (which is
+    /// exactly how a font ligates `f` + mark + `f`).
+    ///
+    /// Returns how many glyphs of the iterator were consumed, ignored ones included, since the
+    /// caller has to remove the whole span.
+    pub(crate) fn matches_skipping(&self, mut glyphs: impl Iterator<Item=GlyphId>, skip: &dyn Fn(u16) -> bool) -> Option<usize> {
+        if self.0.is_empty() {
+            return Some(0);
+        }
+        let mut consumed = 0;
+        for &expected in &self.0 {
+            loop {
+                let next = glyphs.next()?;
+                consumed += 1;
+                if next.0 <= u16::MAX as u32 && skip(next.0 as u16) {
+                    continue;
+                }
+                if expected as u32 != next.0 {
+                    return None;
+                }
+                break;
             }
         }
-        Some(self.0.len())
+        Some(consumed)
     }
 }
 
@@ -28,8 +49,9 @@ pub struct GSub {
     scripts: Vec<Script>,
     features: Vec<Feature>,
     lookup: Vec<Vec<LookupSubtable>>,
-    /// Per lookup: its `lookupFlag` (OT §"Lookup Flags"), which says which glyphs it skips.
-    flags: Vec<u16>,
+    /// Per lookup: its `lookupFlag` (OT §"Lookup Flags"), which says which glyphs it skips,
+    /// and the `markFilteringSet` its `UseMarkFilteringSet` bit names.
+    flags: Vec<LookupFlags>,
 }
 
 /// The language system a run of text uses: `DFLT` first, then `latn`, then whatever the font
@@ -125,6 +147,12 @@ impl Substitution {
     /// If this substitution applies at the start of `glyphs`: how many glyphs it consumes
     /// and the glyph that replaces them.
     pub fn apply(&self, glyphs: &[GlyphId]) -> Option<(usize, GlyphId)> {
+        self.apply_skipping(glyphs, &|_| false)
+    }
+
+    /// `apply`, but glyphs `skip` accepts are stepped over between the components of a
+    /// ligature (OT §"Lookup Flags": an ignored glyph takes no part in the match).
+    pub(crate) fn apply_skipping(&self, glyphs: &[GlyphId], skip: &dyn Fn(u16) -> bool) -> Option<(usize, GlyphId)> {
         let (&first, rest) = glyphs.split_first()?;
         let first = first_glyph_of(first)?;
         match self {
@@ -136,7 +164,7 @@ impl Substitution {
                 // usually list them longest first, but that is a recommendation, not a rule.
                 let mut best: Option<(usize, u16)> = None;
                 for (components, ligature) in ligatures {
-                    if let Some(extra) = components.matches(rest.iter().cloned()) {
+                    if let Some(extra) = components.matches_skipping(rest.iter().cloned(), skip) {
                         let consumed = extra + 1;
                         if best.map_or(true, |(longest, _)| consumed > longest) {
                             best = Some((consumed, *ligature));
@@ -455,11 +483,11 @@ pub(crate) const MAX_NESTING: u8 = 8;
 
 impl GSub {
     /// Applies the lookups of the default language system whose feature tag `enabled`
-    /// accepts, once each, left to right — the simple subset of OT §"Lookups" this crate
-    /// implements. Single (1), Multiple (2), Alternate (3, first alternate), Ligature (4),
-    /// Context (5) and Chaining Context (6) lookups are applied, the last two by running the
-    /// lookups their rules name; Reverse Chaining (8) runs in its own right-to-left pass at
-    /// the end; unrecognised glyphs pass through.
+    /// accepts — the subset of OT §"Lookups" this crate implements. Single (1), Multiple (2),
+    /// Alternate (3, first alternate), Ligature (4), Context (5) and Chaining Context (6)
+    /// lookups are applied, the last two by running the lookups their rules name; Reverse
+    /// Chaining (8) runs in its own right-to-left pass at the end; unrecognised glyphs pass
+    /// through, and without a `GDEF` table no lookup flag can skip anything.
     pub fn substitute(&self, glyphs: &[GlyphId], enabled: &dyn Fn(Tag) -> bool) -> Vec<GlyphId> {
         self.substitute_with(glyphs, enabled, None)
     }
@@ -514,7 +542,7 @@ impl GSub {
     /// subtable of the lookup applies there.
     fn apply_lookup_at(&self, lookup_idx: u16, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8, gdef: Option<&GDef>) -> Option<isize> {
         let subtables = self.lookup.get(lookup_idx as usize)?;
-        let flag = self.flags.get(lookup_idx as usize).copied().unwrap_or(0);
+        let flag = self.flags.get(lookup_idx as usize).copied().unwrap_or_default();
         // OT §"Lookup Flags": a lookup skips the glyph classes its flag names (marks,
         // ligatures, …). Nothing at an ignored position applies.
         let glyph = first_glyph_of(*glyphs.get(position)?)?;
@@ -528,7 +556,15 @@ impl GSub {
                 // Applied in the right-to-left pass of `substitute`.
                 LookupSubtable::ReverseChain(_) => None,
                 substitution => {
-                    let step = substitution.apply(&glyphs[position ..]);
+                    // OT §"Lookup Flags": ignored glyphs are invisible to the match, so a
+                    // ligature may skip the marks between its components.
+                    let skip = |gid: u16| glyph_ignored(gdef, flag, gid);
+                    let step = match substitution {
+                        LookupSubtable::Substitution(substitution) =>
+                            substitution.apply_skipping(&glyphs[position ..], &skip)
+                                .map(|(consumed, glyph)| (consumed, vec![glyph])),
+                        _ => substitution.apply_with(&glyphs[position ..], 0),
+                    };
                     match step {
                         Some((consumed, replacement)) => {
                             let grown = replacement.len() as isize - consumed as isize;
@@ -548,7 +584,7 @@ impl GSub {
 
     /// Applies the first rule of `context` that matches at `position`, which means running the
     /// lookups its records name at the glyphs of the run.
-    fn apply_context(&self, context: &Context, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8, flag: u16, gdef: Option<&GDef>) -> Option<isize> {
+    fn apply_context(&self, context: &Context, glyphs: &mut Vec<GlyphId>, position: usize, depth: u8, flag: LookupFlags, gdef: Option<&GDef>) -> Option<isize> {
         if depth >= MAX_NESTING {
             debug!("GSUB: not following context lookups nested deeper than {}", MAX_NESTING);
             return None;
@@ -623,12 +659,12 @@ pub fn parse_gsub(data: &[u8]) -> Result<GSub, FontError> {
     };
     
     let mut lookup = Vec::new();
-    let mut flags: Vec<u16> = Vec::new();
+    let mut flags: Vec<LookupFlags> = Vec::new();
     
     parse_lookup_list(slice!(data, lookup_list_off as usize ..), |lookup_idx, data, lookup_type, lookup_flag| {
         while lookup_idx >= lookup.len() {
             lookup.push(Vec::new());
-            flags.push(0);
+            flags.push(LookupFlags::default());
         }
         flags[lookup_idx] = lookup_flag;
         let mut push = |sub| lookup[lookup_idx].push(sub);
@@ -1332,6 +1368,7 @@ fn parse_size_params(data: &[u8]) -> Result<SizeParams, FontError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::opentype::gdef::parse_gdef;
 
     fn feature(tag: &[u8; 4], lookup_indices: Vec<u16>) -> Feature {
         Feature { tag: Tag(*tag), lookup_indices, params: None }
@@ -1352,9 +1389,82 @@ mod tests {
                 languages: Vec::new(),
             }],
             features,
-            flags: vec![0; lookup.len()],
+            flags: vec![LookupFlags::default(); lookup.len()],
             lookup,
         }
+    }
+
+    /// `GDEF` 1.2 bytes: a `glyphClassDef` for the glyphs `glyph_classes`, and a
+    /// `MarkGlyphSetsDef` holding `mark_sets` (OT §GDEF; its coverage offsets are relative to
+    /// the definition itself).
+    fn gdef_bytes(glyph_class_start: u16, glyph_classes: &[u16], mark_sets: &[&[u16]]) -> Vec<u8> {
+        let mut glyph_class = words_to_bytes(&[1, glyph_class_start, glyph_classes.len() as u16]);
+        glyph_class.extend_from_slice(&words_to_bytes(glyph_classes));
+
+        let mut sets = words_to_bytes(&[1, mark_sets.len() as u16]);
+        let mut coverages = Vec::new();
+        let mut offset = 4 + 4 * mark_sets.len(); // format + count + one u32 per set
+        for set in mark_sets {
+            sets.extend_from_slice(&(offset as u32).to_be_bytes());
+            let mut coverage = words_to_bytes(&[1, set.len() as u16]);
+            coverage.extend_from_slice(&words_to_bytes(set));
+            offset += coverage.len();
+            coverages.push(coverage);
+        }
+        for coverage in coverages { sets.extend_from_slice(&coverage); }
+
+        let glyph_off = 14; // version + five offsets
+        let mut t = words_to_bytes(&[1, 2, glyph_off, 0, 0, 0, (glyph_off as usize + glyph_class.len()) as u16]);
+        t.extend_from_slice(&glyph_class);
+        t.extend_from_slice(&sets);
+        t
+    }
+
+    #[test]
+    fn use_mark_filtering_set_keeps_only_its_own_marks() {
+        // Audit C8: lookup flag 0x0010 names one `markGlyphSetsDef` set, and the `Lookup`
+        // carries that index as an extra field after its subtable count. Marks of other sets
+        // are skipped for that lookup only.
+        // Glyphs 10 and 12 are both marks; only 10 is in set 0.
+        let gdef = parse_gdef(&gdef_bytes(10, &[3, 0, 3], &[&[10]])).expect("GDEF 1.2 parses");
+        assert_eq!(gdef.mark_set(10), Some(0));
+        assert_eq!(gdef.mark_set(12), None);
+
+        let mut replacements = HashMap::new();
+        replacements.insert(10u16, 50u16);
+        replacements.insert(12u16, 52u16);
+        let mut gsub = gsub_with(
+            vec![feature(b"mark", vec![0])],
+            vec![vec![LookupSubtable::Substitution(Substitution::Single(replacements))]],
+        );
+        let mark = |tag: Tag| tag.0 == *b"mark";
+        let run = [GlyphId(10), GlyphId(12)];
+        // Without the flag both marks are ordinary glyphs to the lookup.
+        assert_eq!(gsub.substitute_with(&run, &mark, Some(&gdef)), vec![GlyphId(50), GlyphId(52)]);
+
+        gsub.flags[0] = LookupFlags { flag: 0x0010, mark_filtering_set: Some(0) };
+        // Glyph 10 is in set 0 and is substituted; glyph 12 is not and is left alone.
+        assert_eq!(gsub.substitute_with(&run, &mark, Some(&gdef)), vec![GlyphId(50), GlyphId(12)]);
+    }
+
+    #[test]
+    fn a_ligature_steps_over_ignored_marks() {
+        // Audit C8: a component the lookup ignores is invisible to the match, so `f` + mark +
+        // `f` ligates, and the skipped mark is consumed with the components.
+        let gdef = parse_gdef(&gdef_bytes(12, &[3], &[])).expect("GDEF 1.2 parses");
+        let mut ligatures: HashMap<u16, Vec<(GlyphList, u16)>> = HashMap::new();
+        ligatures.insert(10, vec![(GlyphList(vec![20]), 30)]);
+        let mut gsub = gsub_with(
+            vec![feature(b"liga", vec![0])],
+            vec![vec![LookupSubtable::Substitution(Substitution::Ligatures(ligatures))]],
+        );
+        let liga = |tag: Tag| tag.0 == *b"liga";
+        let run = [GlyphId(10), GlyphId(12), GlyphId(20)];
+        // Untouched when the mark is an ordinary component.
+        assert_eq!(gsub.substitute_with(&run, &liga, Some(&gdef)), run.to_vec());
+
+        gsub.flags[0] = LookupFlags { flag: 0x0008, mark_filtering_set: None }; // IgnoreMarks
+        assert_eq!(gsub.substitute_with(&run, &liga, Some(&gdef)), vec![GlyphId(30)]);
     }
 
     #[test]
@@ -1457,7 +1567,7 @@ mod tests {
             }],
             features: vec![feature(b"liga", vec![7])],
             lookup: vec![Vec::new()],
-            flags: vec![0],
+            flags: vec![LookupFlags::default()],
         };
         let lang = gsub.default_language().expect("default language");
         assert_eq!(gsub.lang_features(lang).collect::<Vec<_>>(), vec![Tag(*b"liga")]);

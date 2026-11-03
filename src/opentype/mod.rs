@@ -43,7 +43,7 @@ use math::{parse_math, MathHeader};
 use gpos::{parse_gpos, GPos};
 use gsub::{GSub, parse_gsub};
 use cmap::{CMap, parse_cmap};
-use gdef::{GDef, parse_gdef};
+use gdef::{GDef, parse_gdef, LookupFlags};
 use kern::parse_kern;
 use base::parse_base;
 
@@ -608,7 +608,7 @@ fn optional_layout<T>(name: &str, f: impl FnOnce() -> Result<T, FontError>) -> O
     }
 }
 
-pub fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(usize, &[u8], u16, u16) -> Result<(), FontError>) -> Result<(), FontError> {
+pub fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(usize, &[u8], u16, LookupFlags) -> Result<(), FontError>) -> Result<(), FontError> {
     let (i, lookup_count) = be_u16(data)?;
     for (lookup_idx, table_off) in iterator_n(i, be_u16, lookup_count).enumerate() {
         // One unreadable lookup or subtable must not cost the font all of its others (audit
@@ -622,7 +622,7 @@ pub fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(usize, &[u8], u16, u
 }
 
 fn parse_one_lookup(data: &[u8], table_off: usize, lookup_idx: usize,
-                    inner: &mut impl FnMut(usize, &[u8], u16, u16) -> Result<(), FontError>) -> Result<(), FontError> {
+                    inner: &mut impl FnMut(usize, &[u8], u16, LookupFlags) -> Result<(), FontError>) -> Result<(), FontError> {
     let table_data = match data.get(table_off ..) {
         Some(d) => d,
         None => return Err(FontError::OutOfBounds(file!(), line!())),
@@ -630,6 +630,22 @@ fn parse_one_lookup(data: &[u8], table_off: usize, lookup_idx: usize,
     let (i, lookup_type) = be_u16(table_data)?;
     let (i, lookup_flag) = be_u16(i)?;
     let (i, subtable_count) = be_u16(i)?;
+    // `UseMarkFilteringSet` (0x0010) makes the `Lookup` carry one more field after the subtable
+    // count: the index of the GDEF mark set the lookup works on (OT §"Lookup Flags").
+    let (i, mark_filtering_set) = if lookup_flag & 0x0010 != 0 {
+        let field: R<u16> = be_u16(i);
+        match field {
+            Ok((rest, set)) => (rest, Some(set)),
+            Err(_) => {
+                warn!("lookup {} (type {}): UseMarkFilteringSet set but the field is missing",
+                      lookup_idx, lookup_type);
+                (i, None)
+            }
+        }
+    } else {
+        (i, None)
+    };
+    let lookup_flags = LookupFlags { flag: lookup_flag, mark_filtering_set };
 
     for subtable_off in iterator_n(i, be_u16, subtable_count) {
         let subtable = match table_data.get(subtable_off as usize ..) {
@@ -641,7 +657,7 @@ fn parse_one_lookup(data: &[u8], table_off: usize, lookup_idx: usize,
                 continue;
             }
         };
-        if let Err(err) = inner(lookup_idx, subtable, lookup_type, lookup_flag) {
+        if let Err(err) = inner(lookup_idx, subtable, lookup_type, lookup_flags) {
             warn!("lookup {} (type {}): {:?} — subtable skipped", lookup_idx, lookup_type, err);
         }
     }
