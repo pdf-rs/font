@@ -645,8 +645,61 @@ pub fn coverage_table<'a>(i: &'a [u8]) -> Result<impl Iterator<Item=u16> + 'a, F
     }
 }
 
+/// How good a `name` record is for a given name ID; higher wins (OT §name).
+///
+/// The same name can appear in many records — several languages and encodings. Windows
+/// Unicode BMP in English is the one every application agrees on; a bare Windows record or
+/// the Unicode platform come next, and Macintosh Roman (what Type 1-era outlines mostly
+/// carry) is used only when nothing better exists.
+fn name_record_score(platform_id: u16, encoding_id: u16, language_id: u16) -> Option<u8> {
+    match (platform_id, encoding_id) {
+        (3, 1) if language_id == 0x409 => Some(5),
+        (3, 10) => Some(4),
+        (3, 0) | (3, 1) => Some(3),
+        (0, _) => Some(2),
+        (1, 0) => Some(1),
+        _ => None,
+    }
+}
+
+fn decode_name_string(platform_id: u16, encoded: &[u8]) -> Option<String> {
+    match platform_id {
+        // Unicode platform 0: UTF-16BE in every version 0/1 record in practice.
+        0 => utf16_be(encoded).ok().or_else(|| String::from_utf8(encoded.into()).ok()),
+        3 => utf16_be(encoded).ok(),
+        1 => Some(mac_roman(encoded)),
+        _ => None,
+    }
+}
+
+/// Macintosh Roman, upper half (`0x80..=0xFF`); the lower half is ASCII.
+fn mac_roman(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len());
+    for &b in data {
+        if b < 0x80 {
+            out.push(b as char);
+        } else {
+            out.push(MAC_ROMAN[b as usize - 0x80]);
+        }
+    }
+    out
+}
+
+const MAC_ROMAN: [char; 128] = [
+    'Ä', 'Å', 'Ç', 'É', 'Ñ', 'Ö', 'Ü', 'á', 'à', 'â', 'ä', 'ã', 'å', 'ç', 'é', 'è',
+    'ê', 'ë', 'í', 'ì', 'î', 'ï', 'ñ', 'ó', 'ò', 'ô', 'ö', 'õ', 'ú', 'ù', 'û', 'ü',
+    '†', '°', '¢', '£', '§', '•', '¶', 'ß', '®', '©', '™', '´', '¨', '≠', 'Æ', 'Ø',
+    '∞', '±', '≤', '≥', '¥', 'µ', '∂', '∑', '∏', 'π', '∫', 'ª', 'º', 'Ω', 'æ', 'ø',
+    '¿', '¡', '¬', '√', 'ƒ', '≈', '∆', '«', '»', '…', '\u{a0}', 'À', 'Ã', 'Õ', 'Œ', 'œ',
+    '–', '—', '“', '”', '‘', '’', '÷', '◊', 'ÿ', 'Ÿ', '⁄', '€', '‹', '›', 'ﬁ', 'ﬂ',
+    '‡', '·', '‚', '„', '‰', 'Â', 'Ê', 'Á', 'Ë', 'È', 'Í', 'Î', 'Ï', 'Ì', 'Ó', 'Ô',
+    '\u{f8ff}', 'Ò', 'Ú', 'Û', 'Ù', 'ı', 'ˆ', '˜', '¯', '˘', '˙', '˚', '¸', '˝', '˛', 'ˇ',
+];
+
 pub fn parse_name(data: &[u8]) -> Result<Name, FontError> {
     let mut name = Name::default();
+    // Best score seen per name ID 1..=6 (1 family, 2 subfamily, 4 full name, 6 PostScript).
+    let mut best = [0u8; 7];
 
     let (i, format) = be_u16(data)?;
     match format {
@@ -656,10 +709,6 @@ pub fn parse_name(data: &[u8]) -> Result<Name, FontError> {
             let string_data = slice!(data, string_offset as usize ..);
             for name_record in iterator_n(i, tuple((be_u16, be_u16, be_u16, be_u16, be_u16, be_u16)), count) {
                 let (platform_id, encoding_id, language_id, name_id, length, offset) = name_record;
-                //debug!("platform_id={}, encoding_id={}, language_id={}, name_id={}", platform_id, encoding_id, language_id, name_id);
-
-                let encoded = slice!(string_data, offset as usize .. offset as usize + length as usize);
-                //debug!("string: {:?}", encoded);
 
                 let field = match name_id {
                     1 => &mut name.family,
@@ -668,11 +717,20 @@ pub fn parse_name(data: &[u8]) -> Result<Name, FontError> {
                     6 => &mut name.postscript_name,
                     _ => continue,
                 };
+                // OT §name: the records for one ID are ordered arbitrarily, so the *last*
+                // one is not the best one — pick by (platform, encoding, language).
+                let score = match name_record_score(platform_id, encoding_id, language_id) {
+                    Some(score) => score,
+                    None => continue,
+                };
+                if score <= best[name_id as usize] {
+                    continue;
+                }
 
-                match (platform_id, encoding_id) {
-                    (0, _) => *field = String::from_utf8(encoded.into()).ok(),
-                    (3, 0) | (3, 1) => *field = utf16_be(encoded).ok(),
-                    _ => {}
+                let encoded = slice!(string_data, offset as usize .. offset as usize + length as usize);
+                if let Some(decoded) = decode_name_string(platform_id, encoded) {
+                    best[name_id as usize] = score;
+                    *field = Some(decoded);
                 }
             }
         }

@@ -32,6 +32,12 @@ the GSUB/GPOS common building blocks (`parse_lookup_list`, `coverage_table`,
 
 ## Fixed
 * **F3 (2026-11-02):** the GDEF lookup is `b"GDEF"`; `OpenTypeFont::gdef` is populated.
+* **F33 (2026-11-03):** `parse_name` now picks the best record per name ID instead of the last
+  one: `name_record_score` ranks (3,1) English 5, (3,10) 4, other Windows 3, platform 0 2,
+  (1,0) Macintosh 1, anything else is ignored; the first record that reaches a score wins.
+  Platform 1 strings are decoded from Mac Roman (`mac_roman`, the upper 128 code points),
+  platform 0/3 from UTF-16BE. Tests `c33_name_picks_the_best_record_not_the_last`,
+  `c33_name_decodes_mac_roman`.
 
 ## Differences from the specifications
 * **F3 (OT §GDEF):** `:139` looks up `b"gdef"`. The tag is `GDEF`; `Tables::get` is an exact
@@ -52,9 +58,11 @@ the GSUB/GPOS common building blocks (`parse_lookup_list`, `coverage_table`,
   is never cross-checked against `loca`/CFF CharStrings/`post`. `parse_loca` reads
   `numGlyphs + 1` entries but does not check monotonicity, alignment (`indexToLocFormat == 0`
   ⇒ offsets are even) or a final entry equal to the `glyf` length.
-* **F33 (OT §name):** `parse_name` accepts platform 0 (any encoding), 3/0 and 3/1; it ignores
-  platform 1 (Macintosh Roman) and 3/10 (UCS-4), and takes the *last* record that matches instead
-  of applying the spec's platform/encoding/language preference order. Name IDs handled: 1, 2, 4,
+* **F33 (OT §name):** `parse_name` used to accept platform 0 (any encoding), 3/0 and 3/1 only,
+  ignore platform 1 (Macintosh Roman) and 3/10 (UCS-4), and take the *last* matching record
+  instead of applying the spec's platform/encoding/language preference order. **Fixed
+  2026-11-03** (see `## Fixed`; tests `c33_name_picks_the_best_record_not_the_last`,
+  `c33_name_decodes_mac_roman`). Name IDs handled: 1, 2, 4,
   6 (family, subfamily, full name, PostScript name). Format 1's `langTagRecord` array is not
   validated (and is not needed).
 * **D2:** the table directory's `searchRange`/`entrySelector`/`rangeShift`, 4-byte alignment of

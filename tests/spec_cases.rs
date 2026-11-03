@@ -995,6 +995,66 @@ fn c16d_vhea_reads_both_version_fields() {
     );
 }
 
+// ---------------------------- F33: `name` record preference ----------------------------
+
+/// UTF-16BE bytes, as platform 0 and 3 records carry them.
+pub fn utf16be(text: &str) -> Vec<u8> {
+    text.encode_utf16().flat_map(|c| c.to_be_bytes()).collect()
+}
+
+/// `name` (OT §name), format 0: header, one 12-byte record per entry, then the string
+/// storage every record's `offset` is relative to. Records are
+/// `(platformID, encodingID, languageID, nameID, string bytes)`.
+pub fn name_table(records: &[(u16, u16, u16, u16, &[u8])]) -> Vec<u8> {
+    let mut t = Vec::new();
+    push_u16(&mut t, 0);                              // format
+    push_u16(&mut t, records.len() as u16);           // count
+    push_u16(&mut t, (6 + 12 * records.len()) as u16);// stringOffset
+    let mut storage = Vec::new();
+    for &(platform, encoding, language, name_id, string) in records {
+        assert!(storage.len() < 0x10000 && string.len() < 0x10000);
+        push_u16(&mut t, platform);
+        push_u16(&mut t, encoding);
+        push_u16(&mut t, language);
+        push_u16(&mut t, name_id);
+        push_u16(&mut t, string.len() as u16);
+        push_u16(&mut t, storage.len() as u16);
+        storage.extend_from_slice(string);
+    }
+    t.extend_from_slice(&storage);
+    t
+}
+
+#[test]
+fn c33_name_picks_the_best_record_not_the_last() {
+    // F33: the *last* record that matched (platform 0, 3/0 or 3/1) won, so a font carrying
+    // Mac Roman or Unicode-platform names after the Windows ones lost them. The Windows
+    // Unicode English record is deliberately *first* here: only a preference order passes.
+    let windows = utf16be("WinFam");
+    let unicode = utf16be("UniFam");
+    let table = name_table(&[
+        (3, 1, 0x409, 1, &windows),
+        (1, 0, 0, 1, b"MacFam"),
+        (0, 3, 0, 1, &unicode),
+    ]);
+    let name = font::opentype::parse_name(&table).expect("name parses");
+    assert_eq!(name.family.as_deref(), Some("WinFam"));
+    assert_eq!(name.subfamily, None);
+}
+
+#[test]
+fn c33_name_decodes_mac_roman() {
+    // F33: platform 1 (Macintosh) was ignored outright, so a Type 1-era name table yielded
+    // nothing at all. 0x8E is "é" in Mac Roman, not a valid UTF-8 byte.
+    let table = name_table(&[
+        (1, 0, 0, 6, b"Caf\x8e"),
+        (1, 0, 0, 1, b"Famille"),
+    ]);
+    let name = font::opentype::parse_name(&table).expect("name parses");
+    assert_eq!(name.postscript_name.as_deref(), Some("Café"));
+    assert_eq!(name.family.as_deref(), Some("Famille"));
+}
+
 // ---------------------------- F39: gzip-compressed SVG documents ----------------------------
 
 /// `SVG ` (OT §SVG): version, document list offset, reserved, then the document list
