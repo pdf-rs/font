@@ -20,8 +20,8 @@ impl GlyphList {
     /// ignored glyph invisible, so a ligature's components may be separated by marks (which is
     /// exactly how a font ligates `f` + mark + `f`).
     ///
-    /// Returns how many glyphs of the iterator were consumed, ignored ones included, since the
-    /// caller has to remove the whole span.
+    /// Returns how many glyphs of the iterator were consumed, ignored ones included; the caller
+    /// replaces the span but keeps the ignored glyphs (they are not components).
     pub(crate) fn matches_skipping(&self, mut glyphs: impl Iterator<Item=GlyphId>, skip: &dyn Fn(u16) -> bool) -> Option<usize> {
         if self.0.is_empty() {
             return Some(0);
@@ -752,8 +752,15 @@ impl GSub {
         let skip = |gid: u16| glyph_ignored(gdef, flag, gid);
         match subtable {
             LookupSubtable::Substitution(substitution) =>
-                substitution.apply_skipping(&run[position ..], &skip)
-                    .map(|(consumed, glyph)| (consumed, vec![glyph])),
+                substitution.apply_skipping(&run[position ..], &skip).map(|(consumed, glyph)| {
+                    // The glyphs the lookup stepped over inside a ligature are not components:
+                    // they stay, after the ligature and in their order (as HarfBuzz keeps them),
+                    // instead of vanishing with the span.
+                    let mut produced = vec![glyph];
+                    produced.extend(run[position + 1 .. position + consumed].iter().copied()
+                        .filter(|g| first_glyph_of(*g).map_or(false, |g| skip(g))));
+                    (consumed, produced)
+                }),
             LookupSubtable::Context(_) | LookupSubtable::ReverseChain(_) => None,
             substitution => substitution.apply_with(&run[position ..], 0),
         }
@@ -1638,7 +1645,7 @@ mod tests {
     #[test]
     fn a_ligature_steps_over_ignored_marks() {
         // Audit C8: a component the lookup ignores is invisible to the match, so `f` + mark +
-        // `f` ligates, and the skipped mark is consumed with the components.
+        // `f` ligates, and the skipped mark stays behind the ligature.
         let gdef = parse_gdef(&gdef_bytes(12, &[3], &[])).expect("GDEF 1.2 parses");
         let mut ligatures: HashMap<u16, Vec<(GlyphList, u16)>> = HashMap::new();
         ligatures.insert(10, vec![(GlyphList(vec![20]), 30)]);
@@ -1652,7 +1659,7 @@ mod tests {
         assert_eq!(gsub.substitute_with(&run, &liga, Some(&gdef)), run.to_vec());
 
         gsub.flags[0] = LookupFlags { flag: 0x0008, mark_filtering_set: None }; // IgnoreMarks
-        assert_eq!(gsub.substitute_with(&run, &liga, Some(&gdef)), vec![GlyphId(30)]);
+        assert_eq!(gsub.substitute_with(&run, &liga, Some(&gdef)), vec![GlyphId(30), GlyphId(12)]);
     }
 
     #[test]

@@ -116,6 +116,12 @@ struct PairSets {
     /// Whether this is a format 2 subtable at all; a format 1 subtable has no classes and no
     /// coverage, and a pair it does not list simply does not exist.
     class_based: bool,
+    /// Format 2: `class1Count`, `class2Count` and how many matrix cells the subtable really
+    /// holds (row-major). `class_pairs` keeps only the non-zero cells, so these say which zero
+    /// cells are real: OT §GPOS "Pair Adjustment" ends the lookup at the first subtable that
+    /// matches a pair, zero values or not.
+    class_counts: (u16, u16),
+    cells_read: usize,
     left_classes: HashMap<u16, u16>,
     right_classes: HashMap<u16, u16>,
     /// Whether the subtable carries a value record for the second glyph of a pair. OT §GPOS
@@ -138,7 +144,15 @@ impl PairSets {
         // and column in the matrix.
         let left_class = self.left_classes.get(&left).copied().unwrap_or(0);
         let right_class = self.right_classes.get(&right).copied().unwrap_or(0);
-        self.class_pairs.get(&(left_class, right_class)).cloned()
+        if let Some(pair) = self.class_pairs.get(&(left_class, right_class)) {
+            return Some(pair.clone());
+        }
+        let (rows, columns) = self.class_counts;
+        let cell = usize::from(left_class) * usize::from(columns) + usize::from(right_class);
+        if left_class < rows && right_class < columns && cell < self.cells_read {
+            return Some(Default::default());
+        }
+        None
     }
 }
 
@@ -205,16 +219,41 @@ impl GPos {
         })
     }
 
-    /// The advance `left` gets when followed by `right`, which is what `Font::kerning` reports:
-    /// the pair subtables first, then the flat `kern`-table maps.
+    /// The advance `left` gets when followed by `right`, which is what `Font::kerning` reports.
+    ///
+    /// Only the lookups the `kern` feature of the default language system names count, each
+    /// contributing the first of its pair subtables that matches (a `vkrn` or `dist` lookup is
+    /// not kerning). A font whose layout data came from the legacy `kern` table has no lookups
+    /// and uses the flat maps; for a real `GPOS` table those maps are not consulted, because
+    /// they merge the class numbers of unrelated subtables.
     pub fn kerning(&self, left: GlyphId, right: GlyphId) -> Option<i16> {
-        if let Some((first, _second)) = self.get_pair(left, right) {
-            return Some(first.x_advance);
+        let (left_key, right_key) = (glyph_key(left)?, glyph_key(right)?);
+        if self.lookups.is_empty() {
+            return self.kern.get(left_key, right_key);
         }
-        match (glyph_key(left), glyph_key(right)) {
-            (Some(left), Some(right)) => self.kern.get(left, right),
-            _ => None,
+        let kern = |tag: Tag| tag.0 == *b"kern";
+        let mut total: Option<i16> = None;
+        // A table without script or feature lists (the lists are optional) cannot name a
+        // `kern` feature; its pair lookups are all there is.
+        let lookup_indices: Vec<u16> = if self.scripts.is_empty() || self.features.is_empty() {
+            (0 .. self.lookups.len() as u16).collect()
+        } else {
+            enabled_lookups(&self.scripts, &self.features, &kern)
+        };
+        for lookup_idx in lookup_indices {
+            let subtables = match self.lookups.get(lookup_idx as usize) {
+                Some(subtables) => subtables,
+                None => continue,
+            };
+            let found = subtables.iter().find_map(|subtable| match subtable {
+                PosSubtable::Pair(sets) => sets.lookup(left_key, right_key),
+                _ => None,
+            });
+            if let Some((first, _second)) = found {
+                total = Some(total.unwrap_or(0).saturating_add(first.x_advance));
+            }
         }
+        total
     }
 
     /// Applies the positioning of the default language system whose feature tag `enabled`
@@ -366,9 +405,14 @@ impl GPos {
             i32::from(exit.0) - i32::from(entry.0) - shift
         };
         let dy = i32::from(exit.1) - i32::from(entry.1);
+        // The previous glyph may itself have been moved by this chain (or by a placement); its
+        // anchor moved with it, so the offset accumulates along the chain instead of every
+        // glyph being placed relative to an unmoved neighbour.
+        let (previous_x, previous_y) = positions.get(previous)
+            .map_or((0, 0), |p| (i32::from(p.x_offset), i32::from(p.y_offset)));
         if let Some(slot) = positions.get_mut(position) {
-            slot.x_offset = clamp_i16(i32::from(slot.x_offset) + dx);
-            slot.y_offset = clamp_i16(i32::from(slot.y_offset) + dy);
+            slot.x_offset = clamp_i16(i32::from(slot.x_offset) + dx + previous_x);
+            slot.y_offset = clamp_i16(i32::from(slot.y_offset) + dy + previous_y);
         }
         Some(1)
     }
@@ -709,6 +753,9 @@ fn parse_optional_class_def(data: &[u8], class_def_offset: u16, classes: &mut Ha
 /// `Font::kerning` uses side by side with the value records, which keep the placements the
 /// advance-only maps cannot hold.
 fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<PairSets, FontError> {
+    // The flat maps are filled only once the whole subtable parsed: a subtable that fails
+    // halfway is skipped by `parse_lookup_list` and must not leave a part of itself behind.
+    let mut flat = KernTable::default();
     let mut pairs = PairSets::default();
     let (i, format) = be_u16(data)?;
     match format {
@@ -731,7 +778,7 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<PairSets
                 
                 let iter = iterator_n(i, tuple((be_u16, value_record(value_format_1), value_record(value_format_2))), pair_value_count);
                 for (second_glyph, value_record_1, value_record_2) in iter {
-                    gpos.kern.glyph_pairs.insert((first_glyph, second_glyph), value_record_1.x_advance);
+                    flat.glyph_pairs.insert((first_glyph, second_glyph), value_record_1.x_advance);
                     pairs.pairs.insert((first_glyph, second_glyph), (value_record_1, value_record_2));
                 }
             }
@@ -767,10 +814,10 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<PairSets
             // The flat maps `Font::kerning` reads keep one table's view of the classes; the
             // first definition wins so a later subtable cannot silently change an earlier one.
             for (&glyph, &class) in &pairs.left_classes {
-                gpos.kern.left_classes.entry(glyph).or_insert(class);
+                flat.left_classes.insert(glyph, class);
             }
             for (&glyph, &class) in &pairs.right_classes {
-                gpos.kern.right_classes.entry(glyph).or_insert(class);
+                flat.right_classes.insert(glyph, class);
             }
 
 
@@ -780,22 +827,36 @@ fn parse_pair_adjustment<'a>(data: &'a [u8], gpos: &mut GPos) -> Result<PairSets
             // than the subtable has bytes.
             let total = usize::from(class_1_count) * usize::from(class_2_count);
             let total = total.min(data.len());
-            gpos.kern.class_pairs.reserve(total.min(1 << 16));
+            flat.class_pairs.reserve(total.min(1 << 16));
+            pairs.class_counts = (class_1_count, class_2_count);
+            pairs.cells_read = 0;
 
             let iter = (0 .. class_1_count).cartesian_product(0 .. class_2_count)
                 .zip(iterator_n(i, tuple((value_record(value_format_1), value_record(value_format_2))), total));
 
+            // With both value formats 0 a record is zero bytes long, so every cell of the matrix
+            // exists however short the data is.
+            let all_cells = value_format_1 == 0 && value_format_2 == 0;
             for ((class_1, class_2), (value_record_1, value_record_2)) in iter {
+                pairs.cells_read += 1;
                 if value_record_1 != ValueRecord::default() || value_record_2 != ValueRecord::default() {
                     pairs.class_pairs.insert((class_1, class_2), (value_record_1.clone(), value_record_2));
                 }
                 if value_record_1.x_advance != 0 {
-                    gpos.kern.class_pairs.insert((class_1, class_2), value_record_1.x_advance);
+                    flat.class_pairs.insert((class_1, class_2), value_record_1.x_advance);
                 }
+            }
+            if all_cells {
+                pairs.cells_read = usize::MAX;
             }
         }
         n => return error!("unsupported pair adjustment format {}", n)
     }
+    // Merge into the legacy flat view (first definition of a glyph's class wins).
+    gpos.kern.glyph_pairs.extend(flat.glyph_pairs);
+    for (glyph, class) in flat.left_classes { gpos.kern.left_classes.entry(glyph).or_insert(class); }
+    for (glyph, class) in flat.right_classes { gpos.kern.right_classes.entry(glyph).or_insert(class); }
+    gpos.kern.class_pairs.extend(flat.class_pairs);
     Ok(pairs)
 }
 
@@ -1060,8 +1121,11 @@ mod tests {
         let pairs = parse_pair_adjustment(&data, &mut gpos).expect("pair adjustment parses");
         assert!(gpos.kern.class_pairs.is_empty());
         assert!(pairs.class_pairs.is_empty());
-        // Glyph 20 is covered but no class pair of the empty matrix applies.
-        assert!(pairs.lookup(20, 21).is_none());
+        // Glyph 20 is covered and both of its classes exist: the (empty, all-zero) matrix cell
+        // matches, so this subtable ends the lookup with a zero adjustment. A glyph that is not
+        // covered still never matches.
+        assert_eq!(pairs.lookup(20, 21).map(|(a, _)| a.x_advance), Some(0));
+        assert!(pairs.lookup(21, 21).is_none());
     }
 
     fn c2_subtable_first() -> Vec<u8> {
@@ -1108,7 +1172,9 @@ mod tests {
         assert_eq!(one.lookup(20, 21).map(|(a, _)| a.x_advance), Some(-40));
         // Classes (0, 1) here: with the first subtable's ClassDef1 merged in this was (1, 1).
         assert_eq!(two.lookup(20, 21).map(|(a, _)| a.x_advance), Some(-3));
-        assert_eq!(two.lookup(30, 21), None);
+        // Glyph 30 is covered and in class 1; the cell is 0, which still matches: the first
+        // subtable that matches a pair ends the lookup, zero or not (audit R3).
+        assert_eq!(two.lookup(30, 21).map(|(a, _)| a.x_advance), Some(0));
     }
 
     #[test]
@@ -1309,6 +1375,59 @@ mod tests {
         // Nothing enabled: nothing moves.
         let positions = gpos.position(&[GlyphId(30)], &|_| false);
         assert_eq!(positions[0], GlyphPosition::default());
+    }
+
+    #[test]
+    fn kerning_uses_only_the_kern_feature_and_ignores_the_merged_flat_maps() {
+        // Audit R2: a pair that only a non-`kern` lookup (here lookup 1, feature `dist`)
+        // adjusts is not kerning, and the flat `KernTable` (which merges the classes of
+        // unrelated subtables) is not a fallback for a real GPOS table.
+        let words: [u16; 14] = [
+            1, 22,
+            4, 0,
+            1, 12,
+            1, 21,
+            (-40i16) as u16, 0,
+            0,
+            1, 1, 20,
+        ];
+        let data = words_to_bytes(&words);
+        let mut gpos = GPos::default();
+        gpos.lookups = vec![Vec::new(), Vec::new()];
+        gpos.flags = vec![LookupFlags::default(); 2];
+        // Put the same pair subtable in lookup 1 only.
+        let pair = parse_pair_adjustment(&data, &mut gpos).expect("pair adjustment parses");
+        gpos.lookups[1].push(PosSubtable::Pair(pair));
+        gpos.scripts = vec![Script {
+            tag: Tag(*b"latn"),
+            default_language: Some(crate::opentype::gsub::LanguageSystem::with_features(vec![0, 1])),
+            languages: Vec::new(),
+        }];
+        gpos.features = vec![Feature::new(b"kern", vec![0]), Feature::new(b"dist", vec![1])];
+        // The flat map was filled by the parse, but it must not be consulted.
+        assert_eq!(gpos.kern.get(20, 21), Some(-40));
+        assert_eq!(gpos.kerning(GlyphId(20), GlyphId(21)), None);
+        // Once the `kern` feature names the lookup, the pair kerns.
+        gpos.features[0] = Feature::new(b"kern", vec![0, 1]);
+        assert_eq!(gpos.kerning(GlyphId(20), GlyphId(21)), Some(-40));
+    }
+
+    #[test]
+    fn cursive_attachment_accumulates_along_the_chain() {
+        // Audit R5: each glyph's entry anchor meets the previous glyph's exit anchor, and the
+        // previous glyph has itself been raised, so a chain climbs a step per glyph.
+        let mut anchors = HashMap::new();
+        for glyph in 1u16 ..= 3 {
+            anchors.insert(glyph, CursiveAnchors { entry: Some((0, 0)), exit: Some((0, 10)) });
+        }
+        let mut gpos = GPos::default();
+        gpos.lookups = vec![vec![PosSubtable::Cursive(anchors)]];
+        gpos.flags = vec![LookupFlags::default()];
+        let gpos = gpos_with(gpos, vec![0]);
+        let positions = gpos.position(&[GlyphId(1), GlyphId(2), GlyphId(3)], &kern_enabled);
+        assert_eq!(positions[0].y_offset, 0);
+        assert_eq!(positions[1].y_offset, 10);
+        assert_eq!(positions[2].y_offset, 20);
     }
 
     #[test]

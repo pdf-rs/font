@@ -370,15 +370,21 @@ const MAX_COMPONENT_DEPTH: usize = 16;
 /// expansion as a whole is therefore bounded too, counted over every level.
 const MAX_COMPONENT_EXPANSIONS: usize = 10_000;
 
+/// Counting expansions is not enough either: each one copies the outline it names, so one big
+/// simple glyph named ten thousand times is still hundreds of millions of points. The points
+/// copied for one glyph are capped as well (a real glyph has a few thousand).
+const MAX_COMPONENT_POINTS: usize = 1_000_000;
+
 /// What is left of `MAX_COMPONENT_EXPANSIONS` for the glyph being expanded.
 struct ComponentBudget {
     left: usize,
+    points_left: usize,
     reported: bool,
 }
 
 impl ComponentBudget {
     fn new() -> ComponentBudget {
-        ComponentBudget { left: MAX_COMPONENT_EXPANSIONS, reported: false }
+        ComponentBudget { left: MAX_COMPONENT_EXPANSIONS, points_left: MAX_COMPONENT_POINTS, reported: false }
     }
 
     /// Whether one more component may be expanded; reports the truncation once.
@@ -393,6 +399,26 @@ impl ComponentBudget {
                     self.reported = true;
                     warn!("glyf: composite glyphs expand more than {} outlines; dropping the rest",
                           MAX_COMPONENT_EXPANSIONS);
+                }
+                false
+            }
+        }
+    }
+}
+
+impl ComponentBudget {
+    /// Whether an outline of `points` points may be copied; reports the truncation once.
+    fn take_points(&mut self, points: usize) -> bool {
+        match self.points_left.checked_sub(points) {
+            Some(left) => {
+                self.points_left = left;
+                true
+            }
+            None => {
+                if !self.reported {
+                    self.reported = true;
+                    warn!("glyf: composite glyphs copy more than {} points; dropping the rest",
+                          MAX_COMPONENT_POINTS);
                 }
                 false
             }
@@ -418,7 +444,10 @@ fn expand_outline(shapes: &[Shape], idx: u32, stack: &mut Vec<u32>, budget: &mut
     let result = match shapes.get(idx as usize) {
         None => None,
         Some(&Shape::Empty) => Some(Outline::new()),
-        Some(&Shape::Simple(ref path)) => Some(path.clone()),
+        Some(&Shape::Simple(ref path)) => {
+            let points: usize = path.contours().iter().map(|contour| contour.points().len()).sum();
+            if budget.take_points(points) { Some(path.clone()) } else { Some(Outline::new()) }
+        }
         Some(&Shape::Compound(ref parts)) => {
             let mut outline = Outline::new();
             for part in parts {
@@ -439,6 +468,10 @@ fn expand_outline(shapes: &[Shape], idx: u32, stack: &mut Vec<u32>, budget: &mut
                     ComponentOffset::Vector(v) if part.scaled_offset => part.matrix * v,
                     ComponentOffset::Vector(v) => v,
                     ComponentOffset::MatchPoints { parent, child: child_point } => {
+                        // Numbering follows the converted outline (see `spec_points`), which
+                        // differs from `glyf` for glyphs with consecutive off-curve points.
+                        debug!("glyf: glyph {} places a component by matching points {} and {}",
+                               idx, parent, child_point);
                         match (point_at(&outline, parent), point_at(&child, child_point)) {
                             (Some(p), Some(c)) => p - c,
                             _ => {
@@ -645,6 +678,28 @@ mod tests {
         }
         shapes.push(leaf());
         shapes
+    }
+
+    #[test]
+    fn many_references_to_a_big_glyph_stop_at_the_point_budget() {
+        // A composite naming one 1000-point glyph 5000 times is under the expansion cap but
+        // would copy 5 million points.
+        let mut points = Vec::new();
+        for n in 0 .. 1000 {
+            points.push((true, Vector2F::new(n as f32, (n % 7) as f32)));
+        }
+        let mut outline = Outline::new();
+        outline.push_contour(contour(points.into_iter()).expect("big contour"));
+        let component = Component {
+            gid: 1,
+            matrix: Matrix2x2F::row_major(1., 0., 0., 1.),
+            offset: ComponentOffset::Vector(Vector2F::zero()),
+            scaled_offset: false,
+        };
+        let shapes = vec![Shape::Compound(vec![component; 5000]), Shape::Simple(outline)];
+        let copied: usize = get_outline(&shapes, 0).expect("glyph 0").contours().iter()
+            .map(|contour| contour.points().len()).sum();
+        assert!(copied > 0 && copied <= MAX_COMPONENT_POINTS + 1000, "copied {} points", copied);
     }
 
     #[test]
