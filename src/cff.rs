@@ -5,7 +5,7 @@ use std::iter::once;
 use std::borrow::Cow;
 use std::rc::Rc;
 use crate::{
-    Font, Glyph, Value, Context, State, type1, type2, IResultExt, R,
+    Font, Glyph, Value, Context, State, Seac, type1, type2, IResultExt, R,
     VMetrics, HMetrics, GlyphId, Name, Info, FontError, ParseResult,
 };
 use crate::parsers::count as count2;
@@ -113,13 +113,16 @@ pub fn read_cff(data: &[u8]) -> Result<Cff, FontError> {
     require!(hdrSize >= 4);
     let (i, _) = take(hdrSize - 4)(i)?;
     
-    let (i, _name_index) = index(i)?;
+    // TN5176 §"Name INDEX": index 0 holds the font name (the PostScript name); kept for
+    // `CffFont::name()`, it used to be parsed and discarded.
+    let (i, name_index) = index(i)?;
     let (i, dict_index) = index(i)?;
     let (i, string_index) = index(i)?;
     let (i, subroutines) = index(i)?;
     
     Ok(Cff {
         data,
+        name_index,
         dict_index,
         string_index,
         subroutines
@@ -139,6 +142,7 @@ type Index<'a> = Vec<&'a [u8]>;
 
 pub struct Cff<'a> {
     data: &'a [u8],
+    name_index: Index<'a>,
     dict_index: Index<'a>,
     string_index:Index<'a>,
     subroutines: Index<'a>,
@@ -171,6 +175,9 @@ impl<'a> Cff<'a> {
         
         // num glyphs includes glyph 0 (.notdef)
         let num_glyphs = char_strings.len() as usize;
+        // CFF §"CharStrings INDEX": there is always at least `.notdef`, and several index
+        // computations below (`num_glyphs - 1`) depend on that.
+        require!(num_glyphs >= 1);
 
         let mut font_matrix = top_dict.get(&Operator::FontMatrix).and_then(|a| parse_font_matrix(&a));
         
@@ -201,10 +208,14 @@ impl<'a> Cff<'a> {
                 subrs.push(Rc::clone(&subrs_list[fd_idx]));
             }
         } else {
-            let private_dict_entry = top_dict.get(&Operator::Private)
-                .expect("no private dict entry");
+            // CFF §"Top DICT": `Private` is optional; without it the font has no private dict
+            // and `default_width_x`/`nominal_width_x` keep their defaults (0).
+            let private_dict_entry = match top_dict.get(&Operator::Private) {
+                Some(entry) => self.private_dict_and_subrs(entry)?,
+                None => (Dict::new(), vec![]),
+            };
 
-            let (private_dict_global, subrs_global) = self.private_dict_and_subrs(&private_dict_entry)?;
+            let (private_dict_global, subrs_global) = private_dict_entry;
             let private_dict_global = Rc::new(private_dict_global);
             let subrs_global = Rc::new(subrs_global);
             for i in 0..num_glyphs {
@@ -279,6 +290,16 @@ fn range3_record(data: &[u8]) -> R<(usize, usize)> {
     Ok((data, (first, fd)))
 }
 
+/// The glyph a StandardEncoding character code stands for. TN5177 Appendix C names the
+/// `seac` components by code; CFF glyphs are reached through the charset's SIDs, so the
+/// code goes through the standard encoding's SID table.
+fn seac_sid(code: u8) -> Option<SID> {
+    match STANDARD_ENCODING[code as usize] {
+        0 => None,
+        sid => Some(sid),
+    }
+}
+
 impl<'a> CffSlot<'a> {
     pub fn font_matrix(&self) -> Transform2F {
         self.font_matrix
@@ -290,13 +311,14 @@ impl<'a> CffSlot<'a> {
                 RectF::from_points(Vector2F::new(a, b), Vector2F::new(c, d))
             })
     }
-    // -> (outline, width, lsb)
-    pub fn outlines(&self) -> Result<impl Iterator<Item=Result<(Outline, f32, f32), FontError>> + '_, FontError> {
+    // -> (outline, width, lsb, seac)
+    pub fn outlines(&self) -> Result<impl Iterator<Item=Result<(Outline, f32, f32, Option<Seac>), FontError>> + '_, FontError> {
         let n = self.top_dict.get(&Operator::CharstringType).map(|v| get!(v, 0).to_int()).transpose()?.unwrap_or(2);
         let char_string_type = match n {
             1 => CharstringType::Type1,
             2 => CharstringType::Type2,
-            _ => panic!("invalid charstring type")
+            // CFF §18 "CharstringType": 1 or 2, nothing else exists.
+            n => error!("invalid CharstringType {}", n)
         };
         
         let global_subr_bias = match char_string_type {
@@ -340,14 +362,87 @@ impl<'a> CffSlot<'a> {
                 (Some(w), None) => w,
                 (None, None) => default_width,
                 (None, Some(delta)) => delta + nominal_width,
-                (Some(_), Some(_)) => panic!("BUG: both char_width and delta_width set")
+                // TN5177 §3: a charstring may set its width once, with either encoding. Both at
+                // the same time is a producer bug; keep the explicit width and carry on.
+                (Some(w), Some(_)) => {
+                    warn!("glyph {}: charstring set both an explicit and a delta width, using {}", id, w);
+                    w
+                }
             };
             let lsb = state.lsb.unwrap_or_default();
             let path = state.take_path();
+            let seac = state.seac;
             state.clear();
-            Ok((path, width, lsb))
+            Ok((path, width, lsb, seac))
         }))
     }
+
+    /// gid - 1 -> SID, from the `Charset` operator (CFF §"Charset"); the predefined
+    /// charsets are borrowed, a custom one is parsed.
+    fn sids(&self) -> Result<Cow<'_, [SID]>, FontError> {
+        let offset: usize = self.top_dict.get(&Operator::Charset).map(|v| get!(v, 0).to_usize()).transpose()?.unwrap_or(0);
+        Ok(match offset {
+            0 => ISO_ADOBE_CHARSET[..].into(),
+            1 => EXPERT_CHARSET[..].into(),
+            2 => EXPERT_SUBSET_CHARSET[..].into(),
+            offset => {
+                let charset = charset(get!(self.cff.data, offset ..), self.num_glyphs).get()?;
+                match charset {
+                    Charset::Continous(sids) => sids,
+                    Charset::Ranges(ranges) => ranges.into_iter()
+                        .flat_map(|(sid, num)| (sid .. sid + num + 1))
+                        .collect(),
+                }.into()
+            }
+        })
+    }
+
+    /// The gid a StandardEncoding character code names, for the deprecated `seac` form.
+    /// CID-keyed fonts never match: their charset holds CIDs, not name SIDs.
+    ///
+    /// Takes the charset rather than reading it: `sids()` parses the whole `Charset` operator,
+    /// and a base/accent pair would otherwise pay for it twice per seac glyph.
+    fn seac_gid(sids: &[SID], code: u8) -> Option<usize> {
+        let sid = seac_sid(code)?;
+        sids.iter().position(|&s| s == sid).map(|n| n + 1)
+    }
+
+    /// `outlines()` with the deprecated four-argument `endchar` form (`seac`) composed:
+    /// the base character with the accent character drawn at (adx, ady) on top.
+    pub fn composed_outlines(&self) -> Result<Vec<(Outline, f32, f32)>, FontError> {
+        let mut outlines = Vec::with_capacity(self.num_glyphs);
+        let mut seac_glyphs = Vec::new();
+        for r in self.outlines()? {
+            let (outline, width, lsb, seac) = r?;
+            if let Some(seac) = seac {
+                seac_glyphs.push((outlines.len(), seac));
+            }
+            outlines.push((outline, width, lsb));
+        }
+        // parse the charset once for the whole pass, not per lookup.
+        let sids = if seac_glyphs.is_empty() { None } else { self.sids().ok() };
+        let sids: Option<&[SID]> = sids.as_deref();
+        for (gid, seac) in seac_glyphs {
+            let sids = match sids {
+                Some(sids) => sids,
+                None => {
+                    warn!("endchar seac: glyph {gid} cannot be composed (charset unreadable)");
+                    continue;
+                }
+            };
+            let (base, accent) = match (Self::seac_gid(sids, seac.base), Self::seac_gid(sids, seac.accent)) {
+                (Some(base), Some(accent)) if base != gid && accent != gid => (base, accent),
+                _ => {
+                    warn!("endchar seac: glyph {gid} cannot be composed (base {}, accent {})",
+                        seac.base, seac.accent);
+                    continue;
+                }
+            };
+            outlines[gid].0 = seac.compose(outlines[base].0.clone(), outlines[accent].0.clone());
+        }
+        Ok(outlines)
+    }
+
     pub fn weight(&self) -> Option<u16> {
         None
         /*
@@ -373,23 +468,7 @@ impl<'a> CffSlot<'a> {
             Err(FontError::Other(format!("SID out of bounds {} > {} standard strings + {} font string index entries",
                 sid, STANDARD_STRINGS.len(), self.cff.string_index.len())))
         };
-        let charset_offset: usize = self.top_dict.get(&Operator::Charset).map(|v| get!(v, 0).to_usize()).transpose()?.unwrap_or(0);
-        let sids: Cow<[SID]> = match charset_offset {
-            0 => ISO_ADOBE_CHARSET[..].into(),
-            1 => EXPERT_CHARSET[..].into(),
-            2 => EXPERT_SUBSET_CHARSET[..].into(),
-            offset => {
-                let charset = charset(get!(self.cff.data, offset ..), self.num_glyphs).get()?;
-                
-                // index = gid - 1 -> sid
-                match charset {
-                    Charset::Continous(sids) => sids,
-                    Charset::Ranges(ranges) => ranges.into_iter()
-                        .flat_map(|(sid, num)| (sid .. sid + num + 1))
-                        .collect(),
-                }.into()
-            }
-        };
+        let sids: Cow<[SID]> = self.sids()?;
         
         // sid -> gid
         let sid_map: HashMap<SID, u16> = once(0).chain(sids.iter().cloned()).enumerate()
@@ -426,8 +505,14 @@ impl<'a> CffSlot<'a> {
                         .flat_map(|&(first, left)| (first ..).take(left as usize + 1))
                         .enumerate().for_each(|(gid, codepoint)| cmap[codepoint as usize] = gid as u16 + 1),
                 }
+                // TN5176 §"Encoding": a supplement may name an SID the charset does not
+                // contain (the font simply lacks that glyph) — such an entry maps nowhere,
+                // it must not abort the font.
                 supplement.iter()
-                    .for_each(|&(codepoint, sid)| cmap[codepoint as usize] = sid_map[&sid]);
+                    .for_each(|&(codepoint, sid)| match sid_map.get(&sid) {
+                        Some(&gid) => cmap[codepoint as usize] = gid,
+                        None => debug!("encoding supplement: code {} names SID {}, not in the charset", codepoint, sid),
+                    });
                     
                 (cmap, None)
             }
@@ -441,7 +526,9 @@ impl<'a> CffSlot<'a> {
             }
         }
         
-        let glyphs: Vec<_> = self.outlines()?.map(|r| r.map(|(outline, width, lsb)| {
+        // TN5177 Appendix C, deprecated `seac`: glyphs built from two characters are
+        // assembled here, where every charstring and the charset are known.
+        let glyphs: Vec<Glyph> = self.composed_outlines()?.into_iter().map(|(outline, width, lsb)| {
             Glyph {
                 metrics: HMetrics {
                     advance: width,
@@ -449,16 +536,45 @@ impl<'a> CffSlot<'a> {
                 },
                 path: outline
             }
-        })).collect::<Result<_, _>>()?;
+        }).collect();
         
-        let mut unicode_map = HashMap::with_capacity(glyphs.len());
-        for n in 0..glyphs.len()-1 {
-            if let Some(c) = sids.get(n).and_then(|&sid| glyph_name(sid).ok()).and_then(|name| glyphname_to_unicode(name)) {
-                unicode_map.insert(c, (n+1) as u16);
+        // CFF §"CharStrings INDEX": gid 0 is `.notdef`, the charset names gids 1..n, so the
+        // pairs here are (gid n+1, charset entry n) — one fewer entry than glyphs.  Both
+        // `len() - 1`s are written as `saturating_sub` so that a font with no charstring at
+        // all (rejected earlier by `require!(num_glyphs >= 1)`) cannot underflow here if that
+        // check ever moves.
+        let mut unicode_map = HashMap::with_capacity(glyphs.len().saturating_sub(1));
+        for (n, &sid) in sids.iter().enumerate().take(glyphs.len().saturating_sub(1)) {
+            if let Some(c) = glyph_name(sid).ok().and_then(|name| glyphname_to_unicode(name)) {
+                unicode_map.insert(c, (n + 1) as u16);
             }
         }
         //info!("unicode_map: {:?}", unicode_map);
         
+        // TN5176 §"Name INDEX" / §"Top DICT": the Name INDEX holds the font name, and
+        // `FamilyName` / `FullName` / `Weight` in the Top DICT are SIDs into the String INDEX.
+        // All of it used to be dropped, leaving `Name::default()` and `info.weight == None`
+        // even though the data was right there.
+        let font_name = self.cff.name_index.first()
+            .and_then(|data| std::str::from_utf8(data).ok())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        let dict_sid_string = |op: &Operator| -> Option<String> {
+            let value = *self.top_dict.get(op)?.first()?;
+            let sid = value.to_int().ok().filter(|&sid| sid >= 0)? as SID;
+            glyph_name(sid).ok().filter(|s| !s.is_empty()).map(str::to_owned)
+        };
+        // A bare CFF font need not carry `FamilyName`; the font name is `Family-Style` by
+        // convention (TN5176 §"Name INDEX"), so its head is a usable family fallback.
+        let name = Name {
+            family: dict_sid_string(&Operator::FamilyName)
+                .or_else(|| font_name.as_deref().map(|n| n.split('-').next().unwrap_or(n).to_owned())),
+            subfamily: None,
+            postscript_name: font_name,
+            full_name: dict_sid_string(&Operator::FullName),
+        };
+        let weight = dict_sid_string(&Operator::Weight).as_deref().and_then(weight_class);
+
         Ok(CffFont {
             glyphs,
             font_matrix: self.font_matrix(),
@@ -468,13 +584,75 @@ impl<'a> CffSlot<'a> {
             encoding,
             bbox: self.bbox(),
             vmetrics: None,
-            name: Name::default(),
+            name,
             info: Info {
-                weight: None,
+                weight,
+                .. Info::default()
             },
             sid_map,
             cid: self.top_dict.contains_key(&Operator::ROS)
         })
+    }
+}
+
+/// CFF `Weight` (Top DICT op 4) is a *string* SID — "SemiBold", "UltraLight" — while
+/// `Info::weight` is the numeric class of OT §OS/2 `usWeightClass`. The words TN5176
+/// Appendix A.3 uses for the standard strings map like this; an unrecognised word leaves the
+/// weight unknown instead of guessing.
+fn weight_class(weight: &str) -> Option<u16> {
+    // CFF writes the weight loosely — "SemiBold", "Semi Bold", "Demi-Bold", "ExtraLight".
+    // Matching word by word read "Semi Bold" as 700 (the "bold" word) and "Extra Light" as
+    // 300, so the whole string is normalised first: spaces, hyphens and underscores
+    // stripped, lowercase, then matched against the table.
+    let normalised: String = weight
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if normalised.is_empty() {
+        return None;
+    }
+    if let Some(class) = weight_word(&normalised) {
+        return Some(class);
+    }
+
+    let words: Vec<String> = weight
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_ascii_lowercase())
+        .collect();
+    // "Extra Bold Italic": the modifier and the weight are still one weight, so adjacent
+    // words are tried joined before single words are looked at.
+    for pair in words.windows(2) {
+        let joined = format!("{}{}", pair[0], pair[1]);
+        if let Some(class) = weight_word(&joined) {
+            return Some(class);
+        }
+    }
+    // A single word decides only when every recognised word agrees: "Bold Italic" is bold,
+    // "Light Bold" is a contradiction the font has to resolve, not this function.
+    let mut classes = words.iter().filter_map(|word| weight_word(word));
+    let first = classes.next()?;
+    if classes.all(|class| class == first) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+/// The weight class of one already normalised word: lowercase, no separators.
+fn weight_word(word: &str) -> Option<u16> {
+    match word {
+        "thin" | "hairline" => Some(100),
+        "extralight" | "ultralight" => Some(200),
+        "light" => Some(300),
+        "regular" | "normal" | "book" | "roman" => Some(400),
+        "medium" => Some(500),
+        "semibold" | "demibold" => Some(600),
+        "bold" => Some(700),
+        "extrabold" | "ultrabold" => Some(800),
+        "black" | "heavy" | "extrablack" | "ultrablack" => Some(900),
+        _ => None,
     }
 }
 
@@ -506,7 +684,14 @@ fn index(i: &[u8]) -> ParseResult<Vec<&[u8]>> {
     debug!("n={}", n);
     if n != 0 {
         let (i, offSize) = t!(be_u8(i));
-        let (i, offsets) = t!(count2(|i| offset(offSize)(i).map(|(i, o)| (i, o - 1)), n+1)(i));
+        let (i, offsets) = t!(count2(|i| {
+            let (i, o) = offset(offSize)(i)?;
+            // CFF §"INDEX data": offsets are 1-based; 0 is invalid (and used to underflow).
+            if o == 0 {
+                error!("INDEX offset 0 (offset size {}) is invalid", offSize);
+            }
+            Ok((i, o - 1))
+        }, n+1)(i));
         let (i, data) = t!(take(offsets[n])(i));
         
         let items = offsets.windows(2).map(|w| Ok(slice!(data, w[0] as usize .. w[1] as usize))).collect::<Result<_, _>>()?;
@@ -784,7 +969,11 @@ fn charset(i: &[u8], num_glyphs: usize) -> R<Charset> {
         2 => {
             map(ranges(be_u16, num_glyphs), |r| Charset::Ranges(r))(i)
         },
-        _ => panic!("invalid charset format")
+        // CFF §"Charset": formats 0, 1 and 2 only.
+        format => {
+            warn!("invalid charset format {}", format);
+            Err(Failure(make_error(i, ErrorKind::Tag)))
+        }
     }
 }
 
@@ -806,7 +995,11 @@ fn parse_encoding(i: &[u8]) -> R<(GlyphEncoding, Vec<(u8, SID)>)> {
             let (i, num) = be_u8(i)?;
             map(count(tuple((be_u8, be_u8)), num as usize), |a| GlyphEncoding::Ranges(a))(i)?
         }
-        _ => panic!("invalid charset format")
+        // CFF §"Encoding": formats 0 and 1 only (bit 7 is the supplements flag).
+        format => {
+            warn!("invalid encoding format {}", format);
+            return Err(Failure(make_error(i, ErrorKind::Tag)));
+        }
     };
     if format & 0x80 != 0 {
         let (i, n) = be_u8(i)?;
@@ -1221,3 +1414,33 @@ static ISO_ADOBE_CHARSET: [SID; 228] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1
 static EXPERT_CHARSET: [SID; 165] = [1, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 13, 14, 15, 99, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 27, 28, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 109, 110, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 158, 155, 163, 319, 320, 321, 322, 323, 324, 325, 326, 150, 164, 169, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 347, 348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363, 364, 365, 366, 367, 368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378];
 
 static EXPERT_SUBSET_CHARSET: [SID; 86] =[1, 231, 232, 235, 236, 237, 238, 13, 14, 15, 99, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 27, 28, 249, 250, 251, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 109, 110, 267, 268, 269, 270, 272, 300, 301, 302, 305, 314, 315, 158, 155, 163, 320, 321, 322, 323, 324, 325, 326, 150, 164, 169, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346];
+
+#[cfg(test)]
+mod tests {
+    use super::weight_class;
+
+    #[test]
+    fn weight_class_reads_the_whole_string_first() {
+        // matching word by word read "Semi Bold" as 700 (the "bold" word) and
+        // "Extra Light" as 300 (the "light" word).
+        assert_eq!(weight_class("Semi Bold"), Some(600));
+        assert_eq!(weight_class("SemiBold"), Some(600));
+        assert_eq!(weight_class("Demi-Bold"), Some(600));
+        assert_eq!(weight_class("Extra Light"), Some(200));
+        assert_eq!(weight_class("UltraLight"), Some(200));
+        assert_eq!(weight_class("Extra Bold"), Some(800));
+        assert_eq!(weight_class("Ultra Black"), Some(900));
+        assert_eq!(weight_class("Regular"), Some(400));
+        assert_eq!(weight_class("Medium"), Some(500));
+    }
+
+    #[test]
+    fn weight_class_falls_back_to_words_only_when_they_agree() {
+        // A style word next to the weight still resolves; two contradicting weights do not.
+        assert_eq!(weight_class("Bold Italic"), Some(700));
+        assert_eq!(weight_class("Extra Bold Italic"), Some(800));
+        assert_eq!(weight_class("Light Bold"), None);
+        assert_eq!(weight_class("Condensed"), None);
+        assert_eq!(weight_class(""), None);
+    }
+}

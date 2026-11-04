@@ -1,4 +1,4 @@
-use crate::{State, v, Value, Context, TryIndex, FontError};
+use crate::{State, Seac, v, Value, Context, TryIndex, FontError, MAX_SUBR_DEPTH, TRANSIENT_SIZE};
 use nom::{IResult,
     bytes::complete::{take},
     number::complete::{be_u8, be_i16, be_i32}
@@ -64,6 +64,14 @@ fn alternating_curve(s: &mut State, mut horizontal: bool) -> Result<(), FontErro
     Ok(())
 }
 
+/// An operand used as a boolean counts as true when it is non-zero (TN5177 §4.4).
+fn is_true(value: Value) -> bool {
+    match value {
+        Value::Int(i) => i != 0,
+        Value::Float(f) => f != 0.
+    }
+}
+
 #[inline]
 fn maybe_width(state: &mut State, cond: impl Fn(usize) -> bool) {
     if state.first_stack_clearing_operator {
@@ -74,6 +82,23 @@ fn maybe_width(state: &mut State, cond: impl Fn(usize) -> bool) {
         }
     }
 }
+
+/// Run one subroutine, guarding against subrs that call themselves.
+///
+/// The depth is restored afterwards even when the subr fails, so one bad glyph does
+/// not poison the counter for the next one.
+fn call_subr<'a, 'b, T, U>(subr: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State) -> Result<(), FontError>
+    where T: TryIndex + 'a, U: TryIndex + 'a
+{
+    if s.subr_depth >= MAX_SUBR_DEPTH {
+        error!("subroutine nesting deeper than {} levels (recursive subr?)", MAX_SUBR_DEPTH);
+    }
+    s.subr_depth += 1;
+    let result = charstring(subr, ctx, s);
+    s.subr_depth -= 1;
+    result
+}
+
 pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State) -> Result<(), FontError>
     where T: TryIndex + 'a, U: TryIndex + 'a
 {
@@ -87,7 +112,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             }
             1 => { // ⊦ y dy hstem (1) ⊦
                 trace!("hstem");
-                maybe_width(s, |n| n == 2);
+                maybe_width(s, |n| n % 2 == 0);
                 s.stem_hints += (s.stack.len() / 2) as u32;
                 s.stack.clear();
                 i
@@ -95,7 +120,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             2 => error!("reserved {}", b0),
             3 => { // ⊦ x dx vstem (3) ⊦
                 trace!("vstem");
-                maybe_width(s, |n| n == 2);
+                maybe_width(s, |n| n % 2 == 0);
                 s.stem_hints += (s.stack.len() / 2) as u32;
                 s.stack.clear();
                 i
@@ -168,7 +193,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let subr_nr = s.pop()?.to_int()?;
                 
                 let subr = ctx.subr(subr_nr)?;
-                charstring(subr, ctx, s)?;
+                call_subr(subr, ctx, s)?;
                 i
             }
             11 => { // – return (11) –
@@ -183,9 +208,27 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         i
                     }
                     1 | 2 => error!("reserved: 12 {}", b1),
-                    3 => error!("unimplemented: and"),
-                    4 => error!("unimplemented: or"),
-                    5 => error!("unimplemented: not"),
+                    3 => { // num1 num2 and (12 3) bool
+                        // TN5177 §4.4: 1 when *both* operands are non-zero, else 0.
+                        trace!("and");
+                        let num2 = s.pop()?;
+                        let num1 = s.pop()?;
+                        s.push(if is_true(num1) && is_true(num2) { 1 } else { 0 });
+                        i
+                    }
+                    4 => { // num1 num2 or (12 4) bool
+                        trace!("or");
+                        let num2 = s.pop()?;
+                        let num1 = s.pop()?;
+                        s.push(if is_true(num1) || is_true(num2) { 1 } else { 0 });
+                        i
+                    }
+                    5 => { // num1 not (12 5) bool
+                        trace!("not");
+                        let num1 = s.pop()?;
+                        s.push(if is_true(num1) { 0 } else { 1 });
+                        i
+                    }
                     6 | 7 | 8 => error!("reserved"),
                     9 => { // num abs (12 9) num2
                         trace!("abs");
@@ -235,9 +278,37 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         i
                     }
                     19 => error!("reserved {}", b1),
-                    20 => error!("unimplemented: put"),
-                    21 => error!("unimplemented: get"),
-                    22 => error!("unimplemented: ifelse"),
+                    20 => { // val i put (12 20) –
+                        trace!("put");
+                        let idx = s.pop()?.to_int()?;
+                        let val = s.pop()?;
+                        if idx < 0 || idx as usize >= TRANSIENT_SIZE {
+                            error!("put: transient array index {} out of range (0..{})", idx, TRANSIENT_SIZE);
+                        }
+                        s.transient[idx as usize] = val;
+                        i
+                    }
+                    21 => { // i get (12 21) val
+                        trace!("get");
+                        let idx = s.pop()?.to_int()?;
+                        if idx < 0 || idx as usize >= TRANSIENT_SIZE {
+                            error!("get: transient array index {} out of range (0..{})", idx, TRANSIENT_SIZE);
+                        }
+                        s.push(s.transient[idx as usize]);
+                        i
+                    }
+                    22 => { // num1 num2 v1 v2 ifelse (12 22) v
+                        // TN5177 §4.4: "if v1 <= v2 then num1 else num2". The two
+                        // values compared are the *top* pair and the two returned are
+                        // the values underneath them — the reverse of a C `? :`.
+                        trace!("ifelse");
+                        let v2 = s.pop()?.to_float();
+                        let v1 = s.pop()?.to_float();
+                        let num2 = s.pop()?;
+                        let num1 = s.pop()?;
+                        s.push(if v1 <= v2 { num1 } else { num2 });
+                        i
+                    }
                     23 => { // random (12 23) num2
                         trace!("random");
                         use rand::{thread_rng, Rng};
@@ -278,7 +349,9 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     }
                     29 => { // numX ... num0 i index (12 29) numX ... num0 numi
                         trace!("index");
-                        let j = s.pop()?.to_usize()?.max(0);
+                        let j = s.pop()?.to_int()?;
+                        // TN5177 §4.4: "if i is negative, the top element is copied".
+                        let j = if j < 0 { 0 } else { j as usize };
                         require!(j < s.stack.len());
                         let idx = s.stack.len() - j - 1;
                         let val = s.stack[idx];
@@ -290,8 +363,8 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         let j = s.pop()?.to_int()?;
                         let n = s.pop()?.to_usize()?;
                         let len = s.stack.len();
-                        require!(n < len);
-                        let slice = &mut s.stack[len - n - 1 .. len - 1];
+                        require!(n <= len);
+                        let slice = &mut s.stack[len - n .. len];
                         if j > 0 {
                             let j = j as usize;
                             require!(j < n);
@@ -321,7 +394,30 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     36 => { // |- dx1 dy1 dx2 dy2 dx3 dx4 dx5 dy5 dx6 hflex1 (12 36) |-
                         trace!("hflex1");
                         let slice = s.stack.as_slice();
-                        bezier!(s, slice, xy xy x  x xy x);
+                        require!(slice.len() >= 9);
+
+                        // `hflex1` is only legal when the starting and ending points
+                        // share their y-value, so the last delta is not 0 but the one
+                        // that brings the curve back: dy6 = -(dy1 + dy2 + dy5).
+                        let dy6 = -(slice[1].to_float()
+                            + slice[3].to_float()
+                            + slice[7].to_float());
+
+                        let mut iter = slice.iter();
+                        let c1 = s.current + point!(iter, xy);
+                        let c2 = c1 + point!(iter, xy);
+                        let join = c2 + point!(iter, x);
+                        s.contour.push_cubic(c1, c2, join);
+
+                        let c3 = join + point!(iter, x);
+                        let c4 = c3 + point!(iter, xy);
+                        let dx6 = {
+                            let &dx6 = expect!(iter.next(), "stack empty");
+                            dx6.to_float()
+                        };
+                        let end = c4 + v(dx6, dy6);
+                        s.contour.push_cubic(c3, c4, end);
+                        s.current = end;
                         s.stack.clear();
                         i
                     }
@@ -358,7 +454,35 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
             13 => error!("reserved {}", b0),
             14 => { //– endchar (14) ⊦
                 trace!("endchar");
-                maybe_width(s, |n| n == 0);
+                // TN5177 Appendix C: with four arguments (and optionally a leading
+                // width) `endchar` is the deprecated `seac` form, adx ady bchar achar;
+                // the composition happens where the other glyphs are known. FreeType's
+                // interpreter (`psintrp.c`, `cf2_cmdENDCHAR`) wants precisely four
+                // operands left at this point; extra values are producer garbage, and
+                // composing with them draws the wrong glyph.
+                maybe_width(s, |n| n == 0 || n == 4);
+                if s.stack.len() == 4 {
+                    let adx = s.stack[0].to_float();
+                    let ady = s.stack[1].to_float();
+                    let bchar = s.stack[2].to_float();
+                    let achar = s.stack[3].to_float();
+                    if !(0.0 ..= 255.0).contains(&bchar) || !(0.0 ..= 255.0).contains(&achar) {
+                        warn!("endchar seac: character code out of range ({bchar}, {achar})");
+                    } else {
+                        s.seac = Some(Seac {
+                            adx, ady,
+                            // TN5177 Appendix C: the Type 2 form carries no side
+                            // bearings — the accent is placed at plain `(adx, ady)`.
+                            sbx: 0.0,
+                            asb: 0.0,
+                            base: bchar as u8,
+                            accent: achar as u8,
+                        });
+                    }
+                } else if s.stack.len() > 4 {
+                    warn!("endchar with {} operands is not a seac, ignoring them",
+                          s.stack.len());
+                }
                 s.contour.close();
                 s.done = true;
                 i
@@ -467,7 +591,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 trace!("globalsubr#{}", subr_nr as i32 + ctx.global_subr_bias);
                 
                 let subr = ctx.global_subr(subr_nr)?;
-                charstring(subr, ctx, s)?;
+                call_subr(subr, ctx, s)?;
                 i
             }
             30 => { // |- dy1 dx2 dy2 dx3 {dxa dxb dyb dyc dyd dxe dye dxf}* dyf? vhcurveto (30) |-

@@ -25,44 +25,41 @@ impl CMap {
         self.single_codepoint.iter().map(|(&cp, &gid)| (cp, GlyphId(gid)))
     }
     pub fn codepoints(&self, max_ranges: usize) -> Vec<RangeInclusive<u32>> {
-        use itertools::Itertools;
-
         let mut codepoints: Vec<u32> = self.single_codepoint.keys().cloned().collect();
-        codepoints.sort();
-        let num_gaps = codepoints.iter().cloned().tuple_windows().filter(|&(a, b)| a + 1 != b).count();
-        let mut ranges = Vec::with_capacity(num_gaps + 1);
-        let mut codepoints = codepoints.into_iter();
-        if let Some(mut start) = codepoints.next() {
-            let mut current = start;
-            for cp in codepoints {
-                if cp == current + 1 {
-                    current = cp;
-                    continue;
-                }
-                ranges.push(start ..= current);
-                start = cp;
-                current = cp;
+        codepoints.sort_unstable();
+        codepoints.dedup();
+
+        // Walk the sorted codepoints into maximal runs.
+        let mut ranges: Vec<RangeInclusive<u32>> = Vec::new();
+        for cp in codepoints {
+            match ranges.last_mut() {
+                Some(last) if last.end().checked_add(1) == Some(cp) => *last = *last.start() ..= cp,
+                _ => ranges.push(cp ..= cp),
             }
         }
 
-        let mut tmp = Vec::with_capacity(ranges.len());
-        while ranges.len() > max_ranges {
-            tmp.clear();
-            let min_gap = ranges.iter().tuple_windows().map(|(a, b)| *b.start() - *a.end()).min().unwrap();
-            let mut ranges_iter = ranges.iter().cloned();
-            if let Some(mut prev) = ranges_iter.next() {
-                for next in ranges_iter {
-                    if next.start() - prev.end() > min_gap * 2 {
-                        tmp.push(prev);
-                        prev = next;
-                    } else {
-                        prev = *prev.start() ..= *next.end();
-                    }
-                }
-            } else {
-                break;
+        // Reduce to `max_ranges` runs. Closing the boundary between two runs costs
+        // exactly the gap in front of it, so the widest gaps stay open and every other boundary
+        // is closed. That is one sort of the gaps, instead of a full rescan and a `splice` for
+        // every merge — the old loop was O(n²) on a font whose codepoints are scattered.
+        let max_ranges = max_ranges.max(1);
+        if ranges.len() > max_ranges {
+            let mut gaps: Vec<(u32, usize)> = (1 .. ranges.len())
+                .map(|ix| (ranges[ix].start() - ranges[ix - 1].end() - 1, ix))
+                .collect();
+            // Widest first; equal gaps are broken by position so the result is stable.
+            gaps.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            gaps.truncate(max_ranges - 1);
+            gaps.sort_unstable_by_key(|&(_, ix)| ix);
+
+            let mut merged: Vec<RangeInclusive<u32>> = Vec::with_capacity(max_ranges);
+            let mut start = *ranges[0].start();
+            for &(_, ix) in &gaps {
+                merged.push(start ..= *ranges[ix - 1].end());
+                start = *ranges[ix].start();
             }
-            std::mem::swap(&mut ranges, &mut tmp);
+            merged.push(start ..= *ranges[ranges.len() - 1].end());
+            return merged;
         }
 
         ranges
@@ -75,7 +72,7 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
     
     let mut cmap = HashMap::new();
     let mut cmap2 = HashMap::new();
-    let mut cmap3 = Vec::new();
+    let mut cmap3 = Vec::with_capacity(usize::from(num_tables.min(8)));
     let mut cmap_encoding = None;
 
     let have_unicode = iterator(i, tuple((be_u16, be_u16, be_u32))).take(num_tables as usize)
@@ -102,6 +99,16 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
             None => continue
         };
         
+        let (i, format) = be_u16(table)?;
+        debug!("cmap format {}", format);
+        if !matches!(format, 0 | 4 | 6 | 12 | 14) {
+            // OT §cmap: a font may carry several subtables of different formats and the reader
+            // picks the best one it understands.  An unsupported format must not hide the
+            // others, so skip this encoding record and keep looking.
+            warn!("unsupported cmap format {}, skipping this subtable", format);
+            continue;
+        }
+
         match (cmap_encoding, encoding) {
             (None, e) => cmap_encoding = Some(e),
             (Some(c), e) => {
@@ -112,8 +119,6 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
             }
         }
 
-        let (i, format) = be_u16(table)?;
-        debug!("cmap format {}", format);
         match format {
             0 => {
                 let (i, len) = be_u16(i)?;
@@ -128,12 +133,14 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
             }
             4 => {
                 let (i, len) = be_u16(i)?;
-                //let (_i, data) = t!(take(len - 4)(i)); // aleady have 4 header bytes
-                let data = if i.len() < len as usize - 4 {
+                // `len` counts the whole subtable; 4 header bytes are already consumed.
+                // `saturating_sub`: a malformed `len < 4` is not a length, keep what we have.
+                let body_len = (len as usize).saturating_sub(4);
+                let data = if i.len() < body_len {
                     warn!("not enough data. trying anyway");
                     i
                 } else {
-                    &i[.. len as usize - 4]
+                    &i[.. body_len]
                 };
                 
                 let (i, _language) = be_u16(data)?;
@@ -146,6 +153,7 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
                 let (i, startCode) = take(segCountX2)(i)?;
                 let (i, idDelta) = take(segCountX2)(i)?;
                 let (glyph_data, idRangeOffset) = take(segCountX2)(i)?;
+                let seg_count_x2 = segCountX2 as usize;
                 for (n, T4(start, end, delta, offset)) in T4(
                     iterator(startCode, be_u16),
                     iterator(endCode, be_u16),
@@ -165,12 +173,24 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
                             }
                         }
                     } else {
+                        // OT §cmap format 4: idRangeOffset[n] is an address relative to
+                        // `&idRangeOffset[n]`.  `glyph_data` is what follows the whole
+                        // idRangeOffset array (nom's `take` returns the rest first), so the
+                        // start of that array sits `segCountX2` bytes before `glyph_data[0]`.
+                        // All of this in `usize`: the operands are u16, the sum is not.
                         for c in start ..= end {
-                            let index = 2 * (n as u16 + (c - start)) + offset - segCountX2;
-                            if index as usize > glyph_data.len() - 2 {
+                            let index = 2 * n + offset as usize + 2 * (c - start) as usize;
+                            // A malformed offset can point before the array (underflow) or past
+                            // the subtable. Drop the rest of the segment instead of panicking
+                            // on the subtraction or reading a neighbouring byte.
+                            let index = match index.checked_sub(seg_count_x2) {
+                                Some(index) => index,
+                                None => break,
+                            };
+                            if index + 2 > glyph_data.len() {
                                 break;
                             }
-                            let (_, gid) = be_u16(slice!(glyph_data, index as usize ..))?;
+                            let (_, gid) = be_u16(slice!(glyph_data, index ..))?;
                             let gid = gid.wrapping_add(delta);
                             if gid != 0 {
                                 trace!("codepoint {} -> gid {}", c, gid);
@@ -237,7 +257,7 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
                     }
                 }
             }
-            n => error!("cmap format {}", n),
+            n => warn!("cmap format {} is not implemented", n),
         }
     }
 

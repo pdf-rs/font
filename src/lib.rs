@@ -27,6 +27,22 @@ pub struct Glyph {
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct GlyphId(pub u32);
 
+/// Where one glyph of a run has to go: the adjustments a `GPOS` lookup applied to it (OT §GPOS).
+///
+/// All four values are in font units and are added to the glyph's own metrics and origin;
+/// `Default` — all zeros — is "unmoved", which is also what a font without `GPOS` produces.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlyphPosition {
+    /// Added to the glyph's horizontal advance.
+    pub x_advance: i16,
+    /// Added to the glyph's vertical advance.
+    pub y_advance: i16,
+    /// Added to the glyph's horizontal origin.
+    pub x_offset: i16,
+    /// Added to the glyph's vertical origin.
+    pub y_offset: i16,
+}
+
 #[derive(Copy, Clone)]
 pub struct VMetrics {
     pub line_gap: f32,
@@ -47,9 +63,15 @@ pub struct Name {
     pub full_name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Info {
     pub weight: Option<u16>,
+    /// `OS/2` `sxHeight`, in font units (fonts may not carry it).
+    pub x_height: Option<f32>,
+    /// `OS/2` `sCapHeight`, in font units (fonts may not carry it).
+    pub cap_height: Option<f32>,
+    /// `OS/2` `ulUnicodeRange1..4`, the bit set of Unicode blocks the font covers.
+    pub unicode_ranges: [u32; 4],
 }
 
 pub trait Font: 'static {
@@ -122,6 +144,30 @@ pub trait Font: 'static {
     fn vmetrics(&self) -> Option<VMetrics> {
         None
     }
+
+    /// Apply the font's `GSUB` substitutions to a run of glyphs, in the font's default
+    /// language system.
+    ///
+    /// `features` lists the OpenType feature tags to enable, e.g. `b"liga"` for the standard
+    /// f-ligatures and `b"rlig"` for required ligatures; an empty list enables nothing.
+    /// Lookup types 1–6 and 8 are applied — single, multiple, alternate, ligature and both
+    /// kinds of contextual substitution, including the lookups those rules call. Only the
+    /// OpenType lookups' own glyph filtering (`GDEF` mark attachment classes) is left out.
+    /// Backends without `GSUB` return the run unchanged.
+    fn substitute(&self, glyphs: &[GlyphId], features: &[&[u8; 4]]) -> Vec<GlyphId> {
+        let _ = features;
+        glyphs.to_vec()
+    }
+
+    /// Apply the font's `GPOS` positioning to a run of glyphs, in the font's default language
+    /// system: one `GlyphPosition` per input glyph, in input order.
+    ///
+    /// `features` is the same list of feature tags as [`Font::substitute`]. A backend without
+    /// `GPOS`, or a run no enabled feature touches, yields all-default positions.
+    fn position(&self, glyphs: &[GlyphId], features: &[&[u8; 4]]) -> Vec<GlyphPosition> {
+        let _ = features;
+        vec![GlyphPosition::default(); glyphs.len()]
+    }
     
     /// Kerning distance for the given glyph pair
     fn kerning(&self, _left: GlyphId, _right: GlyphId) -> f32 {
@@ -179,6 +225,9 @@ mod postscript;
 pub mod opentype;
 mod parsers;
 mod eexec;
+
+#[cfg(any(feature="woff", feature="svg"))]
+mod inflate_limited;
 
 #[cfg(feature="woff")]
 mod woff;
@@ -323,6 +372,21 @@ pub struct Context<T=(), U=()> {
     pub global_subr_bias: i32,
 }
 
+/// How deep `callsubr`/`callgsubr` may nest before the charstring is rejected.
+///
+/// TN5177 §4.4 and Adobe's implementations limit Type 2 subroutine nesting to 10
+/// levels; Type 1 fonts rarely exceed one or two. A recursive subr (a subr calling
+/// itself) has no bound of its own, so without this limit a small malicious font
+/// overflows the native stack and kills the process instead of failing that one glyph.
+/// 16 leaves room for the fonts that nest a little deeper than the spec allows.
+pub const MAX_SUBR_DEPTH: u32 = 16;
+
+/// Entries in the Type 2 transient array that `put` (12 20) and `get` (12 21) address.
+///
+/// TN5177 §4.4 leaves the size to the implementation; Adobe's has 32 entries, and no
+/// real font is known to use more.
+pub const TRANSIENT_SIZE: usize = 32;
+
 impl<T, U> Context<T, U> where T: TryIndex, U: TryIndex {
     #[inline]
     pub fn subr(&self, idx: i32) -> Result<&[u8], FontError> {
@@ -351,7 +415,54 @@ pub struct State {
     pub stem_hints: u32,
     pub delta_width: Option<f32>,
     pub first_stack_clearing_operator: bool,
-    pub flex_sequence: Option<Vec<Vector2F>>
+    pub flex_sequence: Option<Vec<Vector2F>>,
+    /// Current depth of `callsubr`/`callgsubr` nesting; guards against cyclic subrs
+    /// recursing until the process runs out of stack (see `MAX_SUBR_DEPTH`).
+    pub subr_depth: u32,
+    /// The Type 2 transient array addressed by `put` (12 20) and `get` (12 21);
+    /// `TRANSIENT_SIZE` entries, all zero at the start of each glyph.
+    pub transient: [Value; TRANSIENT_SIZE],
+    /// Set by Type 1 `seac` (12 6) and Type 2 `endchar` with four arguments: the glyph
+    /// is not drawn by its own charstring but composed of two other glyphs.
+    pub seac: Option<Seac>
+}
+
+/// A `seac` accent composition: the base and accent characters, given as
+/// StandardEncoding codes, with the accent shifted relative to the origin of the
+/// base character (T1 §6; TN5177 Appendix C for the Type 2 form).
+///
+/// The shift is `adx + sbx - asb` horizontally and `ady` vertically:
+/// Type 1 measures `adx` from the composite character's own left side bearing, and
+/// the accent's `asb` operand is its left side bearing, which the accent's outline
+/// already carries — FreeType `psaux/t1decode.c::t1operator_seac` does exactly
+/// `adx += left_bearing.x` and then places the accent at `adx - asb`. The Type 2
+/// form (TN5177 Appendix C) has no side-bearing operands, so `sbx` and `asb` are 0
+/// there and the shift is plain `(adx, ady)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Seac {
+    /// Horizontal displacement, measured from the composite's left edge in Type 1.
+    pub adx: f32,
+    /// Vertical displacement, measured from the base character's baseline.
+    pub ady: f32,
+    /// The composite charstring's own left side bearing (`hsbw`/`hsbw`-less ⇒ 0).
+    pub sbx: f32,
+    /// The accent's left side bearing operand of the `seac` operator.
+    pub asb: f32,
+    pub base: u8,
+    pub accent: u8,
+}
+
+impl Seac {
+    /// The composed outline: `base` with `accent` drawn on top, the accent translated
+    /// by `(adx + sbx - asb, ady)` from the base character's origin.
+    pub fn compose(&self, mut base: Outline, accent: Outline) -> Outline {
+        let dx = self.adx + self.sbx - self.asb;
+        let accent = accent.transformed(&Transform2F::from_translation(v(dx, self.ady)));
+        for contour in accent.contours() {
+            base.push_contour(contour.clone());
+        }
+        base
+    }
 }
 
 impl State {
@@ -368,7 +479,10 @@ impl State {
             stem_hints: 0,
             delta_width: None,
             first_stack_clearing_operator: true,
-            flex_sequence: None
+            flex_sequence: None,
+            subr_depth: 0,
+            transient: [Value::Int(0); TRANSIENT_SIZE],
+            seac: None
         }
     }
     #[inline]
@@ -384,6 +498,9 @@ impl State {
         self.delta_width = None;
         self.first_stack_clearing_operator = true;
         self.flex_sequence = None;
+        self.subr_depth = 0;
+        self.transient = [Value::Int(0); TRANSIENT_SIZE];
+        self.seac = None;
     }
 
     #[inline]
@@ -434,19 +551,6 @@ impl State {
 pub trait IResultExt {
     type Item;
     fn get(self) -> Result<Self::Item, FontError>;
-}
-
-fn print_err(e: nom::Err<VerboseError<&[u8]>>) -> ! {
-    match e {
-        Incomplete(_) => panic!("need more data"),
-        Error(v) | Failure(v) => {
-            for (i, e) in v.errors {
-                println!("{:?} {:?}", &i[.. i.len().min(20)], e);
-                println!("{:?}", String::from_utf8_lossy(&i[.. i.len().min(20)]));
-            }
-            panic!()
-        }
-    }
 }
 
 impl<T> IResultExt for IResult<&[u8], T, VerboseError<&[u8]>> {

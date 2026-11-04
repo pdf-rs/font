@@ -2,7 +2,6 @@ use std::convert::TryInto;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{Read, Cursor};
-use inflate::inflate_bytes_zlib;
 use brotli_decompressor::{Decompressor};
 
 use crate::{
@@ -22,14 +21,22 @@ use nom::{
     combinator::map
 };
 
+/// How large one uncompressed WOFF table may be. A real font's largest table runs
+/// to a few MiB; the cap keeps a hostile `origLength` of 4 GiB from being believed.
+const MAX_TABLE_BYTES: usize = 256 * 1024 * 1024;
+
+/// How large the uncompressed sfnt of a WOFF2 file may be. Its header states it, every
+/// table's length is charged against it before a buffer is allocated for that table.
+const MAX_SFNT_BYTES: usize = 256 * 1024 * 1024;
+
 
 pub fn parse_woff(data: &[u8]) -> Result<OpenTypeFont, FontError> {
     let (i, _) = tag(b"wOFF")(data)?;
     let (i, flavor) = take(4usize)(i)?;
-    let (i, _length) = be_u32(i)?;
+    let (i, length) = be_u32(i)?;
     let (i, num_tables) = be_u16(i)?;
     let (i, _reserved) = be_u16(i)?;
-    let (i, _total_sfnt_size) = be_u32(i)?;
+    let (i, total_sfnt_size) = be_u32(i)?;
     let (i, _major_version) = be_u16(i)?;
     let (i, _minor_version) = be_u16(i)?;
     let (i, _meta_offset) = be_u32(i)?;
@@ -38,22 +45,59 @@ pub fn parse_woff(data: &[u8]) -> Result<OpenTypeFont, FontError> {
     let (i, _priv_offset) = be_u32(i)?;
     let (i, _priv_length) = be_u32(i)?;
     
-    let (mut i, tables_dir) = count(woff_dir_entry, num_tables as usize)(i)?;
+    let (_, tables_dir) = count(woff_dir_entry, num_tables as usize)(i)?;
+    
+    // WOFF §"WOFF Header": `length` is the size of the whole file and `totalSfntSize` the
+    // size of the equivalent uncompressed sfnt; neither is used to read the tables, but a
+    // file that cannot hold its own header is broken.
+    if (length as usize) > data.len() {
+        warn!("WOFF claims a length of {} bytes, the file has {}", length, data.len());
+    }
+    let min_sfnt_size = 12 + 16 * num_tables as u32;
+    if total_sfnt_size < min_sfnt_size {
+        return Err(FontError::Other(format!(
+            "WOFF: totalSfntSize {} cannot hold {} table directories", total_sfnt_size, num_tables)));
+    }
     
     if flavor == b"ttcf" {
-        unimplemented!()
+        // WOFF §"WOFF Header": flavor `ttcf` marks a collection; there is no reader for those.
+        error!("WOFF font collections are not implemented yet")
     }
     
     let mut tables = HashMap::with_capacity(num_tables as usize);
     for entry in tables_dir {
         debug!("{}", String::from_utf8_lossy(&entry.tag));
-        let data = if entry.comp_length < entry.orig_length {
-            let compressed_data = parse(&mut i, take((entry.comp_length as usize + 3) & !3))?;
-            let orig_data = inflate_bytes_zlib(slice!(compressed_data, .. entry.comp_length as usize)).expect("can't decompress data");
+        // WOFF §"Table Directory": `offset` is the position of this table in the file.
+        // Tables are only required to be 4-byte aligned, not contiguous and not in the
+        // order the directory lists them.
+        let compressed = entry.comp_length < entry.orig_length;
+        let length = if compressed { entry.comp_length } else { entry.orig_length } as usize;
+        let start = entry.offset as usize;
+        let padded = (length + 3) & !3;
+        let chunk = match data.get(start .. start + padded) {
+            Some(chunk) => chunk,
+            None => return Err(FontError::Other(format!(
+                "WOFF: table {} at offset {} ({} bytes) runs past the end of the file",
+                String::from_utf8_lossy(&entry.tag), start, padded))),
+        };
+        let data = if compressed {
+            // WOFF §"Table Directory": a table marked compressed must decompress, and
+            // `origLength` says to how much. `inflate_bytes_zlib` would believe the stream
+            // instead and decode as much as it likes, so the length is a cap.
+            if entry.orig_length as usize > MAX_TABLE_BYTES {
+                return Err(FontError::Other(format!(
+                    "WOFF: table {} claims {} bytes, more than a table may have",
+                    String::from_utf8_lossy(&entry.tag), entry.orig_length)));
+            }
+            let orig_data = match crate::inflate_limited::zlib(
+                slice!(chunk, .. entry.comp_length as usize), entry.orig_length as usize)
+            {
+                Ok(data) => data,
+                Err(e) => return Err(FontError::Other(format!("can't decompress {}: {:?}", String::from_utf8_lossy(&entry.tag), e)))
+            };
             require_eq!(orig_data.len(), entry.orig_length as usize);
             Cow::Owned(orig_data)
         } else {
-            let chunk = parse(&mut i, take((entry.orig_length as usize + 3) & !3))?;
             Cow::Borrowed(slice!(chunk, .. entry.orig_length as usize))
         };
         tables.insert(entry.tag, data);
@@ -88,7 +132,7 @@ pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
     let (i, _length) = be_u32(i)?;
     let (i, num_tables) = be_u16(i)?;
     let (i, _reserved) = be_u16(i)?;
-    let (i, _total_sfnt_size) = be_u32(i)?;
+    let (i, total_sfnt_size) = be_u32(i)?;
     let (i, total_compressed_size) = be_u32(i)?;
     let (i, _major_version) = be_u16(i)?;
     let (i, _minor_version) = be_u16(i)?;
@@ -105,11 +149,31 @@ pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
     }
     
     let mut decompressor = Decompressor::new(Cursor::new(slice!(i,  .. total_compressed_size as usize)), 1024);
+    // WOFF2 §"WOFF2 Header": `totalSfntSize` is the size of the equivalent uncompressed sfnt,
+    // and the tables together are exactly that large. It is a claim by the file, so it is
+    // capped, and each table's length is charged against it before a buffer that large is
+    // allocated: `entry.length` alone would allow a 4 GiB allocation.
+    if total_sfnt_size as usize > MAX_SFNT_BYTES {
+        return Err(FontError::Other(format!(
+            "WOFF2: totalSfntSize {} is larger than a font may be", total_sfnt_size)));
+    }
+    let mut left = match (total_sfnt_size as usize).checked_sub(12 + 16 * num_tables as usize) {
+        Some(left) => left,
+        None => return Err(FontError::Other(format!(
+            "WOFF2: totalSfntSize {} cannot hold {} table directories", total_sfnt_size, num_tables))),
+    };
     let mut entries = HashMap::new();
     for (&tag, entry) in &entry_tables {
         debug!("tag: {:?} ({:?}) {:?}", tag, std::str::from_utf8(&tag), entry);
+        left = match left.checked_sub(entry.length as usize) {
+            Some(left) => left,
+            None => return Err(FontError::Other(format!(
+                "WOFF2: the tables are longer than totalSfntSize {} allows", total_sfnt_size))),
+        };
         let mut buf = vec![0; entry.length as usize];
-        decompressor.read_exact(&mut buf).expect("decode failed");
+        if let Err(e) = decompressor.read_exact(&mut buf) {
+            return Err(FontError::Other(format!("can't decode table {:?}: {}", String::from_utf8_lossy(&tag), e)));
+        }
         entries.insert(tag, buf);
     }
     require_eq!(decompressor.bytes().count(), 0);
@@ -117,11 +181,11 @@ pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
     let tables = Tables { entries };
     
     let hmtx = tables.get(b"hmtx").map(|hmtx_data| {
-        let head = parse_head(tables.get(b"head").expect("no head"))?;
-        let hhea = parse_hhea(tables.get(b"hhea").expect("no hhea"))?;
-        let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp"))?;
+        let head = parse_head(expect!(tables.get(b"head"), "no head"))?;
+        let hhea = parse_hhea(expect!(tables.get(b"hhea"), "no hhea"))?;
+        let maxp = parse_maxp(expect!(tables.get(b"maxp"), "no maxp"))?;
         match entry_tables[b"hmtx"].flags {
-            0 => parse_hmtx(&hmtx_data, &hhea, &maxp).get(),
+            0 => parse_hmtx(&hmtx_data, &hhea, &maxp),
             1 => parse_hmtx_woff2_format1(&hmtx_data, &head, &hhea, &maxp).get(),
             f => error!("invalid flag for hmtx: {}", f)
         }
@@ -131,9 +195,9 @@ pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
         match entry_tables[b"glyf"].flags {
             0 => parse_glyf_t0(&glyf_data),
             3 => {
-                let head = parse_head(tables.get(b"head").expect("no head"))?;
-                let maxp = parse_maxp(tables.get(b"maxp").expect("no maxp"))?;
-                let loca = parse_loca(tables.get(b"loca").expect("no loca"), &head, &maxp)?;
+                let head = parse_head(expect!(tables.get(b"head"), "no head"))?;
+                let maxp = parse_maxp(expect!(tables.get(b"maxp"), "no maxp"))?;
+                let loca = parse_loca(expect!(tables.get(b"loca"), "no loca"), &head, &maxp)?;
                 parse_shapes(&loca, glyf_data)
             }
             f => error!("invalid flag for glyf: {}", f)
@@ -163,7 +227,7 @@ fn parse_glyf_t0(i: &[u8]) -> Result<Vec<Shape>, FontError> {
     
     let bbox_bitmap_len = (num_glyphs as u32 + 7) / 8;
     let (i, _bbox_bitmap) = take(bbox_bitmap_len)(i)?;
-    let (i, _bbox_stream) = take(bbox_stream_size - bbox_bitmap_len)(i)?;
+    let (i, _bbox_stream) = take(expect!(bbox_stream_size.checked_sub(bbox_bitmap_len), "bbox stream shorter than its bitmap"))(i)?;
     let (i, _instruction_stream) = take(instruction_stream_size)(i)?;
     
     let contours = iterator(n_contour_stream, be_i16);
@@ -178,39 +242,51 @@ fn parse_glyf_t0(i: &[u8]) -> Result<Vec<Shape>, FontError> {
             -1 => glyphs.push(parse(&mut composite_stream, compound)?),
             n if n > 0 => {
                 let mut outline = Outline::new();
-                let (mut x, mut y) = (0i16, 0i16);
+                // WOFF2 §"Triplet Encoding": each point is a delta from the one before, so the
+                // running position is a sum over the whole contour. Accumulating in `i16`
+                // overflows on a font whose points drift past ±32767, so it is
+                // summed in `i32` and turned into coordinates at the end.
+                let (mut x, mut y) = (0i32, 0i32);
                 for n_points in (&mut points).take(n_contour as usize) {
-                    let mut counter = 0;
-                    let points = (&mut flags).take(n_points as usize).map(|flag| {
+                    // The flag stream and the glyph stream are separate, so a truncated font
+                    // runs out of flags here — that must be an error, not a panic.
+                    let mut contour_points = Vec::with_capacity(n_points as usize);
+                    for _ in 0 .. n_points {
+                        let flag = expect!((&mut flags).next(), "flag stream ended");
                         let on_curve = flag & 0x80 == 0;
                         let triplet = TRIPLET_LUT[(flag & 0x7F) as usize];
                         use nom::error::{ErrorKind};
                         //debug!("{:02x} {:02x} {:02x} {:02x}", glyph_stream[0], glyph_stream[1], glyph_stream[2], glyph_stream[3]);
-                        let (vx, vy): (i16, i16) = parse(&mut glyph_stream,
+                        // `bits()` reports a plain nom error, which has no `From` into
+                        // `FontError`; a truncated glyph stream is an error, not a panic.
+                        let (vx, vy): (i16, i16) = match parse(&mut glyph_stream,
                             bits::<_, _, (_, ErrorKind), (_, ErrorKind), _>(
                                 tuple((
                                     take_bits(triplet.x_bits()),
                                     take_bits(triplet.y_bits())
                                 ))
                             )
-                        )?;
+                        ) {
+                            Ok(v) => v,
+                            Err(e) => return Err(FontError::Other(format!(
+                                "glyph stream: can't read a point triple: {:?}", e)))
+                        };
                         let sign = |is_minus| if is_minus { -1 } else { 1 };
-                        x += sign(triplet.x_minus()) * (vx + triplet.dx() as i16);
-                        y += sign(triplet.y_minus()) * (vy + triplet.dy() as i16);
-                        counter += 1;
-                        
-                        (on_curve, Vector2F::new(x as f32, y as f32))
-                    });
-                    if let Some(contour) = contour(points) {
+                        let (step_x, step_y) = (i32::from(vx) + i32::from(triplet.dx()),
+                                                i32::from(vy) + i32::from(triplet.dy()));
+                        x += sign(triplet.x_minus()) * step_x;
+                        y += sign(triplet.y_minus()) * step_y;
+
+                        contour_points.push((on_curve, Vector2F::new(x as f32, y as f32)));
+                    }
+                    if let Some(contour) = contour(contour_points.into_iter()) {
                         outline.push_contour(contour);
                     }
-                    // don't care about it… but it needs to be removed from the stream
-                    require_eq!(counter, n_points);
                 }
                 glyphs.push(Shape::Simple(outline));
                 let _num_instructions = parse(&mut glyph_stream, varint_u16)?;
             }
-            _ => panic!("invalid number of contours")
+            n => error!("invalid number of contours: {}", n)
         }
     }
     

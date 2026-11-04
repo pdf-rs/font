@@ -5,11 +5,11 @@ use nom::{IResult,
 use tuple::{TupleElements};
 use itertools::Itertools;
 use indexmap::IndexMap;
-use crate::{Font, Glyph, State, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId, Name, Value, Info, FontError};
+use crate::{Font, Glyph, State, Seac, v, R, IResultExt, Context, HMetrics, TryIndex, GlyphId, Name, Value, Info, FontError, MAX_SUBR_DEPTH};
 use crate::postscript::{Vm, RefItem};
 use crate::eexec::Decoder;
 use crate::parsers::parse;
-use pdf_encoding::{glyphname_to_unicode};
+use pdf_encoding::{glyphname_to_unicode, Encoding};
 use pathfinder_geometry::{
     transform2d::Transform2F,
     vector::Vector2F,
@@ -83,7 +83,16 @@ impl Type1Font {
         let (_font_name, font_dict) = expect!(vm.fonts().nth(0), "no font in vm");
         
         let private_dict = expect!(font_dict.get_dict("Private"), "no /Private dict");
-        let len_iv = private_dict.get_int("lenIV").unwrap_or(4) as usize;
+        // `lenIV` is the number of random bytes prepended before encryption; a negative
+        // value (conventionally -1) means the charstrings are *not* encrypted at all,
+        // so they must be used verbatim (TN5015 §2, PLRM `lenIV`).
+        let len_iv_value = private_dict.get_int("lenIV").unwrap_or(4);
+        let len_iv = if len_iv_value < 0 {
+            warn!("Type 1 font has lenIV {len_iv_value}: charstrings are stored unencrypted");
+            None
+        } else {
+            Some(len_iv_value as usize)
+        };
         let font_info = font_dict.get_dict("FontInfo");
         
         debug!("FontDict keys: {:?}", font_dict.iter().map(|(k, _)| k).format(", "));
@@ -114,8 +123,22 @@ impl Type1Font {
         
         let mut subrs = Vec::new();
         if let Some(arr) = private_dict.get_array("Subrs") {
-            for item in arr.iter() {
-                subrs.push(item.as_bytes().map(|data| Decoder::charstring().decode(data, len_iv)));
+            subrs.reserve(arr.len());
+            for (i, item) in arr.iter().enumerate() {
+                let decoded = match item.as_bytes() {
+                    Some(data) => {
+                        let r = decode_charstring(data, len_iv);
+                        if r.is_none() {
+                            warn!("subr {i} is shorter than lenIV; skipped");
+                        }
+                        r
+                    }
+                    None => {
+                        warn!("subr {i} is not a string; skipped");
+                        None
+                    }
+                };
+                subrs.push(decoded);
             }
         }
 
@@ -126,15 +149,29 @@ impl Type1Font {
             global_subrs: ()
         };
 
-        let encoding = font_dict.get("Encoding").expect("no /Encoding").as_array().expect("/Encoding is not an array");
+        // PLRM §5.6: `/Encoding` is optional, and it may be a name (`/StandardEncoding`)
+        // instead of an array. This VM does not resolve such a name back to an array, so
+        // "no encoding" means the glyphs are only reachable by name — it must not abort
+        // the font.
+        let encoding = font_dict.get("Encoding").and_then(|item| item.as_array());
+        if encoding.is_none() {
+            warn!("Type 1 font has no /Encoding array; codepoint lookup is empty");
+        }
         
         let mut glyphs = IndexMap::with_capacity(char_strings.len());
         let mut unicode_map = HashMap::with_capacity(char_strings.len());
+        let mut seac_glyphs = Vec::new();
         let mut state = State::new();
         for (name, item) in char_strings.string_entries() {
             let data = expect!(item.as_bytes(), "data is not bytes");
 
-            let decoded = Decoder::charstring().decode(&data, len_iv);
+            let decoded = match decode_charstring(&data, len_iv) {
+                Some(decoded) => decoded,
+                None => {
+                    warn!("charstring for glyph {name} is shorter than lenIV; skipped");
+                    continue;
+                }
+            };
             //debug!("{} decoded: {:?}", name, String::from_utf8_lossy(&decoded));
             
             if let Err(e) = charstring(&decoded, &context, &mut state) {
@@ -149,6 +186,9 @@ impl Type1Font {
                 },
                 path: state.take_path(),
             });
+            if let Some(seac) = state.seac {
+                seac_glyphs.push((index, seac));
+            }
             state.clear();
 
             if let Some(unicode) = glyphname_to_unicode(name) {
@@ -166,28 +206,63 @@ impl Type1Font {
                 }
             }
         }
-        
-        let mut codepoints = HashMap::with_capacity(encoding.len());
-        let mut codepoint = 0;
-        for item in encoding.iter() {
-            match item {
-                RefItem::Null => {},
-                RefItem::Literal(b".notdef") => {},
-                RefItem::Literal(name) => {
-                    match std::str::from_utf8(name) {
-                        Ok(name) => {
-                            if let Some((index, _, _)) = glyphs.get_full(name) {
-                                codepoints.insert(codepoint, index as u32);
+
+        // T1 §6 second pass: a `seac` glyph is empty on its own — it is the base
+        // character with the accent drawn on top, the accent shifted by (adx, ady)
+        // from the origin of the base. The components can be defined after the
+        // composite, so this cannot be done while decoding the charstrings.
+        for (index, seac) in seac_glyphs {
+            let base = match seac_gid(seac.base, &unicode_map) {
+                Some(gid) => gid,
+                None => {
+                    warn!("seac: no glyph for StandardEncoding base character {}", seac.base);
+                    continue;
+                }
+            };
+            let accent = match seac_gid(seac.accent, &unicode_map) {
+                Some(gid) => gid,
+                None => {
+                    warn!("seac: no glyph for StandardEncoding accent character {}", seac.accent);
+                    continue;
+                }
+            };
+            if base == index || accent == index {
+                warn!("seac: glyph composes itself ({} + {})", base, accent);
+                continue;
+            }
+            let (base_path, accent_path) = match (glyphs.get_index(base), glyphs.get_index(accent)) {
+                (Some((_, base)), Some((_, accent))) => (base.path.clone(), accent.path.clone()),
+                _ => continue,
+            };
+            let path = seac.compose(base_path, accent_path);
+            if let Some((_, glyph)) = glyphs.get_index_mut(index) {
+                glyph.path = path;
+            }
+        }
+
+        let mut codepoints = HashMap::with_capacity(encoding.map(|e| e.len()).unwrap_or(0));
+        if let Some(encoding) = encoding {
+            let mut codepoint = 0;
+            for item in encoding.iter() {
+                match item {
+                    RefItem::Null => {},
+                    RefItem::Literal(b".notdef") => {},
+                    RefItem::Literal(name) => {
+                        match std::str::from_utf8(name) {
+                            Ok(name) => {
+                                if let Some((index, _, _)) = glyphs.get_full(name) {
+                                    codepoints.insert(codepoint, index as u32);
+                                }
+                            }
+                            Err(_) => {
+                                warn!("name not utf8: {:?}", name);
                             }
                         }
-                        Err(_) => {
-                            warn!("name not utf8: {:?}", name);
-                        }
                     }
+                    _ => {}
                 }
-                _ => {}
+                codepoint += 1;
             }
-            codepoint += 1;
         }
 
         let font_matrix = expect!(font_dict.get("FontMatrix"), "no FontMatrix");
@@ -202,9 +277,8 @@ impl Type1Font {
                 Ok(RectF::from_points(Vector2F::new(a, b), Vector2F::new(c, d)))
             }).transpose()?;
         
-        let (a, b, c, d, e, f) = TupleElements::from_iter(
-                font_matrix.iter().map(|item| item.as_f32().unwrap())
-        ).unwrap();
+        let matrix: Vec<f32> = font_matrix.iter().filter_map(|item| item.as_f32()).collect();
+        let (a, b, c, d, e, f) = expect!(TupleElements::from_iter(matrix.into_iter()), "FontMatrix needs 6 numbers");
         
         Ok(Type1Font {
             font_matrix: Transform2F::row_major(a, b, e, c, d, f),
@@ -215,6 +289,7 @@ impl Type1Font {
             name,
             info: Info {
                 weight,
+                .. Info::default()
             }
         })
     }
@@ -222,6 +297,14 @@ impl Type1Font {
     pub fn unicode_names(&self) -> impl Iterator<Item=(GlyphId, &str)> + '_ {
         self.unicode_map.iter().map(|(s, &g)| (GlyphId(g), s.as_str()))
     }
+}
+
+/// The glyph a StandardEncoding character code stands for. T1 §6 identifies the
+/// `seac` components by code, not by name: the code is mapped to the character it
+/// encodes, and that character to the glyph whose name maps to it.
+fn seac_gid(code: u8, unicode_map: &HashMap<TinyString, u32>) -> Option<usize> {
+    let ch = Encoding::AdobeStandard.forward_map()?.get(code)?;
+    unicode_map.get(&TinyString::from(ch)).map(|&gid| gid as usize)
 }
 
 fn parse_binary<'a>(vm: &mut Vm, data: &'a [u8]) {
@@ -247,7 +330,7 @@ fn parse_pfb(mut vm: &mut Vm, i: &[u8]) -> Result<(), FontError> {
         match block_type {
             1 | 2 => {} // continue
             3 => break,
-            n => panic!("unknown block type {}", n)
+            n => error!("unknown PFB block type {}", n)
         }
         
         let (i, block_len) = le_u32(i)?;
@@ -267,6 +350,31 @@ fn parse_pfb(mut vm: &mut Vm, i: &[u8]) -> Result<(), FontError> {
     
     Ok(())
 }
+/// Decrypt one charstring and drop its `lenIV` random leading bytes.
+///
+/// `None` in `len_iv` means the font stores its charstrings unencrypted (`lenIV < 0`,
+/// TN5015 §2), so the bytes are returned untouched. A charstring shorter than `lenIV`
+/// cannot be a valid one — the caller skips it instead of getting an empty string and
+/// failing later with "CharWidth not set".
+fn decode_charstring(data: &[u8], len_iv: Option<usize>) -> Option<Vec<u8>> {
+    match len_iv {
+        None => Some(data.to_vec()),
+        Some(skip) if skip > data.len() => None,
+        Some(skip) => Some(Decoder::charstring().decode(data, skip)),
+    }
+}
+
+/// Append one cubic Bézier to the contour.
+///
+/// Type 1 flex does **not** come through here: the standard flex protocol (T1 §6,
+/// TN5015 §10) collects its seven points as `rmoveto`s between `1 callsubr` and
+/// `0 callsubr`, never as curve operators.
+#[inline]
+fn push_curve(s: &mut State, c1: Vector2F, c2: Vector2F, p: Vector2F) {
+    s.contour.push_cubic(c1, c2, p);
+}
+
+
 pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: &'b mut State) -> Result<(), FontError>
     where T: TryIndex + 'a, U: TryIndex + 'a
 {
@@ -324,7 +432,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let c1 = s.current + v(s.stack[0], s.stack[1]);
                 let c2 = c1 + v(s.stack[2], s.stack[3]);
                 let p = c2 + v(s.stack[4], s.stack[5]);
-                s.contour.push_cubic(c1, c2, p);
+                push_curve(s, c1, c2, p);
                 s.stack.clear();
                 s.current = p;
             }
@@ -337,7 +445,14 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let subr_nr = s.pop()?.to_int()?;
                 trace!("callsubr {}", subr_nr);
                 let subr = ctx.subr(subr_nr)?;
-                charstring(subr, ctx, s)?;
+                // A subr calling itself would recurse until the native stack dies.
+                if s.subr_depth >= MAX_SUBR_DEPTH {
+                    error!("subroutine nesting deeper than {} levels (recursive subr?)", MAX_SUBR_DEPTH);
+                }
+                s.subr_depth += 1;
+                let result = charstring(subr, ctx, s);
+                s.subr_depth -= 1;
+                result?;
             }
             11 => { // return
                 trace!("return");
@@ -360,6 +475,33 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                     }
                     6 => { // ⊦ asb adx ady bchar achar seac (12 6) ⊦
                         trace!("seac");
+                        // T1 §6: an accented character is not drawn by its own
+                        // charstring — it is the base character plus the accent, both
+                        // named by their StandardEncoding code and composed in
+                        // `Type1Font::from_vm` once every charstring is decoded.
+                        require!(s.stack.len() >= 5);
+                        let first = s.stack.len() - 5;
+                        let asb = s.stack[first].to_float();
+                        let adx = s.stack[first + 1].to_float();
+                        let ady = s.stack[first + 2].to_float();
+                        let bchar = s.stack[first + 3].to_float();
+                        let achar = s.stack[first + 4].to_float();
+                        if !(0.0 ..= 255.0).contains(&bchar) || !(0.0 ..= 255.0).contains(&achar) {
+                            warn!("seac: character code out of range ({bchar}, {achar})");
+                        } else {
+                            // `adx` is measured from this glyph's own left
+                            // side bearing, and `asb` is the accent's left side bearing,
+                            // which the accent's outline already carries. FreeType's
+                            // `t1operator_seac` does `adx += left_bearing.x` and then
+                            // places the accent at `adx - asb`.
+                            s.seac = Some(Seac {
+                                adx, ady,
+                                sbx: s.lsb.unwrap_or_default(),
+                                asb,
+                                base: bchar as u8,
+                                accent: achar as u8,
+                            });
+                        }
                         s.stack.clear();
                     }
                     7 => { // ⊦ sbx sby wx wy sbw (12 7) ⊦
@@ -380,50 +522,80 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         trace!("callothersubr {}", subr_nr);
                         let n = s.pop()?.to_int()? as usize;
                         
-                        match subr_nr {
-                            1 => {
-                                require_eq!(n, 0);
+                        match (subr_nr, n) {
+                            // flex start: Subr 1 is `1 0 callothersubr return` (T1 §6,
+                            // TN5015 §10). The seven `dx dy rmoveto 2 callsubr` steps
+                            // that follow are collected in `flex_sequence` by `rmoveto`
+                            // instead of being drawn.
+                            (1, 0) => {
+                                // The curve starts where the charstring currently is
+                                // (FreeType t1decode.c, othersubr 1: `start_point`).
+                                // Everything the seven following `rmoveto`s collect is
+                                // relative to it; the first of them only moves the
+                                // current point to the flex reference point and is not
+                                // part of the outline.
+                                if s.contour.is_empty() {
+                                    s.contour.push_endpoint(s.current);
+                                }
                                 s.flex_sequence = Some(Vec::with_capacity(7));
-                                
-                                // first moveto: referece point
-                                // then first control point of first curve
-                                // second control point of first curve
-                                // joining point
-                                // first control point of second curve
-                                // second control point of second curve
-                                // endpoint of second curve
-                                // (flex height, final x, final y) 0 callsubr
                             }
-                            2 => {
-                                require_eq!(n, 0);
+                            // Subr 2 is `0 2 callothersubr return` and runs after *every*
+                            // one of those rmovetos. It only acknowledges the point that
+                            // has just been added, so it must leave `flex_sequence` alone.
+                            (2, 0) => {}
+                            // flex end: Subr 0 is
+                            // `3 0 callothersubr pop pop setcurrentpoint return`.
+                            (0, 3) => {
+                                if s.stack.len() < 3 {
+                                    warn!("flex end with {} operands, expected flexheight and a point", s.stack.len());
+                                    s.stack.clear();
+                                } else {
+                                    let y = s.pop()?;
+                                    let x = s.pop()?;
+                                    let _flex_height = s.pop()?;
+                                    match s.flex_sequence.take() {
+                                        Some(points) if points.len() == 7 => {
+                                            // points[0] is the flex reference point: it
+                                            // exists only for the flex-height test and is
+                                            // not part of the outline (FreeType ignores
+                                            // index 0 of the seven flex vectors). The
+                                            // first cubic starts where the contour already
+                                            // is — the position at flex start.
+                                            s.contour.push_cubic(points[1], points[2], points[3]);
+                                            s.contour.push_cubic(points[4], points[5], points[6]);
+                                            s.current = points[6];
+                                        }
+                                        Some(points) => {
+                                            warn!("flex sequence has {} points, expected 7", points.len());
+                                        }
+                                        None => {
+                                            warn!("flex end without a flex sequence");
+                                        }
+                                    }
+                                    // the charstring continues with `pop pop setcurrentpoint`
+                                    ps_stack.push(y);
+                                    ps_stack.push(x);
+                                }
                             }
-                            0 => {
-                                // end of flex sequences
-                                require_eq!(n, 3);
-                                let (_flex_height, x, y) = s.pop_tuple()?;
-                                let flex_sequence = expect!(s.flex_sequence.take(), "no flex sequence");
-                                let (_ref, c0, c1, p2, c3, c4, p5) = expect!(TupleElements::from_iter(flex_sequence.into_iter()), "can't parse flex sequence");
-                                //require_eq!(p5, v(x, y));
-                                s.contour.push_cubic(c0, c1, p2);
-                                s.contour.push_cubic(c3, c4, p5);
-                                ps_stack.push(y);
-                                ps_stack.push(x);
-                            }
-                            3 => {
-                                require_eq!(n, 1);
+                            // otherSubr 3 returns a value to the PostScript side
+                            (3, 1) => {
                                 ps_stack.push(s.pop()?);
                                 ps_stack.push(Value::Int(3));
                             }
                             _ => {
                                 let m = s.stack.len();
                                 ps_stack.clear();
-                                ps_stack.extend(s.stack.drain(m - n ..).rev());
+                                if n <= m {
+                                    ps_stack.extend(s.stack.drain(m - n ..).rev());
+                                } else {
+                                    warn!("callothersubr {} wants {} operands, {} on the stack", subr_nr, n, m);
+                                }
                             }
                         }
                     }
                     17 => { // – pop (12 17) number
                         trace!("pop");
-                        let n = ps_stack.pop().expect("PS stack is empty");
+                        let n = expect!(ps_stack.pop(), "PS stack is empty");
                         s.push(n);
                     }
                     33 => { // ⊦ x y setcurrentpoint (12 33) ⊦
@@ -433,7 +605,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         s.current = p;
                         s.stack.clear();
                     },
-                    _ => panic!("invalid operator")
+                    n => error!("invalid Type 1 charstring operator (12 {})", n)
                 }
             }
             13 => { // ⊦ sbx wx hsbw (13) ⊦
@@ -479,7 +651,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let c1 = s.current + v(0., dy1);
                 let c2 = c1 + v(dx2, dy2);
                 let p = c2 + v(dx3, 0.);
-                s.contour.push_cubic(c1, c2, p);
+                push_curve(s, c1, c2, p);
                 s.stack.clear();
                 s.current = p;
             }
@@ -489,7 +661,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 let c1 = s.current + v(dx1, 0.);
                 let c2 = c1 + v(dx2, dy2);
                 let p = c2 + v(0., dy3);
-                s.contour.push_cubic(c1, c2, p);
+                push_curve(s, c1, c2, p);
                 s.stack.clear();
                 s.current = p;
             },

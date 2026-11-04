@@ -386,6 +386,11 @@ impl Offset {
             Err(FontError::OutOfBounds("offset", self.0 as _))
         }
     }
+    /// Like [`Offset::of`], but an offset of 0 means "subtable absent" (the normal encoding for
+    /// every optional OpenType subtable) and yields `None` instead of an error.
+    pub fn of_opt<'a>(&self, data: &'a [u8]) -> Option<&'a [u8]> {
+        if self.0 == 0 { None } else { self.of(data).ok() }
+    }
 }
 impl NomParser for Offset {
     type Output = Self;
@@ -399,14 +404,41 @@ impl FixedSize for Offset {
 }
 pub fn array_iter<'a, P: Parser + FixedSize>(input: &'a [u8], count: usize)
 -> ParseResult<'a, impl Iterator<Item=Result<P::Output, FontError>> + ExactSizeIterator + 'a> {
-    let (ours, remaining) = input.split_at(P::SIZE * count);
+    // A count taken from the file can ask for more items than there are bytes; `split_at` would
+    // panic, so this is a `Failure` (same as `array` below).
+    let n = match P::SIZE.checked_mul(count) {
+        Some(n) if n <= input.len() => n,
+        _ => return Err(nom::Err::Failure(VerboseError::from_error_kind(input, ErrorKind::Complete)).into())
+    };
+    let (ours, remaining) = input.split_at(n);
     let iter = ours.chunks(P::SIZE).map(|chunk| P::parse(chunk));
     Ok((remaining, iter))
+}
+
+#[cfg(test)]
+mod array_iter_tests {
+    use super::*;
+
+    /// A count taken from the file may ask for more items than there are bytes: that is a
+    /// parse error, never a panic (`split_at` used to be called with the larger number).
+    #[test]
+    fn array_iter_rejects_counts_past_the_end() {
+        let data = [0u8, 1, 0, 2];
+        assert!(array_iter::<Offset>(&data, 3).is_err());
+        // `P::SIZE * count` itself may overflow.
+        assert!(array_iter::<Offset>(&data, usize::MAX).is_err());
+        let (rest, iter) = array_iter::<Offset>(&data, 2).expect("two offsets fit");
+        assert!(rest.is_empty());
+        assert_eq!(iter.count(), 2);
+    }
 }
 pub fn array<P: Parser + FixedSize, N: Into<usize>>(count: N) -> impl Fn(&[u8]) -> R<ArrayBase<P>> {
     let len = count.into();
     move |input| {
-        let n = P::SIZE * len;
+        let n = match P::SIZE.checked_mul(len) {
+            Some(n) => n,
+            None => return Err(nom::Err::Failure(VerboseError::from_error_kind(input, ErrorKind::Complete)))
+        };
         if input.len() < n {
             return Err(nom::Err::Failure(VerboseError::from_error_kind(input, ErrorKind::Complete)));
         }
