@@ -1046,7 +1046,8 @@ fn parse_mark_to_ligature_attachment(data: &[u8]) -> Result<LigatureMarks, FontE
                 Err(_) => break,
             };
             rest = offsets.0;
-            let mut anchors: Vec<Option<(i16, i16)>> = Vec::new();
+            let mut anchors: Vec<Option<(i16, i16)>> =
+                Vec::with_capacity(usize::from(mark_class_count.min(64)));
             for offset in offsets.1.iter() {
                 let anchor = match offset {
                     Ok(offset) if offset != 0 => attach

@@ -22,7 +22,7 @@ pub fn deflate(data: &[u8], limit: usize) -> Result<Vec<u8>, String> {
 /// decodes into its own 32 KiB window, so the bound is checked per chunk, and a stream that
 /// never ends is cut off by the limit rather than by reading for ever.
 fn bounded(mut stream: InflateStream, data: &[u8], limit: usize) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(limit.min(64 * 1024));
     let mut rest = data;
     loop {
         let (used, decoded) = stream.update(rest)?;

@@ -72,7 +72,7 @@ pub fn parse_cmap(input: &[u8]) -> Result<(CMap, Encoding), FontError> {
     
     let mut cmap = HashMap::new();
     let mut cmap2 = HashMap::new();
-    let mut cmap3 = Vec::new();
+    let mut cmap3 = Vec::with_capacity(usize::from(num_tables.min(8)));
     let mut cmap_encoding = None;
 
     let have_unicode = iterator(i, tuple((be_u16, be_u16, be_u32))).take(num_tables as usize)

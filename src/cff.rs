@@ -410,7 +410,7 @@ impl<'a> CffSlot<'a> {
     /// `outlines()` with the deprecated four-argument `endchar` form (`seac`) composed:
     /// the base character with the accent character drawn at (adx, ady) on top.
     pub fn composed_outlines(&self) -> Result<Vec<(Outline, f32, f32)>, FontError> {
-        let mut outlines = Vec::new();
+        let mut outlines = Vec::with_capacity(self.num_glyphs);
         let mut seac_glyphs = Vec::new();
         for r in self.outlines()? {
             let (outline, width, lsb, seac) = r?;

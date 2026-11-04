@@ -123,6 +123,7 @@ impl Type1Font {
         
         let mut subrs = Vec::new();
         if let Some(arr) = private_dict.get_array("Subrs") {
+            subrs.reserve(arr.len());
             for (i, item) in arr.iter().enumerate() {
                 let decoded = match item.as_bytes() {
                     Some(data) => {
