@@ -1,5 +1,5 @@
-//! Minimal in-memory WOFF files, one per panic reported in
-//! `report/pdf-rs-font-vs-specs-2026-11-02.md` (F26).
+//! Minimal in-memory WOFF files, one per malformed input that used to abort the
+//! parse, so a failing test names exactly one rule.
 #![cfg(feature = "woff")]
 
 use font::Font;
@@ -40,14 +40,14 @@ fn dir_entry(v: &mut Vec<u8>, tag: &[u8; 4], offset: u32, comp: u32, orig: u32) 
 
 #[test]
 fn c23_woff_collection_is_an_error() {
-    // F26: `unimplemented!()` for flavor `ttcf`.
+    // `unimplemented!()` for flavor `ttcf`.
     let data = woff_header(b"ttcf", 0);
     assert!(font::parse_woff(&data).is_err());
 }
 
 #[test]
 fn c23b_corrupt_zlib_table_is_an_error() {
-    // F26: `.expect("can't decompress data")`. comp_length < orig_length marks the table
+    // `.expect("can't decompress data")`. comp_length < orig_length marks the table
     // as zlib-compressed (WOFF §"Table Directory").
     let mut data = woff_header(&[0, 1, 0, 0], 1);
     dir_entry(&mut data, b"glyf", 64, 4, 8);
@@ -62,7 +62,7 @@ fn c23c_truncated_table_directory_is_an_error() {
     assert!(font::parse_woff(&data).is_err());
 }
 
-// ---------------------------- F46: tables are read at their offsets ----------------------------
+// ---------------------------- tables are read at their offsets ----------------------------
 
 /// `head` (OT §head), 54 bytes, `unitsPerEm = 1000`.
 fn head_table() -> Vec<u8> {
@@ -149,7 +149,7 @@ fn woff(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
 
 #[test]
 fn c27_woff_tables_are_read_at_their_offsets() {
-    // F46: tables were read sequentially after the directory, ignoring `offset`, so any
+    // tables were read sequentially after the directory, ignoring `offset`, so any
     // file whose storage order differs from the directory order was misread.
     let data = woff(&[
         (b"maxp", maxp_table(3)), // stored first …

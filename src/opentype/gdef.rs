@@ -57,7 +57,7 @@ fn parse_mark_glyph_sets(data: &[u8]) -> Result<Vec<Vec<u16>>, FontError> {
     let (i, count) = be_u16(i)?;
     let mut sets = Vec::with_capacity(count.min(64) as usize);
     for coverage_off in iterator_n(i, be_u32, count) {
-        // One unreadable set costs that set, not the others (audit B3's policy).
+        // One unreadable set costs that set, not the others.
         let set = match data.get(coverage_off as usize ..) {
             Some(coverage) => match coverage_table(coverage) {
                 Ok(glyphs) => glyphs.collect(),

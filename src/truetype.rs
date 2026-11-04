@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn a_doubling_composite_chain_expands_within_the_budget() {
-        // Audit §3: the depth cap alone does not bound the work — a chain of composites that
+        // the depth cap alone does not bound the work — a chain of composites that
         // each name two components asks for 2 ^ 14 outlines. Without the budget every leaf is
         // expanded; with it the expansion stops at MAX_COMPONENT_EXPANSIONS.
         let shapes = doubling_chain(14);

@@ -1,5 +1,5 @@
-//! Minimal in-memory Type 1 fonts (PFA and PFB), one per mismatch reported in
-//! `report/pdf-rs-font-vs-specs-2026-11-02.md` (F24, F25).
+//! Minimal in-memory Type 1 fonts (PFA and PFB), one per specification mismatch, so a
+//! failing test names exactly one rule.
 //!
 //! The fonts are plain PostScript text: no `eexec` wrapper, only the charstrings are
 //! encrypted the way TN5015 §7 defines (`lenIV` random bytes, then the RC4-like
@@ -170,7 +170,7 @@ fn parse(data: &[u8]) -> Box<dyn Font + Send + Sync + 'static> {
 #[test]
 #[ignore] // TEMP bisect
 fn c20_type1_without_encoding_parses() {
-    // F24: `/Encoding` is optional (PLRM §5.6); `.expect("no /Encoding")` aborted the font.
+    // `/Encoding` is optional (PLRM §5.6); `.expect("no /Encoding")` aborted the font.
     let data = pfa(&[(".notdef", &notdef()), ("A", &glyph_a())], None);
     let font = parse(&data);
     assert_eq!(font.num_glyphs(), 2);
@@ -183,7 +183,7 @@ fn c20_type1_without_encoding_parses() {
 
 #[test]
 fn c20b_encoding_as_a_name_parses() {
-    // F24: `/Encoding` may be a name instead of an array (`as_array().expect(…)` panicked).
+    // `/Encoding` may be a name instead of an array (`as_array().expect(…)` panicked).
     let data = pfa(
         &[(".notdef", &notdef()), ("A", &glyph_a())],
         Some("/StandardEncoding"),
@@ -211,7 +211,7 @@ fn c20c_encoding_array_maps_codepoints() {
 
 #[test]
 fn c21_unknown_charstring_operator_skips_the_glyph() {
-    // F25: an unknown escape (`12 n`) used to `panic!("invalid operator")`.
+    // an unknown escape (`12 n`) used to `panic!("invalid operator")`.
     let mut cs = HSBW.to_vec();
     cs.extend_from_slice(&[12, 99]); // 12 99: not a valid Type 1 escape
     cs.push(14);
@@ -228,7 +228,7 @@ fn c21_unknown_charstring_operator_skips_the_glyph() {
 
 #[test]
 fn c22_pfb_unknown_block_type_is_an_error() {
-    // F25: `panic!("unknown block type")` in the PFB reader.
+    // `panic!("unknown block type")` in the PFB reader.
     let data = [
         0x80, 1, 0, 0, 0, 0, // an empty ASCII block
         0x80, 7, 0, 0, 0, 0, // block type 7 does not exist
@@ -236,7 +236,7 @@ fn c22_pfb_unknown_block_type_is_an_error() {
     assert!(font::parse(&data).is_err());
 }
 
-// ---------------------------- seac (F10)
+// ---------------------------- seac
 
 /// A Type 1 number: `139+n` for 0..=107, `247…248` for 108..=1130, and `255` plus a
 /// four-byte integer for everything else (including negatives).
@@ -281,7 +281,7 @@ fn seac(adx: i32, ady: i32, base: i32, accent: i32) -> Vec<u8> {
 }
 
 /// `hsbw sbx 500` then `asb adx ady bchar achar seac` (12 6) — the side-bearing form,
-/// where the accent is placed at `adx + sbx - asb` (F41/audit C4).
+/// where the accent is placed at `adx + sbx - asb`.
 fn seac_with_bearings(sbx: i32, asb: i32, adx: i32, ady: i32, base: i32, accent: i32) -> Vec<u8> {
     let mut cs = Vec::new();
     num(&mut cs, sbx);
@@ -344,7 +344,7 @@ fn flex_glyph() -> Vec<u8> {
 
 #[test]
 fn c24_type1_flex_draws_two_cubics() {
-    // F40 / audit B1: only `rmoveto` fed the flex sequence, so the seven points were
+    // Only `rmoveto` fed the flex sequence, so the seven points were
     // never complete and the glyph was dropped. `callsubr` 2 — which every flex emits
     // after each `rmoveto` — used to reset the sequence as well. The reference point
     // (the first of the seven) must not end up in the outline.
@@ -386,7 +386,7 @@ fn c24_type1_flex_draws_two_cubics() {
 
 #[test]
 fn c23_type1_seac_composes_the_accent() {
-    // F10: `seac` was a no-op, so every accented Type 1 glyph came out empty.
+    // `seac` was a no-op, so every accented Type 1 glyph came out empty.
     let data = pfa(
         &[
             (".notdef", &notdef()),
@@ -429,7 +429,7 @@ fn c23_type1_seac_composes_the_accent() {
 
 #[test]
 fn c23b_type1_seac_honours_the_side_bearings() {
-    // F41/audit C4: `asb` was read and thrown away, so every accent sat at the raw
+    // `asb` was read and thrown away, so every accent sat at the raw
     // `(adx, ady)` and composites were misaligned by the accent's left side bearing.
     // FreeType (`psaux/t1decode.c::t1operator_seac`) does `adx += left_bearing.x` and
     // then places the accent at `adx - asb` — the composite's own lsb counts too.
@@ -463,11 +463,11 @@ fn c23b_type1_seac_honours_the_side_bearings() {
     }
 }
 
-// ---------------------------- lenIV (F41)
+// ---------------------------- lenIV
 
 #[test]
 fn c25_type1_leniv_minus_one_is_plaintext() {
-    // F41: `lenIV -1` means "charstrings are not encrypted" (TN5015 §2), but the value
+    // `lenIV -1` means "charstrings are not encrypted" (TN5015 §2), but the value
     // was cast to `usize` and every charstring decrypted with a garbage key and skipped.
     let data = pfa_len_iv(
         &[(".notdef", &notdef()), ("A", &glyph_a())],
@@ -494,7 +494,7 @@ fn c25_type1_leniv_minus_one_is_plaintext() {
 
 #[test]
 fn c26_type1_charstring_shorter_than_leniv_is_skipped() {
-    // F41: a charstring shorter than `lenIV` cannot hold the random prefix. Decoding it
+    // a charstring shorter than `lenIV` cannot hold the random prefix. Decoding it
     // produced an empty string, which failed with "CharWidth not set" — the glyph is
     // skipped with a warning instead, and the rest of the font still loads.
     let short = b"ab"; // 2 bytes, lenIV is 4

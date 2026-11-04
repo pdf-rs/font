@@ -88,7 +88,7 @@ pub fn parse_os2(data: &[u8]) -> Result<Os2, FontError> {
     if version >= 1 {
         // ulCodePageRange1, ulCodePageRange2. Either all eight bytes are there or the
         // table stops inside them: a partial tail must not shift `sxHeight` onto the
-        // code-page bits (audit C7).
+        // code-page bits.
         tail = tail.get(8..).unwrap_or_default();
     }
     let (mut x_height, mut cap_height) = (None, None);

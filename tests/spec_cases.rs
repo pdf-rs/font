@@ -1,8 +1,7 @@
-//! Minimal in-memory fonts, one per specification mismatch reported in
-//! `report/pdf-rs-font-vs-specs-2026-11-02.md`.
+//! Minimal in-memory fonts, one per specification mismatch.
 //!
 //! Each case builds the smallest sfnt that still reaches the code under test, so a failure names
-//! exactly one finding. Run everything: `cargo test`; one group: `cargo test c01`.
+//! exactly one rule. Run everything: `cargo test`; one group: `cargo test c01`.
 
 use font::opentype::{cmap::parse_cmap, gdef::{GDef, MarkClass}, OpenTypeFont};
 use font::{Font, GlyphId};
@@ -154,7 +153,7 @@ fn parse_gdef_of(data: &[u8]) -> GDef {
 }
 
 // ---------------------------------------------------------------------------------------------
-// F1/F2 — GPOS PairPos: the format 1 header, and format 2 class definitions
+// GPOS PairPos: the format 1 header, and format 2 class definitions
 
 /// Coverage format 1 (OT §"Coverage Table").
 fn coverage_1(glyphs: &[u16]) -> Vec<u8> {
@@ -244,11 +243,11 @@ fn kerning_of(data: &[u8], left: u32, right: u32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------------------------
-// F3/F4/F5/F27 — GDEF: tag case, glyphClassDef vs markAttachClassDef, optional subtables
+// GDEF: tag case, glyphClassDef vs markAttachClassDef, optional subtables
 
 #[test]
 fn c01_gdef_is_read_at_all() {
-    // F3: the table tag is `GDEF`, not `gdef`.
+    // the table tag is `GDEF`, not `gdef`.
     let mut tables = base_tables(8);
     tables.push((*b"GDEF", gdef_table(Some(class_def_1(1, &[1, 2, 3, 4])), None)));
     let data = build_font(tables);
@@ -261,7 +260,7 @@ fn c01_gdef_is_read_at_all() {
 
 #[test]
 fn c02_gdef_without_optional_tables_parses() {
-    // F5/F27: both class definitions are optional (offset 0), which used to panic.
+    // both class definitions are optional (offset 0), which used to panic.
     let mut tables = base_tables(8);
     tables.push((*b"GDEF", gdef_table(None, None)));
     let data = build_font(tables);
@@ -271,7 +270,7 @@ fn c02_gdef_without_optional_tables_parses() {
 
 #[test]
 fn c03_gdef_glyph_class_is_not_the_mark_attach_class() {
-    // F4: `mark_class()` must read glyphClassDef; markAttachClassDef is a different table.
+    // `mark_class()` must read glyphClassDef; markAttachClassDef is a different table.
     let mut tables = base_tables(8);
     let glyph = class_def_1(5, &[2]);       // gid 5 -> ligature
     let mark_attach = class_def_1(5, &[3]); // gid 5 -> mark class 3
@@ -283,11 +282,11 @@ fn c03_gdef_glyph_class_is_not_the_mark_attach_class() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// F1/F2 — GPOS PairPos
+// GPOS PairPos
 
 #[test]
 fn c04_pair_pos_format_1_kerning() {
-    // F1: the format 1 header is format, coverageOffset, valueFormat1, valueFormat2,
+    // the format 1 header is format, coverageOffset, valueFormat1, valueFormat2,
     // pairSetCount, pairSetOffsets[] — there is no extra field before the offsets.
     let mut tables = base_tables(8);
     tables.push((*b"GPOS", gpos_table(2, &pair_pos_1(1, &[(2, -50), (3, -20)]))));
@@ -299,7 +298,7 @@ fn c04_pair_pos_format_1_kerning() {
 
 #[test]
 fn c05_pair_pos_format_2_class_kerning() {
-    // F2: format 2 indexes a class matrix through two ClassDefs; without parsing them the
+    // format 2 indexes a class matrix through two ClassDefs; without parsing them the
     // matrix can never be read and class kerning is always 0.
     let mut tables = base_tables(8);
     let subtable = pair_pos_2(
@@ -316,7 +315,7 @@ fn c05_pair_pos_format_2_class_kerning() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// F13 — CMap::codepoints(): the last range, the merge loop
+// CMap::codepoints(): the last range, the merge loop
 
 /// A `cmap` (§cmap) with a single Unicode (platform 3, encoding 1) format 4 subtable.
 /// `segments` are `(first_code, last_code, first_glyph)` with consecutive glyph ids.
@@ -421,7 +420,7 @@ fn cmap_format12(codes: &[u32]) -> Vec<u8> {
 
 #[test]
 fn c10_codepoints_keeps_the_last_range() {
-    // F13: the range being built at the end of the walk is never pushed, so a contiguous
+    // the range being built at the end of the walk is never pushed, so a contiguous
     // cmap yields an empty list.
     let got = codepoints_of(&cmap_format4(&[(0x41, 0x43, 1)]), 10);
     assert_eq!(got, vec![0x41 ..= 0x43]);
@@ -429,7 +428,7 @@ fn c10_codepoints_keeps_the_last_range() {
 
 #[test]
 fn c10b_codepoints_merges_ranges_down_to_max_ranges() {
-    // F13: the simplify loop dropped `prev` and computed gaps as `b.start - a.end`.
+    // the simplify loop dropped `prev` and computed gaps as `b.start - a.end`.
     let data = cmap_format4(&[(0x41, 0x42, 1), (0x61, 0x62, 3)]);
     assert_eq!(codepoints_of(&data, 2), vec![0x41 ..= 0x42, 0x61 ..= 0x62]);
     assert_eq!(codepoints_of(&data, 1), vec![0x41 ..= 0x62]);
@@ -437,14 +436,14 @@ fn c10b_codepoints_merges_ranges_down_to_max_ranges() {
 
 #[test]
 fn c10c_codepoints_with_zero_max_ranges_does_not_panic() {
-    // F13: `tuple_windows().min().unwrap()` panicked when nothing was left to merge.
+    // `tuple_windows().min().unwrap()` panicked when nothing was left to merge.
     let got = codepoints_of(&cmap_format4(&[(0x41, 0x43, 1)]), 0);
     assert_eq!(got, vec![0x41 ..= 0x43]);
 }
 
 #[test]
 fn c10d_codepoints_reduces_many_scattered_runs_quickly() {
-    // Audit §3: the merge loop rescanned every window of the range list and spliced once per
+    // the merge loop rescanned every window of the range list and spliced once per
     // merge, which is O(n²) on a font whose codepoints are scattered (large CJK fonts).
     // Closing the widest gaps last means one sort of the gaps, whatever their number.
     // Format 12: one group per code, twenty thousand codes, every gap the same width.
@@ -463,11 +462,11 @@ fn c10d_codepoints_reduces_many_scattered_runs_quickly() {
 
 
 // ---------------------------------------------------------------------------------------------
-// F14 — cmap format 4: the glyph index array is addressed relative to &idRangeOffset[i]
+// cmap format 4: the glyph index array is addressed relative to &idRangeOffset[i]
 
 #[test]
 fn c14c_cmap_format4_reads_the_glyph_index_array() {
-    // F14: the index was computed in u16, so a malformed offset silently wrapped (release) or
+    // the index was computed in u16, so a malformed offset silently wrapped (release) or
     // panicked (debug).  Segment 1 has n = 1, which pins both the `2 * n` term and the fact
     // that the offset is relative to &idRangeOffset[n], not to the glyph array.
     let sub = format4_subtable_with_glyph_array(
@@ -483,7 +482,7 @@ fn c14c_cmap_format4_reads_the_glyph_index_array() {
 
 #[test]
 fn c14d_cmap_format4_glyph_index_past_the_array_is_dropped() {
-    // F14: an idRangeOffset pointing past the end of the subtable must stop the segment, not
+    // an idRangeOffset pointing past the end of the subtable must stop the segment, not
     // panic in `glyph_data.len() - 2` or read a neighbouring byte as a glyph index.
     let sub = format4_subtable_with_glyph_array(&[(0x41, 0x41, 0)], &[]);
     let (cmap, _encoding) = parse_cmap(&cmap_multi(&[(3, 1, sub)])).expect("cmap parses");
@@ -492,7 +491,7 @@ fn c14d_cmap_format4_glyph_index_past_the_array_is_dropped() {
 
 #[test]
 fn c14e_cmap_format4_offset_before_the_array_is_dropped() {
-    // F14: `... + offset - segCountX2` in u16 wrapped when offset < segCountX2 (a truncated
+    // `... + offset - segCountX2` in u16 wrapped when offset < segCountX2 (a truncated
     // font), pointing the read at the header.  It must drop the segment instead.
     let mut sub = format4_subtable_with_glyph_array(&[(0x41, 0x41, 0)], &[10]);
     // header (7 u16) + endCode[] + reservedPad + startCode[] + idDelta[], 2 segments each
@@ -524,7 +523,7 @@ fn c11b_unsupported_format_alone_yields_an_empty_map() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// F15 — `post` version 1.0 is the standard Macintosh order
+// `post` version 1.0 is the standard Macintosh order
 
 /// `post` (OT §post) header, 32 bytes, up to and including version 3.0.
 pub fn post_table(version: u32) -> Vec<u8> {
@@ -541,7 +540,7 @@ pub fn post_table(version: u32) -> Vec<u8> {
 
 #[test]
 fn c12_post_version_1_uses_the_standard_mac_order() {
-    // F15: version 1.0 has no glyphNameIndex array; the names *are* the 258 standard
+    // version 1.0 has no glyphNameIndex array; the names *are* the 258 standard
     // Macintosh names, in order.
     let table = post_table(0x0001_0000);
     let post = font::opentype::post::parse_post(&table).expect("post parses");
@@ -599,9 +598,9 @@ pub fn loca_table_short(offsets: &[u32]) -> Vec<u8> {
 
 #[test]
 fn c13_hmtx_clamps_zero_number_of_hmetrics() {
-    // F30: OT §hmtx requires `1 <= numberOfHMetrics <= numGlyphs`. Audit §4: a value outside
-    // that range cannot make the metric lookups fail, so it is clamped with a warning rather
-    // than costing the whole font — 0 used to reject.
+    // OT §hmtx requires `1 <= numberOfHMetrics <= numGlyphs`. A value outside that range
+    // cannot make the metric lookups fail, so it is clamped with a warning rather than
+    // costing the whole font — 0 used to reject.
     let mut tables = base_tables(2);
     tables[1].1 = hhea_table(0);
     let font = OpenTypeFont::parse(&build_font(tables)).expect("numberOfHMetrics = 0 loads");
@@ -610,8 +609,8 @@ fn c13_hmtx_clamps_zero_number_of_hmetrics() {
 
 #[test]
 fn c13b_hmtx_accepts_missing_trailing_lsbs() {
-    // F30: `numGlyphs - numberOfHMetrics` left side bearings are required by the spec, but
-    // truncated tables are common (audit §4): the missing ones are left out, and the glyphs
+    // `numGlyphs - numberOfHMetrics` left side bearings are required by the spec, but
+    // truncated tables are common: the missing ones are left out, and the glyphs
     // whose bearing is missing report no metric.
     let mut tables = base_tables(3);
     tables[1].1 = hhea_table(2);
@@ -623,7 +622,7 @@ fn c13b_hmtx_accepts_missing_trailing_lsbs() {
 
 #[test]
 fn c13c_hmtx_has_no_metric_for_gid_at_or_beyond_num_glyphs() {
-    // F30: `metrics_for_gid` used to invent (last_advance, 0) for any gid.
+    // `metrics_for_gid` used to invent (last_advance, 0) for any gid.
     let tables = base_tables(2);
     let font = OpenTypeFont::parse(&build_font(tables)).expect("font parses");
     assert!(font.glyph_metrics(2).is_none());
@@ -632,8 +631,8 @@ fn c13c_hmtx_has_no_metric_for_gid_at_or_beyond_num_glyphs() {
 
 #[test]
 fn c14_head_rejects_units_per_em_zero() {
-    // F31: OT §head allows 16..=16384; 0 turned `font_matrix()` into `1/0 = inf`, which is the
-    // one value that stays fatal (audit §4).
+    // OT §head allows 16..=16384; 0 turned `font_matrix()` into `1/0 = inf`, which is the
+    // one value that stays fatal.
     let mut head = head_table();
     head[18] = 0;
     head[19] = 0;
@@ -644,7 +643,7 @@ fn c14_head_rejects_units_per_em_zero() {
 
 #[test]
 fn c14c_head_keeps_a_units_per_em_outside_the_spec_range() {
-    // Audit §4: the rest of the range is a convention, not a reason to refuse the font —
+    // the rest of the range is a convention, not a reason to refuse the font —
     // clamping would move every coordinate.
     let mut head = head_table();
     head[18] = 0;
@@ -658,7 +657,7 @@ fn c14c_head_keeps_a_units_per_em_outside_the_spec_range() {
 
 #[test]
 fn c14b_maxp_reads_an_unknown_version() {
-    // F31: OT §maxp has exactly 0x00005000 and 0x00010000. Audit §4: the fields are read at the
+    // OT §maxp has exactly 0x00005000 and 0x00010000. The fields are read at the
     // same offsets in both, so an unknown version is a warning.
     let mut maxp = maxp_table(2);
     maxp[1] = 2; // 0x00020000
@@ -670,7 +669,7 @@ fn c14b_maxp_reads_an_unknown_version() {
 
 #[test]
 fn c15_kern_horizontal_subtable_may_also_be_minimum() {
-    // F32: coverage is a bit field. 0x03 = horizontal + minimum, which is legal and still
+    // coverage is a bit field. 0x03 = horizontal + minimum, which is legal and still
     // applies; the crate required exactly 0x01 and failed the whole font.
     let mut tables = base_tables(2);
     tables.push((*b"kern", kern_table_ms(0, 0x03, &kern_pairs(&[(0, 1, -50)]))));
@@ -680,7 +679,7 @@ fn c15_kern_horizontal_subtable_may_also_be_minimum() {
 
 #[test]
 fn c15b_vertical_kern_subtable_is_skipped_not_fatal() {
-    // F32: coverage bit 0 clear means vertical; this crate has no vertical kerning, so the
+    // coverage bit 0 clear means vertical; this crate has no vertical kerning, so the
     // subtable is skipped. It must not take the font down.
     let mut tables = base_tables(2);
     tables.push((*b"kern", kern_table_ms(0, 0x00, &kern_pairs(&[(0, 1, -50)]))));
@@ -690,7 +689,7 @@ fn c15b_vertical_kern_subtable_is_skipped_not_fatal() {
 
 #[test]
 fn c16_one_corrupt_glyph_does_not_fail_the_font() {
-    // F31: a bad `glyf` record made `parse_shapes` return `Err` for the whole font; OT §glyf
+    // a bad `glyf` record made `parse_shapes` return `Err` for the whole font; OT §glyf
     // treats a glyph without contours as empty, and one broken glyph is just one empty glyph.
     let mut glyf = Vec::new();
     push_i16(&mut glyf, -5);        // numberOfContours: not a valid value
@@ -710,7 +709,7 @@ fn c16_one_corrupt_glyph_does_not_fail_the_font() {
 
 #[test]
 fn c16b_loca_that_runs_backwards_leaves_the_glyph_empty() {
-    // F31: OT §loca offsets are non-decreasing. Audit §4: a backwards pair can only affect
+    // OT §loca offsets are non-decreasing. A backwards pair can only affect
     // that glyph, which `parse_shapes` reads as empty, so the font still loads.
     let mut tables = base_tables(2);
     tables.push((*b"loca", loca_table_short(&[0, 10, 4])));
@@ -724,7 +723,7 @@ fn c16b_loca_that_runs_backwards_leaves_the_glyph_empty() {
 
 #[test]
 fn c16c_loca_past_the_end_of_glyf_leaves_those_glyphs_empty() {
-    // F31: the last offset is the length of `glyf`. Audit §4: only the glyphs past the end
+    // the last offset is the length of `glyf`. Only the glyphs past the end
     // are affected, so the font still loads.
     let mut tables = base_tables(2);
     tables.push((*b"loca", loca_table_short(&[0, 0, 100])));
@@ -846,7 +845,7 @@ pub fn outline_points(font: &OpenTypeFont, gid: u16) -> Vec<(f32, f32)> {
 
 #[test]
 fn c17a_composite_point_matching() {
-    // F19: without ARGS_ARE_XY_VALUES the arguments are point numbers, not offsets. The
+    // without ARGS_ARE_XY_VALUES the arguments are point numbers, not offsets. The
     // second copy of gid 1 must move so that its point 0 lands on point 2 of the first copy.
     let font = font_with_glyphs(&[
         Vec::new(),
@@ -862,7 +861,7 @@ fn c17a_composite_point_matching() {
 
 #[test]
 fn c17b_nested_composite_glyphs_are_expanded() {
-    // F20: a composite may reference another composite.
+    // a composite may reference another composite.
     let font = font_with_glyphs(&[
         Vec::new(),
         simple_glyph(&[(0, 0), (100, 0), (0, 100)]),
@@ -888,7 +887,7 @@ fn c17c_self_referencing_composite_terminates() {
 
 #[test]
 fn c17d_component_offset_is_scaled_only_when_asked() {
-    // Audit C8: `SCALED_COMPONENT_OFFSET` (0x0800) makes the placement offset part of the
+    // `SCALED_COMPONENT_OFFSET` (0x0800) makes the placement offset part of the
     // component's own design space, so the component matrix scales it (Apple's reading). The
     // Microsoft default — and `UNSCALED_COMPONENT_OFFSET` (0x1000) explicitly — puts the
     // offset in the composite's coordinates: the matrix applies to the outline only.
@@ -915,7 +914,7 @@ fn c17d_component_offset_is_scaled_only_when_asked() {
 
 #[test]
 fn c17e_point_numbers_are_the_glyf_ones() {
-    // Audit C8: point matching must count the glyph's own points. A contour that repeats its
+    // point matching must count the glyph's own points. A contour that repeats its
     // first point as its last one, and the closing point `contour()` adds, must both stay out of
     // the numbering — point 4 of a four-point contour does not exist.
     let font = font_with_glyphs(&[
@@ -944,7 +943,7 @@ fn c17e_point_numbers_are_the_glyf_ones() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// F21 — an unknown GPOS/GSUB minor version must not abort the font
+// an unknown GPOS/GSUB minor version must not abort the font
 
 /// `gpos_table` with an explicit `minorVersion` (OT §GPOS header).
 fn gpos_table_version(minor_version: u16, lookup_type: u16, subtable: &[u8]) -> Vec<u8> {
@@ -969,7 +968,7 @@ fn gsub_table(minor_version: u16) -> Vec<u8> {
 
 #[test]
 fn c18_unknown_gpos_minor_version_is_ignored() {
-    // F21: `v => panic!("unsupported GPOS version 1.{}")` killed the whole font. The tables we
+    // `v => panic!("unsupported GPOS version 1.{}")` killed the whole font. The tables we
     // read sit at the same offsets in every 1.x version, so 1.2 must still yield its kerning.
     let subtable = pair_pos_1(1, &[(2, -40)]);
     let mut tables = base_tables(3);
@@ -980,7 +979,7 @@ fn c18_unknown_gpos_minor_version_is_ignored() {
 
 #[test]
 fn c18b_unknown_gsub_minor_version_is_ignored() {
-    // F21: same panic in `parse_gsub`, where it is not even a GPOS table.
+    // same panic in `parse_gsub`, where it is not even a GPOS table.
     let mut tables = base_tables(2);
     tables.push((*b"GSUB", gsub_table(2)));
     let data = build_font(tables);
@@ -989,11 +988,11 @@ fn c18b_unknown_gsub_minor_version_is_ignored() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// F28 — counts taken from the file must not wrap around or index past the end
+// counts taken from the file must not wrap around or index past the end
 
 #[test]
 fn c24_woff2_hmtx_rejects_more_metrics_than_glyphs() {
-    // F28: `maxp.numGlyphs as usize - number_of_hmetrics` wrapped around to a huge number (a
+    // `maxp.numGlyphs as usize - number_of_hmetrics` wrapped around to a huge number (a
     // panic in debug builds) when a WOFF2 font claims more metrics than it has glyphs. The
     // three streams are long enough that the count is the first thing that can go wrong.
     let head = font::opentype::parse_head(&head_table()).expect("head parses");
@@ -1026,7 +1025,7 @@ fn c24b_woff2_hmtx_reads_a_consistent_table() {
     assert!(parsed.metrics_for_gid(1).is_none());
 }
 
-// ---------------------------- F38: OS/2 metrics ----------------------------
+// ---------------------------- OS/2 metrics ----------------------------
 
 /// `OS/2` version 4 (OT §OS/2), 96 bytes: fixed prefix, `ulCodePageRange1/2`, the three
 /// version 2 fields the crate reads, and the rest of the tail.
@@ -1072,7 +1071,7 @@ fn font_with_os2(fs_selection: u16) -> OpenTypeFont {
 
 #[test]
 fn c25_os2_typo_metrics_win_when_the_font_asks_for_them() {
-    // F38: line metrics came from `hhea` only; `fsSelection` bit 7 (USE_TYPO_METRICS)
+    // line metrics came from `hhea` only; `fsSelection` bit 7 (USE_TYPO_METRICS)
     // says the `sTypo*` values are the ones to use.
     let font = font_with_os2(0x0080);
     let vmetrics = font.vmetrics().expect("line metrics");
@@ -1100,7 +1099,7 @@ fn c25b_hhea_metrics_without_use_typo_metrics() {
 
 #[test]
 fn c25c_os2_truncated_inside_the_codepage_ranges_has_no_heights() {
-    // Audit C7: the version 1 tail was only stepped over when all eight bytes were
+    // the version 1 tail was only stepped over when all eight bytes were
     // present, so a table cut inside `ulCodePageRange1` had those four bytes read as
     // `sxHeight`/`sCapHeight` (0 and 256 from the range bits).
     let mut data = os2_table(0, (900, -300, 120), 500, 700);
@@ -1117,7 +1116,7 @@ fn c25c_os2_truncated_inside_the_codepage_ranges_has_no_heights() {
     assert_eq!(font.info().weight, Some(400));
 }
 
-// ---------------------------- F16: vhea version fields ----------------------------
+// ---------------------------- vhea version fields ----------------------------
 
 /// `vhea` (OT §vhea), 36 bytes: two `u16` versions, ascent/descent/lineGap, then the
 /// vertical metrics, four reserved words, metricDataFormat and numOfLongVerMetrics.
@@ -1144,7 +1143,7 @@ pub fn vhea_table(ascender: i16, descender: i16, line_gap: i16) -> Vec<u8> {
 
 #[test]
 fn c16d_vhea_reads_both_version_fields() {
-    // F16: `version` was read as one `u16`, so `minorVersion` was taken as `vertTypoAscender`
+    // `version` was read as one `u16`, so `minorVersion` was taken as `vertTypoAscender`
     // and every following field came from two bytes too early.
     let table = vhea_table(880, -120, 40);
     let (rest, metrics) = font::opentype::parse_vhea(&table).expect("vhea parses");
@@ -1155,7 +1154,7 @@ fn c16d_vhea_reads_both_version_fields() {
     );
 }
 
-// ---------------------------- F33: `name` record preference ----------------------------
+// ---------------------------- `name` record preference ----------------------------
 
 /// UTF-16BE bytes, as platform 0 and 3 records carry them.
 pub fn utf16be(text: &str) -> Vec<u8> {
@@ -1187,7 +1186,7 @@ pub fn name_table(records: &[(u16, u16, u16, u16, &[u8])]) -> Vec<u8> {
 
 #[test]
 fn c33_name_picks_the_best_record_not_the_last() {
-    // F33: the *last* record that matched (platform 0, 3/0 or 3/1) won, so a font carrying
+    // the *last* record that matched (platform 0, 3/0 or 3/1) won, so a font carrying
     // Mac Roman or Unicode-platform names after the Windows ones lost them. The Windows
     // Unicode English record is deliberately *first* here: only a preference order passes.
     let windows = utf16be("WinFam");
@@ -1204,7 +1203,7 @@ fn c33_name_picks_the_best_record_not_the_last() {
 
 #[test]
 fn c33_name_decodes_mac_roman() {
-    // F33: platform 1 (Macintosh) was ignored outright, so a Type 1-era name table yielded
+    // platform 1 (Macintosh) was ignored outright, so a Type 1-era name table yielded
     // nothing at all. 0x8E is "é" in Mac Roman, not a valid UTF-8 byte.
     let table = name_table(&[
         (1, 0, 0, 6, b"Caf\x8e"),
@@ -1215,7 +1214,7 @@ fn c33_name_decodes_mac_roman() {
     assert_eq!(name.family.as_deref(), Some("Famille"));
 }
 
-// ---------------------------- F39: gzip-compressed SVG documents ----------------------------
+// ---------------------------- gzip-compressed SVG documents ----------------------------
 
 /// `SVG ` (OT §SVG): version, document list offset, reserved, then the document list
 /// (one entry per document, offsets relative to the list start).
@@ -1270,7 +1269,7 @@ const SVG_DOC: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg"><g id="glyph6
 #[cfg(feature = "svg")]
 #[test]
 fn c26_gzip_svg_documents_are_decompressed() {
-    // F39: OT §SVG allows a gzip-compressed document; the raw stream went to the SVG parser
+    // OT §SVG allows a gzip-compressed document; the raw stream went to the SVG parser
     // and every gzip font failed to load.
     let font = font_with_svg(&gzip_stored(SVG_DOC));
     assert!(font.svg_glyph(GlyphId(65)).is_some(), "the document's glyph65 is reachable");
@@ -1287,7 +1286,7 @@ fn c26b_plain_svg_documents_still_parse() {
 #[cfg(feature = "svg")]
 #[test]
 fn c26c_a_document_that_cannot_be_decompressed_costs_only_itself() {
-    // Audit §4: a bad plain SVG document was only logged, a bad gzip one aborted the whole
+    // a bad plain SVG document was only logged, a bad gzip one aborted the whole
     // table. Both are now skipped per document.
     let broken: &[u8] = &[0x1f, 0x8b, 8, 0]; // gzip magic, then nothing
     let good = gzip_stored(SVG_DOC);
@@ -1317,7 +1316,7 @@ fn c26c_a_document_that_cannot_be_decompressed_costs_only_itself() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Audit B3 — a broken layout table is shaping data lost, not a font that fails to load
+// A broken layout table loses shaping data, not the whole font
 
 /// A GPOS table with one lookup carrying two subtables (OT §"Lookup List Table").
 fn gpos_two_subtables(lookup_type: u16, first: &[u8], second: &[u8]) -> Vec<u8> {
@@ -1342,7 +1341,7 @@ fn gpos_two_subtables(lookup_type: u16, first: &[u8], second: &[u8]) -> Vec<u8> 
 
 #[test]
 fn c48_a_broken_gpos_subtable_does_not_cost_the_other_subtables() {
-    // Audit B3: one unreadable subtable used to fail `parse`, so a font whose other
+    // one unreadable subtable used to fail `parse`, so a font whose other
     // subtable is perfectly good became unloadable.
     let tables = {
         let mut t = base_tables(8);
@@ -1356,7 +1355,7 @@ fn c48_a_broken_gpos_subtable_does_not_cost_the_other_subtables() {
 
 #[test]
 fn c48b_a_broken_gsub_drops_the_table_not_the_font() {
-    // Audit B3: `lookupListOffset` pointing past the end used to be fatal.
+    // `lookupListOffset` pointing past the end used to be fatal.
     let mut gsub = gsub_table(0);
     gsub[8..10].copy_from_slice(&0xffffu16.to_be_bytes()); // lookupListOffset, past the end
     let mut tables = base_tables(8);
@@ -1367,7 +1366,7 @@ fn c48b_a_broken_gsub_drops_the_table_not_the_font() {
 
 #[test]
 fn c48c_a_truncated_gdef_drops_the_table_not_the_font() {
-    // Audit B3: GDEF is optional; half a header is not a reason to refuse the font.
+    // GDEF is optional; half a header is not a reason to refuse the font.
     let mut gdef = gdef_table(Some(class_def_1(1, &[1, 2, 3, 4])), None);
     gdef.truncate(8);
     let mut tables = base_tables(8);

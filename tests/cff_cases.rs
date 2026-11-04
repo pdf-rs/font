@@ -1,5 +1,5 @@
-//! Minimal in-memory CFF fonts, one per Type 2 charstring mismatch reported in
-//! `report/pdf-rs-font-vs-specs-2026-11-02.md`.
+//! Minimal in-memory CFF fonts, one per Type 2 charstring mismatch, so a failing
+//! test names exactly one rule.
 //!
 //! The Type 2 interpreter (`src/type2.rs`) is private, so every case is observed
 //! through `CffFont::parse` -> `Font::glyph`: the advance width and the outline
@@ -201,7 +201,7 @@ fn points(glyph: &Glyph) -> Vec<(f32, f32)> {
 
 #[test]
 fn c06_hstem_takes_no_width_when_the_argument_count_is_even() {
-    // F6: `hstem` must treat an even number of arguments as "no width", exactly
+    // `hstem` must treat an even number of arguments as "no width", exactly
     // like `hstemhm` (TN5177 §4.3: the width, if present, makes the count odd).
     let mut cs = Vec::new();
     for v in [10, 20, 30, 40] {
@@ -249,7 +249,7 @@ fn c06c_vstem_takes_no_width_when_the_argument_count_is_even() {
 
 #[test]
 fn c07_roll_rotates_the_top_n_operands() {
-    // F9: `roll` must rotate the last N values left on the stack. Not the last N
+    // `roll` must rotate the last N values left on the stack. Not the last N
     // minus the two operands it just consumed, and not the window one lower.
     // `10 20 30 40 50 60 4 2 roll` -> 10 20 50 60 30 40 (TN5177 §4.3, op 12 30).
     let mut cs = Vec::new();
@@ -274,7 +274,7 @@ fn c07_roll_rotates_the_top_n_operands() {
 
 #[test]
 fn c07b_roll_may_cover_the_whole_stack() {
-    // F9: `n == stack.len()` is legal; only `n > stack.len()` is an error, so the
+    // `n == stack.len()` is legal; only `n > stack.len()` is an error, so the
     // window bound must be inclusive (everything on the stack is rolled).
     let mut cs = Vec::new();
     for v in [10, 20, 30, 40] {
@@ -306,7 +306,7 @@ fn flex1_charstring(args: [i32; 11]) -> Vec<u8> {
 
 #[test]
 fn c08_flex1_horizontal_end_point() {
-    // F7 is a false positive: 11 arguments are exactly what the code consumes.
+// Not a bug: 11 arguments are exactly what the code consumes.
     // Sum of the first ten arguments is (50, 25), |dx| > |dy|, so the end point's
     // y-value is the starting y and d6 is a dx.
     let cs = flex1_charstring([10, 5, 10, 5, 10, 5, 10, 5, 10, 5, 10]);
@@ -358,7 +358,7 @@ fn hflex1_charstring(args: [i32; 9]) -> Vec<u8> {
 
 #[test]
 fn c08c_hflex1_ends_on_the_starting_y() {
-    // F8: `hflex1` is only legal when the starting and ending points share their
+    // `hflex1` is only legal when the starting and ending points share their
     // y-value, so the last delta is dy6 = -(dy1 + dy2 + dy5), not 0.
     let cs = hflex1_charstring([10, 5, 10, 5, 10, 10, 10, 5, 10]);
     let got = points(&glyph(&build_cff(&[14], &cs), 1));
@@ -413,11 +413,11 @@ fn c08e_hflex_still_ends_flat() {
     ]);
 }
 
-// ---------------------------- F22/F23: decide, don't panic ----------------------------
+// ---------------------------- decide, don't panic ----------------------------
 
 #[test]
 fn c19_unknown_charstring_type_is_an_error() {
-    // F23: `CharstringType` is 1 or 2 (CFF §18); anything else must reject the font,
+    // `CharstringType` is 1 or 2 (CFF §18); anything else must reject the font,
     // not panic inside the interpreter setup.
     let mut extra = Vec::new();
     push_int(3, &mut extra);
@@ -428,7 +428,7 @@ fn c19_unknown_charstring_type_is_an_error() {
 
 #[test]
 fn c19b_missing_private_dict_is_not_fatal() {
-    // F22: `Private` is optional in the Top DICT (CFF §"Top DICT Data"); without it
+    // `Private` is optional in the Top DICT (CFF §"Top DICT Data"); without it
     // the private dict is empty, so `default_width_x`/`nominal_width_x` are 0.
     let mut cs = Vec::new();
     push_int(500, &mut cs); // delta width
@@ -440,7 +440,7 @@ fn c19b_missing_private_dict_is_not_fatal() {
 
 #[test]
 fn c19c_unknown_charset_format_is_an_error() {
-    // F23: charset formats are 0, 1 and 2 (CFF §"Charset"); format 3 used to panic.
+    // charset formats are 0, 1 and 2 (CFF §"Charset"); format 3 used to panic.
     let tail = [3u8];
     let data = build_cff_full(&[], true, Some(&tail), &[14], &[14]);
     assert!(CffFont::parse(&data, 0).is_err(), "charset format 3 must be rejected");
@@ -448,7 +448,7 @@ fn c19c_unknown_charset_format_is_an_error() {
 
 #[test]
 fn c19d_index_offset_zero_is_an_error() {
-    // F23: INDEX offsets are 1-based (CFF §"INDEX data"); 0 used to underflow in
+    // INDEX offsets are 1-based (CFF §"INDEX data"); 0 used to underflow in
     // `o - 1`. Corrupt the Name INDEX, which is the first one in the file.
     let mut data = vec![1, 0, 4, 1]; // header
     data.extend_from_slice(&[0, 1, 1, 0, 4]); // count 1, offSize 1, offsets [0, 4]
@@ -459,7 +459,7 @@ fn c19d_index_offset_zero_is_an_error() {
     assert!(CffFont::parse(&data, 0).is_err(), "INDEX offset 0 must be rejected");
 }
 
-// ---------------------------- F11: endchar seac ----------------------------
+// ---------------------------- endchar seac ----------------------------
 
 /// Type 2: `x0 y0 rmoveto` then a rectangle from `(x0, y0)` to `(x1, y1)`, `endchar`.
 fn rect2(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<u8> {
@@ -491,7 +491,7 @@ fn seac2(adx: i32, ady: i32, base: i32, accent: i32) -> Vec<u8> {
 
 #[test]
 fn c24_endchar_seac_composes_the_accent() {
-    // F11: `endchar` with four arguments (TN5177 Appendix C) was read as a width and
+    // `endchar` with four arguments (TN5177 Appendix C) was read as a width and
     // dropped, so the glyph came out empty.
     let tail = [0u8, 0, 34, 0, 125, 0, 171]; // charset format 0: /A, /acute, /Aacute
     let charstrings: &[&[u8]] = &[
@@ -523,7 +523,7 @@ fn c24_endchar_seac_composes_the_accent() {
 
 #[test]
 fn c24b_endchar_seac_needs_exactly_four_operands() {
-    // F11/audit C8: `endchar` is the `seac` form only with exactly `adx ady bchar
+    // `endchar` is the `seac` form only with exactly `adx ady bchar
     // achar` (plus the optional leading width). Junk operands used to be read as a
     // composition whose values happened to sit at the bottom of the stack.
     let tail = [0u8, 0, 34, 0, 125, 0, 171]; // charset format 0: /A, /acute, /Aacute
@@ -589,7 +589,7 @@ fn subr_bias(count: usize) -> i32 {
 
 #[test]
 fn c27_type2_recursive_gsubr_is_rejected() {
-    // F43: `callsubr`/`callgsubr` recursed with no depth limit, so a one-entry global
+    // `callsubr`/`callgsubr` recursed with no depth limit, so a one-entry global
     // subr that calls itself overflowed the native stack and killed the process. The
     // nesting is now capped (`MAX_SUBR_DEPTH`), the charstring fails and the glyph with
     // it — the font reports an error instead of crashing.
@@ -651,7 +651,7 @@ fn c27b_type2_nested_gsubr_still_runs() {
 
 #[test]
 fn c28_type2_deprecated_logic_and_transient_operators() {
-    // F42: `and`/`or`/`not`, `put`/`get` and `ifelse` were `error!("unimplemented")`, which
+    // `and`/`or`/`not`, `put`/`get` and `ifelse` were `error!("unimplemented")`, which
     // failed the whole font — they are deprecated but legal (TN5177 §4.4).
     //
     // The charstring stores the results of the logic operators in the transient array,
@@ -741,7 +741,7 @@ fn c28b_type2_transient_index_out_of_range_is_an_error() {
 
 #[test]
 fn c29_type2_index_with_negative_i_copies_the_top() {
-    // F44: TN5177 §4.4 — "if i is negative, the top element is copied"; the operand was
+    // TN5177 §4.4 — "if i is negative, the top element is copied"; the operand was
     // cast with `to_usize()`, which errors on a negative number and failed the glyph.
     //
     // `3 -1 index` leaves [3, 3] on the stack (the -1 is popped first, so the copy is
@@ -784,7 +784,7 @@ fn build_cff_with_encoding(encoding: &[u8], char_strings: &[&[u8]]) -> Vec<u8> {
 
 #[test]
 fn c18_encoding_supplement_may_name_a_missing_glyph() {
-    // F18: the supplement was applied with `sid_map[&sid]`, so an SID the charset does
+    // the supplement was applied with `sid_map[&sid]`, so an SID the charset does
     // not contain aborted the font. TN5176 §"Encoding" allows it: a supplement names
     // glyphs, and a font need not have them. The entry is skipped, the rest applies.
     //
@@ -802,7 +802,7 @@ fn c18_encoding_supplement_may_name_a_missing_glyph() {
 
 #[test]
 fn c17_last_charset_glyph_is_in_the_unicode_map() {
-    // F17: the map must cover every charset entry, not stop one short. Three charstrings and
+    // the map must cover every charset entry, not stop one short. Three charstrings and
     // no `Charset` entry -> the predefined ISOAdobe charset: gid 1 = SID 1 ("space"),
     // gid 2 = SID 2 ("exclam"), the last glyph in the font.
     let cs = vec![14]; // endchar
@@ -816,7 +816,7 @@ fn c17_last_charset_glyph_is_in_the_unicode_map() {
 
 #[test]
 fn c17b_zero_char_strings_does_not_panic() {
-    // F17: `glyphs.len()-1` underflows for a font with no charstrings. `Cff::slot` rejects
+    // `glyphs.len()-1` underflows for a font with no charstrings. `Cff::slot` rejects
     // such a font outright (`require!(num_glyphs >= 1)`, there is always `.notdef`), so the
     // subtraction is unreachable today; the loop still uses `saturating_sub` and this asserts
     // the guarantee it relies on rather than a panic.
@@ -826,7 +826,7 @@ fn c17b_zero_char_strings_does_not_panic() {
 
 #[test]
 fn c47_cff_name_and_weight_come_from_the_name_index_and_top_dict() {
-    // F47: the Name INDEX and the Top DICT's FamilyName/FullName/Weight were parsed and
+    // the Name INDEX and the Top DICT's FamilyName/FullName/Weight were parsed and
     // thrown away, so a bare CFF font reported no name and no weight at all.
     let mut top_dict = Vec::new();
     for (sid, op) in [(391, 3), (392, 4), (393, 2)] {

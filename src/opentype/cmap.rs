@@ -38,7 +38,7 @@ impl CMap {
             }
         }
 
-        // Reduce to `max_ranges` runs (audit §3). Closing the boundary between two runs costs
+        // Reduce to `max_ranges` runs. Closing the boundary between two runs costs
         // exactly the gap in front of it, so the widest gaps stay open and every other boundary
         // is closed. That is one sort of the gaps, instead of a full rescan and a `splice` for
         // every merge — the old loop was O(n²) on a font whose codepoints are scattered.

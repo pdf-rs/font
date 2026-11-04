@@ -48,7 +48,7 @@ fn parse_kern_format2<'a>(data: &'a [u8], table: &mut KernTable) -> Result<(), F
     // (right) already multiplied by `rowWidth` resp. by the size of one value, and the
     // kerning value lives at `kerningArrayOffset + leftClass + rightClass`. Class 0 is the
     // "does not kern" row/column the spec says always holds zeros: keeping it as a class
-    // made `array + 0 + column` read the subtable header as kerning values (audit C5).
+    // made `array + 0 + column` read the subtable header as kerning values.
     for (n, &class) in left_offsets.iter().enumerate() {
         // `firstGlyph + n` can overflow a `u16` in a hostile table, and the glyph is past
         // the class range anyway.
@@ -63,7 +63,7 @@ fn parse_kern_format2<'a>(data: &'a [u8], table: &mut KernTable) -> Result<(), F
     }
 
     // One `class_pairs` entry per distinct row/column pair — that is the size of the
-    // array the subtable really carries, not `num_left_glyphs * num_right_glyphs` (F45).
+    // array the subtable really carries, not `num_left_glyphs * num_right_glyphs`.
     let mut rows = left_offsets;
     rows.retain(|&class| class != 0);
     rows.sort_unstable();
@@ -77,7 +77,7 @@ fn parse_kern_format2<'a>(data: &'a [u8], table: &mut KernTable) -> Result<(), F
         for &right_class in &columns {
             // The cross product invents combinations the font may never have written, so an
             // address past the end of the subtable skips that cell instead of failing the
-            // whole table (audit C5).
+            // whole table.
             let address = array_off + left_class as usize + right_class as usize;
             let kern = match data.get(address ..) {
                 Some(rest) => {
@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn kern_format2_memory_follows_the_array_not_the_glyph_count() {
-        // F45: 5 000 glyphs sharing one row used to fill `glyph_pairs` with 25 M entries
+        // 5 000 glyphs sharing one row used to fill `glyph_pairs` with 25 M entries
         // (and reserve them up front). The storage is the array: one row times two
         // columns.
         let rows: Vec<u16> = std::iter::repeat(6u16).take(5000).collect();
@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn kern_format2_skips_the_do_not_kern_class() {
-        // Audit C5: class 0 is the "glyph does not kern" row/column. Keeping it as a class
+        // class 0 is the "glyph does not kern" row/column. Keeping it as a class
         // made `array + 0 + column` read the subtable header — rowWidth and the table
         // offsets — as kerning values.
         let data = format2_body(6, 10, &[0, 6], 6, &[0, 2], 20, 46, &[0, 0, 0, 0, -5, 3]);
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn kern_format2_skips_unreadable_array_addresses() {
         // The row/column cross product invents pairs the font never wrote; an address past
-        // the end of the subtable must cost that cell, not the whole table (audit C5).
+        // the end of the subtable must cost that cell, not the whole table.
         let values = [0, 0, 0, 0, -5, 3];
         let data = format2_body(6, 10, &[6, 12], 6, &[2, 4], 20, 46, &values);
         let mut table = KernTable::default();
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn kern_format2_class_range_does_not_overflow_a_glyph_id() {
-        // `firstGlyph + n` overflowed a u16 and panicked in a debug build (audit C5).
+        // `firstGlyph + n` overflowed a u16 and panicked in a debug build.
         let data = format2_body(6, 65534, &[6, 6, 6], 6, &[2], 20, 46, &[0, 0, 0, 0, -5, 3]);
         let mut table = KernTable::default();
         parse_kern_format2(&data, &mut table).expect("format 2 parses");

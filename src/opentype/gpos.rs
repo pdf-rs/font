@@ -1158,7 +1158,7 @@ mod tests {
 
     #[test]
     fn class_pairs_are_local_to_their_subtable() {
-        // Audit C2: two class-pair subtables of one lookup. Both cover glyph 20 and both
+        // two class-pair subtables of one lookup. Both cover glyph 20 and both
         // classify glyph 21 as class 1, but the first puts glyph 20 in class 1 (cell -40) and
         // the second leaves it in class 0 (cell -3). Classes are subtable-local, so the second
         // subtable must not inherit the first one's ClassDef1.
@@ -1173,7 +1173,7 @@ mod tests {
         // Classes (0, 1) here: with the first subtable's ClassDef1 merged in this was (1, 1).
         assert_eq!(two.lookup(20, 21).map(|(a, _)| a.x_advance), Some(-3));
         // Glyph 30 is covered and in class 1; the cell is 0, which still matches: the first
-        // subtable that matches a pair ends the lookup, zero or not (audit R3).
+        // subtable that matches a pair ends the lookup, zero or not.
         assert_eq!(two.lookup(30, 21).map(|(a, _)| a.x_advance), Some(0));
     }
 
@@ -1379,7 +1379,7 @@ mod tests {
 
     #[test]
     fn kerning_uses_only_the_kern_feature_and_ignores_the_merged_flat_maps() {
-        // Audit R2: a pair that only a non-`kern` lookup (here lookup 1, feature `dist`)
+        // a pair that only a non-`kern` lookup (here lookup 1, feature `dist`)
         // adjusts is not kerning, and the flat `KernTable` (which merges the classes of
         // unrelated subtables) is not a fallback for a real GPOS table.
         let words: [u16; 14] = [
@@ -1414,7 +1414,7 @@ mod tests {
 
     #[test]
     fn cursive_attachment_accumulates_along_the_chain() {
-        // Audit R5: each glyph's entry anchor meets the previous glyph's exit anchor, and the
+        // each glyph's entry anchor meets the previous glyph's exit anchor, and the
         // previous glyph has itself been raised, so a chain climbs a step per glyph.
         let mut anchors = HashMap::new();
         for glyph in 1u16 ..= 3 {
@@ -1541,7 +1541,7 @@ mod tests {
 
     #[test]
     fn a_mark_attaches_to_the_nearest_base_only() {
-        // Audit C3: base 200 carries the class-0 anchor (30,40), mark 100 its own at (10,10),
+        // base 200 carries the class-0 anchor (30,40), mark 100 its own at (10,10),
         // so the mark moves by (20,30) when it follows 200. After the unclassed glyph 201 it
         // must not fall back over that glyph to 200: the nearest preceding glyph is where a
         // mark looks, not every earlier one that happens to have an anchor for it.
@@ -1571,7 +1571,7 @@ mod tests {
 
     #[test]
     fn a_mark_attaches_to_the_nearest_mark_not_a_base() {
-        // Audit C3: mark-to-mark (6) looks for the nearest preceding mark, skipping bases.
+        // mark-to-mark (6) looks for the nearest preceding mark, skipping bases.
         // Mark 202 sits between the anchored mark 201 and mark 100, so 100 follows 202 — which
         // has no anchor for it — and must not jump back to 201.
         let words: [u16; 23] = [
@@ -1609,7 +1609,7 @@ mod tests {
 
     #[test]
     fn cursive_attachment_subtracts_the_advance_in_between() {
-        // Audit C3: glyph 40 exits at (100,20), glyph 41 enters at (10,4). The origins of the
+        // glyph 40 exits at (100,20), glyph 41 enters at (10,4). The origins of the
         // two glyphs are 500 units apart, so laying the entry anchor onto the exit anchor moves
         // glyph 41 by 100 - 10 - 500 = -410 horizontally and 20 - 4 = 16 vertically.
         let words: [u16; 20] = [
@@ -1637,7 +1637,7 @@ mod tests {
 
     #[test]
     fn a_pair_with_a_second_value_record_consumes_both_glyphs() {
-        // Audit C8d: with a value record for the second glyph the lookup resumes after it, so
+        // with a value record for the second glyph the lookup resumes after it, so
         // the pair (21,20) must not be applied on top of the pair (20,21) it overlaps.
         let words: [u16; 19] = [
             1, 30,          // format 1, coverageOffset

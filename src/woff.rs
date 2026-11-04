@@ -21,7 +21,7 @@ use nom::{
     combinator::map
 };
 
-/// How large one uncompressed WOFF table may be (audit §3). A real font's largest table runs
+/// How large one uncompressed WOFF table may be. A real font's largest table runs
 /// to a few MiB; the cap keeps a hostile `origLength` of 4 GiB from being believed.
 const MAX_TABLE_BYTES: usize = 256 * 1024 * 1024;
 
@@ -83,7 +83,7 @@ pub fn parse_woff(data: &[u8]) -> Result<OpenTypeFont, FontError> {
         let data = if compressed {
             // WOFF §"Table Directory": a table marked compressed must decompress, and
             // `origLength` says to how much. `inflate_bytes_zlib` would believe the stream
-            // instead and decode as much as it likes (audit §3), so the length is a cap.
+            // instead and decode as much as it likes, so the length is a cap.
             if entry.orig_length as usize > MAX_TABLE_BYTES {
                 return Err(FontError::Other(format!(
                     "WOFF: table {} claims {} bytes, more than a table may have",
@@ -152,7 +152,7 @@ pub fn parse_woff2(i: &[u8]) -> Result<OpenTypeFont, FontError> {
     // WOFF2 §"WOFF2 Header": `totalSfntSize` is the size of the equivalent uncompressed sfnt,
     // and the tables together are exactly that large. It is a claim by the file, so it is
     // capped, and each table's length is charged against it before a buffer that large is
-    // allocated: `entry.length` alone would allow a 4 GiB allocation (audit §3).
+    // allocated: `entry.length` alone would allow a 4 GiB allocation.
     if total_sfnt_size as usize > MAX_SFNT_BYTES {
         return Err(FontError::Other(format!(
             "WOFF2: totalSfntSize {} is larger than a font may be", total_sfnt_size)));
@@ -244,7 +244,7 @@ fn parse_glyf_t0(i: &[u8]) -> Result<Vec<Shape>, FontError> {
                 let mut outline = Outline::new();
                 // WOFF2 §"Triplet Encoding": each point is a delta from the one before, so the
                 // running position is a sum over the whole contour. Accumulating in `i16`
-                // overflows on a font whose points drift past ±32767 (audit §3), so it is
+                // overflows on a font whose points drift past ±32767, so it is
                 // summed in `i32` and turned into coordinates at the end.
                 let (mut x, mut y) = (0i32, 0i32);
                 for n_points in (&mut points).take(n_contour as usize) {

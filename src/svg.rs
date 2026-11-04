@@ -24,7 +24,7 @@ pub struct SvgTable {
     pub glyphs: HashMap<u16, SvgGlyph>
 }
 
-/// How large one SVG document of a font may be once inflated (audit §3). Font documents are
+/// How large one SVG document of a font may be once inflated. Font documents are
 /// a few KiB; the cap keeps a gzip member from expanding without bound.
 const MAX_SVG_BYTES: usize = 64 * 1024 * 1024;
 
@@ -102,7 +102,7 @@ fn read_document_list(input: &[u8]) -> Result<SvgTable, FontError> {
         let svg_data = match document_data(svg_data) {
             Ok(svg_data) => svg_data,
             // One document that cannot be decompressed must not cost the other documents,
-            // which is how a document the SVG parser rejects is treated below (audit §4).
+            // which is how a document the SVG parser rejects is treated below.
             Err(e) => {
                 warn!("SVG: glyphs {}..={}: {:?} — document skipped", start_gid, end_gid, e);
                 continue;

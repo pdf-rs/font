@@ -114,7 +114,7 @@ pub fn read_cff(data: &[u8]) -> Result<Cff, FontError> {
     let (i, _) = take(hdrSize - 4)(i)?;
     
     // TN5176 §"Name INDEX": index 0 holds the font name (the PostScript name); kept for
-    // `CffFont::name()`, it used to be parsed and discarded (F47).
+    // `CffFont::name()`, it used to be parsed and discarded.
     let (i, name_index) = index(i)?;
     let (i, dict_index) = index(i)?;
     let (i, string_index) = index(i)?;
@@ -401,7 +401,7 @@ impl<'a> CffSlot<'a> {
     /// CID-keyed fonts never match: their charset holds CIDs, not name SIDs.
     ///
     /// Takes the charset rather than reading it: `sids()` parses the whole `Charset` operator,
-    /// and a base/accent pair would otherwise pay for it twice per seac glyph (audit §3).
+    /// and a base/accent pair would otherwise pay for it twice per seac glyph.
     fn seac_gid(sids: &[SID], code: u8) -> Option<usize> {
         let sid = seac_sid(code)?;
         sids.iter().position(|&s| s == sid).map(|n| n + 1)
@@ -419,7 +419,7 @@ impl<'a> CffSlot<'a> {
             }
             outlines.push((outline, width, lsb));
         }
-        // Audit §3: parse the charset once for the whole pass, not per lookup.
+        // parse the charset once for the whole pass, not per lookup.
         let sids = if seac_glyphs.is_empty() { None } else { self.sids().ok() };
         let sids: Option<&[SID]> = sids.as_deref();
         for (gid, seac) in seac_glyphs {
@@ -554,7 +554,7 @@ impl<'a> CffSlot<'a> {
         // TN5176 §"Name INDEX" / §"Top DICT": the Name INDEX holds the font name, and
         // `FamilyName` / `FullName` / `Weight` in the Top DICT are SIDs into the String INDEX.
         // All of it used to be dropped, leaving `Name::default()` and `info.weight == None`
-        // even though the data was right there (F47).
+        // even though the data was right there.
         let font_name = self.cff.name_index.first()
             .and_then(|data| std::str::from_utf8(data).ok())
             .filter(|name| !name.is_empty())
@@ -603,7 +603,7 @@ fn weight_class(weight: &str) -> Option<u16> {
     // CFF writes the weight loosely — "SemiBold", "Semi Bold", "Demi-Bold", "ExtraLight".
     // Matching word by word read "Semi Bold" as 700 (the "bold" word) and "Extra Light" as
     // 300, so the whole string is normalised first: spaces, hyphens and underscores
-    // stripped, lowercase, then matched against the table (audit C6).
+    // stripped, lowercase, then matched against the table.
     let normalised: String = weight
         .chars()
         .filter(|c| c.is_alphanumeric())
@@ -1421,7 +1421,7 @@ mod tests {
 
     #[test]
     fn weight_class_reads_the_whole_string_first() {
-        // Audit C6: matching word by word read "Semi Bold" as 700 (the "bold" word) and
+        // matching word by word read "Semi Bold" as 700 (the "bold" word) and
         // "Extra Light" as 300 (the "light" word).
         assert_eq!(weight_class("Semi Bold"), Some(600));
         assert_eq!(weight_class("SemiBold"), Some(600));

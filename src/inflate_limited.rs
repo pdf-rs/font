@@ -1,4 +1,4 @@
-//! Bounded DEFLATE and zlib decompression (audit §3).
+//! Bounded DEFLATE and zlib decompression.
 //!
 //! `inflate::inflate_bytes` and `inflate_bytes_zlib` keep growing their output for as long as
 //! the compressed input asks them to: a few KiB of a hostile table can expand to gigabytes.

@@ -304,11 +304,11 @@ pub struct Context {
     lookahead_classes: HashMap<u16, u16>,
     rules: Vec<SequenceRule>,
     /// The rules grouped by what their first glyph has to be, so a lookup does not try every
-    /// rule of the subtable at every position (audit §3). Built by `with_index`.
+    /// rule of the subtable at every position. Built by `with_index`.
     index: RuleIndex,
 }
 
-/// Which rules can start at a given first glyph (audit §3). Each list keeps table order, and a
+/// Which rules can start at a given first glyph. Each list keeps table order, and a
 /// rule is only ever in one of them.
 #[derive(Debug, Clone, Default)]
 struct RuleIndex {
@@ -661,7 +661,7 @@ impl GSub {
                 }
                 continue;
             }
-            // Audit §3: without a context subtable no rule looks at a glyph before the one it
+            // without a context subtable no rule looks at a glyph before the one it
             // applies to, so this pass can append to a fresh run instead of splicing into the
             // old one — a splice moves the whole tail, which made a long run quadratic.
             let run = std::mem::replace(&mut out, Vec::new());
@@ -1617,7 +1617,7 @@ mod tests {
 
     #[test]
     fn use_mark_filtering_set_keeps_only_its_own_marks() {
-        // Audit C8: lookup flag 0x0010 names one `markGlyphSetsDef` set, and the `Lookup`
+        // lookup flag 0x0010 names one `markGlyphSetsDef` set, and the `Lookup`
         // carries that index as an extra field after its subtable count. Marks of other sets
         // are skipped for that lookup only.
         // Glyphs 10 and 12 are both marks; only 10 is in set 0.
@@ -1644,7 +1644,7 @@ mod tests {
 
     #[test]
     fn a_ligature_steps_over_ignored_marks() {
-        // Audit C8: a component the lookup ignores is invisible to the match, so `f` + mark +
+        // a component the lookup ignores is invisible to the match, so `f` + mark +
         // `f` ligates, and the skipped mark stays behind the ligature.
         let gdef = parse_gdef(&gdef_bytes(12, &[3], &[])).expect("GDEF 1.2 parses");
         let mut ligatures: HashMap<u16, Vec<(GlyphList, u16)>> = HashMap::new();
@@ -1664,7 +1664,7 @@ mod tests {
 
     #[test]
     fn each_lookup_runs_over_the_whole_run_in_turn() {
-        // Audit C1: OT §"Lookup List" applies each lookup across the whole run before the
+        // OT §"Lookup List" applies each lookup across the whole run before the
         // next one starts, so the second lookup here sees the first one's 20.
         let mut first = HashMap::new();
         first.insert(10u16, 20u16);
@@ -1685,7 +1685,7 @@ mod tests {
 
     #[test]
     fn a_lookup_does_not_run_on_its_own_output() {
-        // Audit C1: the position has to move past the glyphs a rule produced. Advancing by the
+        // the position has to move past the glyphs a rule produced. Advancing by the
         // net growth would leave `position` inside the output of this 1 → 2 substitution and
         // run it again on its own result, without end.
         let mut multiple = HashMap::new();
@@ -1702,7 +1702,7 @@ mod tests {
 
     #[test]
     fn the_op_budget_is_finite_and_reports_once() {
-        // Audit §3: the work a call may spend following context lookups is bounded, and the
+        // the work a call may spend following context lookups is bounded, and the
         // font is told once — not once per glyph it gives up on.
         let mut budget = OpBudget::new(0);
         let mut allowed = 0;
@@ -1715,7 +1715,7 @@ mod tests {
 
     #[test]
     fn a_context_lookup_that_names_itself_stops_when_its_budget_is_spent() {
-        // Audit §3: a context rule whose record names the lookup it sits in recurses. The
+        // a context rule whose record names the lookup it sits in recurses. The
         // nesting cap alone still allows `records^MAX_NESTING` applications — 8 records over 8
         // levels is 16 million — so the per-call budget has to stop it.
         const RECORDS: u16 = 8;
@@ -1752,7 +1752,7 @@ mod tests {
 
     #[test]
     fn context_rules_are_found_through_the_index_not_by_scanning() {
-        // Audit §3: matched_rule tried the subtable's rules in order until one matched, so a
+        // matched_rule tried the subtable's rules in order until one matched, so a
         // context with one rule per glyph cost O(rules) at every position. The index says which
         // rules may start at a glyph, and only those are tried. `skip` runs once per rule that
         // is tried, so counting its calls counts the work.
@@ -1961,7 +1961,7 @@ mod tests {
 
     #[test]
     fn a_long_run_is_substituted_in_one_pass() {
-        // Audit §3: the pass used to splice every replacement into the run, which moves the
+        // the pass used to splice every replacement into the run, which moves the
         // whole tail — O(n²) on a long run. Through the splice this takes seconds; one pass
         // does not care how long the run is.
         let words: [u16; 13] = [

@@ -431,7 +431,7 @@ pub struct State {
 /// StandardEncoding codes, with the accent shifted relative to the origin of the
 /// base character (T1 §6; TN5177 Appendix C for the Type 2 form).
 ///
-/// The shift is `adx + sbx - asb` horizontally and `ady` vertically (F41/audit C4):
+/// The shift is `adx + sbx - asb` horizontally and `ady` vertically:
 /// Type 1 measures `adx` from the composite character's own left side bearing, and
 /// the accent's `asb` operand is its left side bearing, which the accent's outline
 /// already carries — FreeType `psaux/t1decode.c::t1operator_seac` does exactly

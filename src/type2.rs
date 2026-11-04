@@ -459,7 +459,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                 // the composition happens where the other glyphs are known. FreeType's
                 // interpreter (`psintrp.c`, `cf2_cmdENDCHAR`) wants precisely four
                 // operands left at this point; extra values are producer garbage, and
-                // composing with them draws the wrong glyph (audit C8).
+                // composing with them draws the wrong glyph.
                 maybe_width(s, |n| n == 0 || n == 4);
                 if s.stack.len() == 4 {
                     let adx = s.stack[0].to_float();

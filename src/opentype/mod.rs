@@ -120,11 +120,11 @@ impl OpenTypeFont {
         // OT §GSUB/§GPOS/§GDEF are shaping data: a font that fails to parse them still draws
         // every glyph with the right advance, it only loses kerning/ligatures. Treating a
         // broken optional table as fatal made fonts every other engine renders unloadable
-        // (audit B3), so each one is dropped with a warning instead.
+        //, so each one is dropped with a warning instead.
         let gpos = match (tables.get(b"GPOS"), maxp.as_ref()) {
             (Some(data), Some(maxp)) => optional_layout("GPOS", || parse_gpos(data, &maxp)),
             // `parse_gpos` needs `num_glyphs`; without `maxp` the table cannot be read, but
-            // that is still no reason to reject a font that draws fine (audit B3).
+            // that is still no reason to reject a font that draws fine.
             (Some(_), None) => {
                 warn!("GPOS without maxp — ignored");
                 None
@@ -644,7 +644,7 @@ pub fn parse_extension(data: &[u8]) -> Result<(u16, &[u8]), FontError> {
 /// `GSUB`, `GPOS`, `GDEF` and the legacy `kern` table are shaping data: a font whose layout
 /// tables do not parse is still perfectly drawable, it only loses kerning and ligatures.
 /// Failing all of `OpenTypeFont::parse` there rejected fonts that FreeType, HarfBuzz and
-/// every browser render (audit B3).
+/// every browser render.
 fn optional_layout<T>(name: &str, f: impl FnOnce() -> Result<T, FontError>) -> Option<T> {
     match f() {
         Ok(v) => Some(v),
@@ -658,9 +658,9 @@ fn optional_layout<T>(name: &str, f: impl FnOnce() -> Result<T, FontError>) -> O
 pub fn parse_lookup_list(data: &[u8], mut inner: impl FnMut(usize, &[u8], u16, LookupFlags) -> Result<(), FontError>) -> Result<(), FontError> {
     let (i, lookup_count) = be_u16(data)?;
     for (lookup_idx, table_off) in iterator_n(i, be_u16, lookup_count).enumerate() {
-        // One unreadable lookup or subtable must not cost the font all of its others (audit
-        // B3): the callbacks only append to the lookup vector after a successful parse, so
-        // skipping a failing subtable leaves the rest of the table intact.
+        // One unreadable lookup or subtable must not cost the font all of its others: the
+        // callbacks only append to the lookup vector after a successful parse, so skipping
+        // a failing subtable leaves the rest of the table intact.
         if let Err(err) = parse_one_lookup(data, table_off as usize, lookup_idx, &mut inner) {
             warn!("shaping lookup {}: {:?} — skipped, keeping the other lookups", lookup_idx, err);
         }

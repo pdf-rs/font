@@ -488,7 +488,7 @@ pub fn charstring<'a, 'b, T, U>(mut input: &'a [u8], ctx: &'a Context<T, U>, s: 
                         if !(0.0 ..= 255.0).contains(&bchar) || !(0.0 ..= 255.0).contains(&achar) {
                             warn!("seac: character code out of range ({bchar}, {achar})");
                         } else {
-                            // F41/audit C4: `adx` is measured from this glyph's own left
+                            // `adx` is measured from this glyph's own left
                             // side bearing, and `asb` is the accent's left side bearing,
                             // which the accent's outline already carries. FreeType's
                             // `t1operator_seac` does `adx += left_bearing.x` and then
