@@ -751,6 +751,11 @@ fn float(data: &[u8]) -> ParseResult<f32> {
                         b => key!(b),
                     }
                 }
+                // CFF §"DICT data": the `f` that ends the exponent ends the
+                // number as a whole. Falling through here used to swallow the
+                // operands that follow, so `0.00048828` (nibbles 48828c8f) was
+                // read as a run of digits plus whatever bytes came next.
+                break;
             },
             0xd => reserved!(0xd),
             0xe => is_negaive = true,
@@ -1452,5 +1457,58 @@ mod tests {
         assert_eq!(weight_class("Light Bold"), None);
         assert_eq!(weight_class("Condensed"), None);
         assert_eq!(weight_class(""), None);
+    }
+}
+
+#[cfg(test)]
+mod dict_number_tests {
+    use super::{value, Value};
+
+    // CFF §"DICT data": `30` (0x1e) introduces a real, the nibbles are the
+    // digits, and `f` ends the number. Every subset CFF font WeasyPrint writes
+    // carries the FontMatrix `[0.00048828 0 0 0.00048828 0 0]`, whose first
+    // operand is `1e48828c8f`: 48828 * 10^-8.
+    const WEASY_FONTMATRIX_TAIL: &[u8] = &[0x1e, 0x48, 0x82, 0x8c, 0x8f, 0x8b, 0x8b, 0x0c, 0x04];
+
+    fn as_float(v: Value) -> f32 {
+        match v {
+            Value::Float(f) => f,
+            v => panic!("expected a real, got {:?}", v),
+        }
+    }
+
+    #[test]
+    fn real_with_negative_exponent_stops_at_its_f() {
+        let (rest, v) = value(WEASY_FONTMATRIX_TAIL).unwrap();
+        assert!((as_float(v) - 0.00048828).abs() < 1e-9, "got {:?}", v);
+        // The `f` ends the number: what follows is still the operands and the
+        // operator of the DICT, not more digits.
+        assert_eq!(rest, &[0x8b, 0x8b, 0x0c, 0x04]);
+    }
+
+    #[test]
+    fn real_with_positive_exponent() {
+        // 1.5e3 -> nibbles 1 a 5 b 3 f
+        let (rest, v) = value(&[0x1e, 0x1a, 0x5b, 0x3f, 0x8b]).unwrap();
+        assert!((as_float(v) - 1500.0).abs() < 1e-3, "got {:?}", v);
+        assert_eq!(rest, &[0x8b]);
+    }
+
+    #[test]
+    fn real_without_exponent() {
+        // -.25 -> nibbles e a 2 5 f
+        let (rest, v) = value(&[0x1e, 0xea, 0x25, 0xf0]).unwrap();
+        assert!((as_float(v) + 0.25).abs() < 1e-9, "got {:?}", v);
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn integers_are_untouched() {
+        let (rest, v) = value(&[0x8b]).unwrap();
+        match v {
+            Value::Int(0) => (),
+            v => panic!("expected 0, got {:?}", v),
+        }
+        assert!(rest.is_empty());
     }
 }
