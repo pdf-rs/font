@@ -14,7 +14,7 @@ pub use svg::SvgGlyph;
 use pathfinder_geometry::{rect::RectF, vector::Vector2F, transform2d::Transform2F};
 
 #[derive(Clone)]
-pub struct Glyph<E: Encoder> {
+pub struct Glyph<E: Encoder = crate::pathfinder_impl::OutlineEncoder> {
     /// unit 1em
     pub metrics: HMetrics,
     
@@ -23,7 +23,7 @@ pub struct Glyph<E: Encoder> {
 }
 
 #[derive(Clone)]
-pub enum Shape<E: Encoder> {
+pub enum Shape<E: Encoder = crate::pathfinder_impl::OutlineEncoder> {
     Simple(E::GlyphRef),
     Compound(Vec<(GlyphId, Transform2F)>),
     Empty
@@ -88,7 +88,7 @@ pub struct Info {
     pub unicode_ranges: [u32; 4],
 }
 
-pub trait Font<E: Encoder> {
+pub trait Font<E: Encoder = crate::pathfinder_impl::OutlineEncoder> {
     /// Return the "number of glyphs" in the font.
     ///
     /// This may or may not correlate to the actual number of "real glyphs".
@@ -705,7 +705,8 @@ pub fn font_type(data: &[u8]) -> Option<FontType> {
     Some(t)
 }
 
-pub enum FontVariant<E: Encoder> {
+#[cfg(feature = "formats")]
+pub enum FontVariant<E: Encoder = crate::pathfinder_impl::OutlineEncoder> {
     #[cfg(feature="opentype")]
     OpenType(OpenTypeFont<E>),
     #[cfg(feature="opentype")]
@@ -821,6 +822,7 @@ macro_rules! impl_variants {
         }
     };
 }
+#[cfg(feature = "formats")]
 impl_variants!{
     #[cfg(feature="opentype")]
     OpenType(OpenTypeFont<E>),
@@ -832,7 +834,51 @@ impl_variants!{
     Cff(CffFont<E>),
 }
 
-pub fn parse<E: Encoder>(data: &[u8], encoder: &mut E) -> Result<FontVariant<E>, FontError> {
+/// Parse an OpenType font into outlines.
+///
+/// This is the entry point above the PDF layer: `font` is OpenType-only there, so neither
+/// a format enum nor an encoder argument appears, and the result is the font itself rather
+/// than a `FontVariant`. `OTTO` (CFF outlines), `true` and a plain TrueType `sfnt` are read
+/// directly; `wOFF`/`wOF2` are unwrapped when the `woff` feature is on.
+///
+/// Anything else is [`FontError::UnknownMagic`]; for a font of unknown format use
+/// [`parse_any`].
+pub fn parse(data: &[u8]) -> Result<OpenTypeFont<pathfinder_impl::OutlineEncoder>, FontError> {
+    let magic: &[u8; 4] = match data.get(0 .. 4).and_then(|s| s.try_into().ok()) {
+        Some(m) => m,
+        None => return Err(FontError::Other("font: shorter than 4 bytes".into())),
+    };
+    let mut encoder = pathfinder_impl::OutlineEncoder;
+    Ok(match magic {
+        #[cfg(feature = "opentype")]
+        b"OTTO" | [0, 1, 0, 0] | b"true" => t!(OpenTypeFont::parse(data, &mut encoder)),
+
+        #[cfg(feature = "woff")]
+        b"wOFF" => t!(woff::parse_woff(data, &mut encoder)),
+
+        #[cfg(feature = "woff")]
+        b"wOF2" => t!(woff::parse_woff2(data, &mut encoder)),
+
+        magic => return Err(FontError::UnknownMagic(*magic)),
+    })
+}
+
+impl OpenTypeFont<pathfinder_impl::OutlineEncoder> {
+    /// Resolve `gid` to a single outline, composing compound glyphs.
+    ///
+    /// The outline is still in glyph space: apply the font's `font_matrix()` to get 1em.
+    pub fn glyph_outline(&self, gid: GlyphId) -> Option<pathfinder_content::outline::Outline> {
+        pathfinder_impl::flatten(self, gid)
+    }
+}
+
+/// Parse any font this crate knows how to read, dispatching on the magic.
+///
+/// This is the *PDF layer* entry point: a PDF can embed Type 1, bare CFF, TrueType or
+/// OpenType, so it has to ask what the file is. Everything above the PDF layer wants
+/// [`parse`], which is OpenType-only and names no encoder.
+#[cfg(feature = "formats")]
+pub fn parse_any<E: Encoder>(data: &[u8], encoder: &mut E) -> Result<FontVariant<E>, FontError> {
     let magic: &[u8; 4] = slice!(data, 0 .. 4).try_into().unwrap();
     info!("font magic: {:?} ({:?})", magic, String::from_utf8_lossy(&*magic));
     Ok(match magic {

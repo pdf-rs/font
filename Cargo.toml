@@ -11,6 +11,8 @@ woff = ["brotli-decompressor", "inflate"]
 type1 = ["postscript"]
 type2 = []
 opentype = []
+# `FontVariant` + `parse_any`: the format-agnostic path the PDF layer needs. Off by default.
+formats = []
 cff = ["type1", "type2"]
 postscript = []
 math = []

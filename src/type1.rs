@@ -18,7 +18,7 @@ use pathfinder_geometry::{
 use istring::TinyString;
 
 #[derive(Clone)]
-pub struct Type1Font<E: Encoder> {
+pub struct Type1Font<E: Encoder = crate::pathfinder_impl::OutlineEncoder> {
     glyphs: IndexMap<String, Glyph<E>>, // namee -> glyph
     pub codepoints: HashMap<u32, u32>, // codepoint -> glyph id
     pub unicode_map: HashMap<TinyString, u32>,

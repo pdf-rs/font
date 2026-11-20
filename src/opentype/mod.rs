@@ -46,7 +46,7 @@ use kern::parse_kern;
 use base::parse_base;
 
 #[derive(Clone)]
-pub struct OpenTypeFont<E: Encoder> {
+pub struct OpenTypeFont<E: Encoder = crate::pathfinder_impl::OutlineEncoder> {
     pub gpos: Option<GPos>,
     pub cmap: Option<CMap>,
     encoding: Option<Encoding>,

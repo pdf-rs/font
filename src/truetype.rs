@@ -66,7 +66,7 @@ pub enum GlyfShape {
 }
 
 #[derive(Clone)]
-pub struct TrueTypeFont<E: Encoder> {
+pub struct TrueTypeFont<E: Encoder = crate::pathfinder_impl::OutlineEncoder> {
     glyphs: Vec<Glyph<E>>,
     pub cmap: Option<CMap>,
     encoding: Option<Encoding>,
