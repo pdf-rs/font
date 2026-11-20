@@ -25,7 +25,7 @@ use pathfinder_geometry::{vector::Vector2F, transform2d::Transform2F, rect::Rect
 use tuple::TupleElements;
 
 #[derive(Clone)]
-pub struct CffFont<E: Encoder> {
+pub struct CffFont<E: Encoder = crate::pathfinder_impl::OutlineEncoder> {
     glyphs: Vec<Glyph<E>>,
     font_matrix: Transform2F,
     pub codepoint_map: [u16; 256],  // codepoint -> glyph index
