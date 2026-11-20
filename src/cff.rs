@@ -20,6 +20,9 @@ use nom::{
 };
 use pdf_encoding::{Encoding, glyphname_to_unicode};
 use pathfinder_content::outline::{Outline};
+
+/// Writing a CFF font from outlines, the inverse of the parser above.
+pub mod build;
 use pathfinder_geometry::{vector::Vector2F, transform2d::Transform2F, rect::RectF};
 use tuple::TupleElements;
 

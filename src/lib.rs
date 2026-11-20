@@ -240,6 +240,7 @@ pub use error::FontError;
 pub use truetype::TrueTypeFont;
 #[cfg(feature="cff")]
 pub use cff::CffFont;
+pub use cff::build::FontBuilder;
 #[cfg(feature="type1")]
 pub use type1::Type1Font;
 #[cfg(feature="opentype")]
