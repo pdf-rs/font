@@ -14,6 +14,11 @@
  - All glyphs can be accessed by name using `gid_for_name`
  - (not yet implemented: Translating codepoints into glyph names and using them for lookup)
 
+#### Writing
+ - `FontBuilder` builds a bare CFF (`/Subtype /Type1C`) from glyph outlines and advances:
+   Header, the INDEXes, a charset, Type 2 charstrings (quadratics are elevated to cubics)
+   and a Private DICT. Non-CID, no local subrs, and no encoding — a PDF supplies its own.
+
 ### Type1
  - Contains a PostScript interpreter (without file access)
  - Calling PostScript from CharStrings (used for Hinting) is not implemented. Instead they are emulated and the correct outline is produced.
